@@ -1,0 +1,1 @@
+from .gaussianpotential import GaussianPotential
