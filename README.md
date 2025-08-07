@@ -1,7 +1,7 @@
 # AceCG
 Python package for bottom-up coarse-graining
 
-## Collaborators
+## Developer Team
 
-- [@FreddyNietzky](https://github.com/FreddyNietzky)
-- [@KJAdams2000](https://github.com/KJAdams2000)
+- [@Thomas Qu](https://github.com/FreddyNietzky)
+- [@Weizhi Xue](https://github.com/KJAdams2000)
