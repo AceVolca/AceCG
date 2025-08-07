@@ -9,6 +9,11 @@ class BasePotential(ABC):
         pass
 
     @abstractmethod
+    def param_names(self) -> list[str]:
+        """Return a list of parameter names used in the potential."""
+        pass
+
+    @abstractmethod
     def dparam_names(self) -> list[str]:
         """Return a list of first derivative method names (used in dUdL)."""
         pass
