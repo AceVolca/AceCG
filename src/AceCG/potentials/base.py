@@ -9,11 +9,14 @@ class BasePotential(ABC):
         pass
 
     @abstractmethod
+<<<<<<< HEAD
     def param_names(self) -> list[str]:
         """Return a list of parameter names used in the potential."""
         pass
 
     @abstractmethod
+=======
+>>>>>>> main
     def dparam_names(self) -> list[str]:
         """Return a list of first derivative method names (used in dUdL)."""
         pass
@@ -23,9 +26,16 @@ class BasePotential(ABC):
         """Return a 2D list of second derivative method names (for Hessian)."""
         pass
 
+<<<<<<< HEAD
     def n_params(self) -> int:
         """Number of parameters this potential depends on."""
         n_pa
+=======
+    @abstractmethod
+    def n_params(self) -> int:
+        """Number of parameters this potential depends on."""
+        pass
+>>>>>>> main
 
     @abstractmethod
     def params(self) -> np.ndarray:
