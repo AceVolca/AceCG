@@ -1,9 +1,25 @@
 # AceCG/trainers/utils.py
 from ..utils.neighbor import Pair2DistanceByFrame
 
-def prepare_REM_data(u, pair2potential, start, end, cutoff, sel="all", nstlist=10, exclude=True):
+def optimizer_accepts_hessian(optimizer) -> bool:
     """
-    Extracts pairwise distances from trajectory into REM-compatible format.
+    Check whether the optimizer's `step` method accepts a 'hessian' argument.
+
+    Parameters
+    ----------
+    optimizer : object
+        An optimizer instance with a `.step()` method.
+
+    Returns
+    -------
+    bool
+        True if 'hessian' is a parameter of the .step() method, else False.
+    """
+    return hasattr(optimizer, 'step') and 'hessian' in optimizer.step.__code__.co_varnames
+
+def prepare_Trainer_data(u, pair2potential, start, end, cutoff, sel="all", nstlist=10, exclude=True, weight=None):
+    """
+    Extracts pairwise distances from trajectory into Trainer-compatible format.
 
     Parameters
     ----------
@@ -36,4 +52,4 @@ def prepare_REM_data(u, pair2potential, start, end, cutoff, sel="all", nstlist=1
         pair2potential=pair2potential, sel=sel,
         nstlist=nstlist, exclude=exclude
     )
-    return {"dist": dist, "weight": None}
+    return {"dist": dist, "weight": weight}

@@ -4,11 +4,12 @@ AceCG: A modular framework for relative entropy minimization (REM) with analytic
 
 # Core REM trainers
 from .trainers.analytic import REMTrainerAnalytic
-from .trainers.utils import prepare_REM_data
+from .trainers.utils import prepare_Trainer_data
 
 # Optimizers
 from .optimizers.base import BaseOptimizer
 from .optimizers.newton_raphson import NewtonRaphsonOptimizer
+from .optimizers.adam import AdamMaskedOptimizer
 
 # Potentials
 from .potentials.gaussian import GaussianPotential
@@ -21,9 +22,10 @@ from .utils.ffio import FFParamArray, FFParamIndexMap, ReadLmpFF, WriteLmpFF
 
 __all__ = [
     "REMTrainerAnalytic",
-    "prepare_REM_data",
+    "prepare_Trainer_data",
     "BaseOptimizer",
     "NewtonRaphsonOptimizer",
+	"AdamMaskedOptimizer",
     "GaussianPotential",
     "BasePotential",
     "dUdLByFrame",

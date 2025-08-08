@@ -4,37 +4,39 @@ from typing import List
 import numpy as np
 
 class BasePotential(ABC):
+    def __init__(self):
+        self._params = None
+        self._param_names = None
+        self._dparam_names = None
+        self._d2param_names = None
+
     @abstractmethod
     def value(self, r: np.ndarray) -> np.ndarray:
         """Compute potential energy at given distances r."""
         pass
 
-    @abstractmethod
+    # Common method
     def param_names(self) -> List[str]:
-        """Number of parameters this potential depends on."""
-        pass
-
-    @abstractmethod
+        """Parameter names of this potential depends on."""
+        return self._param_names
+    
     def dparam_names(self) -> List[str]:
         """Return a List of first derivative method names (used in dUdL)."""
-        pass
-
-    @abstractmethod
+        return self._dparam_names
+    
     def d2param_names(self) -> List[List[str]]:
         """Return a 2D List of second derivative method names (for Hessian)."""
-        pass
-
-    @abstractmethod
+        return self._d2param_names
+    
     def n_params(self) -> int:
         """Number of parameters this potential depends on."""
-        pass
+        return len(self._params)
 
-    @abstractmethod
-    def params(self) -> np.ndarray:
+    def get_params(self) -> np.ndarray:
         """Return current parameter values as 1D array."""
-        pass
+        return self._params.copy()
 
-    @abstractmethod
     def set_params(self, new_params: np.ndarray):
         """Update parameters with new values."""
-        pass	
+        assert len(new_params) == len(self._params)
+        self._params = new_params.copy()
