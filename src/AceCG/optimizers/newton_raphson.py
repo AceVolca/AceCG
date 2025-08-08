@@ -72,7 +72,7 @@ class NewtonRaphsonOptimizer(BaseOptimizer):
 
         update = np.zeros_like(grad)
         update[self.mask] = update_masked
-        self.L -= self.lr * update  # in-place update
+        self.L -= self.lr * update
 
         self.last_update = -self.lr * update
         return self.last_update

@@ -17,6 +17,18 @@ class BaseOptimizer(ABC):
         self.L = L.copy()
         self.mask = mask.copy()
         self.lr = lr
+    
+    def set_params(self, L_new: np.ndarray):
+        """
+        Update the internal parameter vector L.
+
+        Parameters
+        ----------
+        new_L : np.ndarray
+            New parameter values (must match shape of self.L).
+        """
+        assert L_new.shape == self.L.shape, "Parameter shape mismatch"
+        self.L = L_new.copy()
 
     @abstractmethod
     def step(self, grad: np.ndarray, hessian: np.ndarray = None) -> np.ndarray:
