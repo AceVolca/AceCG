@@ -3,23 +3,7 @@ import numpy as np
 from .base import BaseREMTrainer
 from ..utils.compute import dUdLByFrame, dUdL, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matrix, Hessian
 from ..utils.ffio import FFParamArray
-
-
-def optimizer_accepts_hessian(optimizer) -> bool:
-    """
-    Check whether the optimizer's `step` method accepts a 'hessian' argument.
-
-    Parameters
-    ----------
-    optimizer : object
-        An optimizer instance with a `.step()` method.
-
-    Returns
-    -------
-    bool
-        True if 'hessian' is a parameter of the .step() method, else False.
-    """
-    return hasattr(optimizer, 'step') and 'hessian' in optimizer.step.__code__.co_varnames
+from .utils import optimizer_accepts_hessian
 
 
 class REMTrainerAnalytic(BaseREMTrainer):
@@ -86,8 +70,15 @@ class REMTrainerAnalytic(BaseREMTrainer):
 
         Returns
         -------
+        dUdL_AA : np.ndarray
+            Gradient of CG potential with respect to parameters measured in AA refernce ensemble
+        dUdL_CG : np.ndarray
+            Gradient of CG potential with respect to parameters measured in CG ensemble
         dSdL : np.ndarray
             Gradient of S_rel with respect to parameters.
+        H : np.ndarray
+            The Hessian matrix of shape (n_params, n_params) representing ∂²S_rel / ∂λⱼ∂λₖ.
+            None if self.optimizer does not require Hessian
         update : np.ndarray
             Update vector applied to parameters.
         """
@@ -106,7 +97,10 @@ class REMTrainerAnalytic(BaseREMTrainer):
             H = Hessian(self.beta, d2U, dUU, dUdL_CG)
 
         # === Optimization Step ===
-        update = self.optimizer.step(dSdL, hessian=H)
+        if H:
+            update = self.optimizer.step(dSdL, hessian=H) # hessian based optimizer
+        else:
+            update = self.optimizer.step(dSdL)
         self.update_potential(self.optimizer.L)
 
         # === Logging ===

@@ -20,14 +20,14 @@ def FFParamArray(pair2potential: Dict[Tuple[str, str], BasePotential]) -> np.nda
     Parameters
     ----------
     pair2potential : dict
-        Mapping (type1, type2) to potential objects, each with `.params` method.
+        Mapping (type1, type2) to potential objects, each with `.get_params` method.
 
     Returns
     -------
     np.ndarray
         1D array of all force field parameters.
     """
-    return np.concatenate([pot.params() for pot in pair2potential.values()])
+    return np.concatenate([pot.get_params() for pot in pair2potential.values()])
 
 
 def FFParamIndexMap(pair2potential: Dict[Tuple[str, str], BasePotential]) -> List[Tuple[Tuple[str, str], str]]:
