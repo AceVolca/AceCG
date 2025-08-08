@@ -1,4 +1,8 @@
-class LennardJonesPotential ():
+# AceCG/potentials/lennardjones.py
+from .base import BasePotential
+import numpy as np
+
+class LennardJonesPotential(BasePotential):
     """
     Class representing the Lennard-Jones potential.
     This potential is commonly used to model interactions between particles.
@@ -104,22 +108,3 @@ class LennardJonesPotential ():
 
         sigma_over_r = sigma / r
         return 24 * epsilon / r**2 * (22 * sigma_over_r**10 - 5 * sigma_over_r**4)
-
-    def param_names(self):
-        return self._param_names
-
-    def dparam_names(self):
-            return self._dparam_names
-
-    def d2param_names(self):
-        return self._d2param_names
-
-    def n_params(self):
-        return len(self._params)
-
-    def params(self):
-        return self._params
-
-    def set_params(self, new_params):
-        assert len(new_params) == len(self._params)
-        self._params = new_params.copy()

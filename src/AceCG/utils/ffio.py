@@ -4,12 +4,13 @@ from typing import Dict, List, Optional, Tuple
 from ..potentials.base import BasePotential
 
 from ..potentials.gaussian import GaussianPotential
+from ..potentials.lennardjones import LennardJonesPotential
 
 
 POTENTIAL_REGISTRY = {
     "gauss/cut": GaussianPotential,
     "gauss/wall": GaussianPotential,
-    # "lj/cut": LJPotential,  # Future extension
+    "lj/cut": LennardJonesPotential,
 }
 
 
