@@ -1,5 +1,6 @@
 # AceCG/potentials/base.py
 from abc import ABC, abstractmethod
+from typing import List
 import numpy as np
 
 class BasePotential(ABC):
@@ -9,13 +10,18 @@ class BasePotential(ABC):
         pass
 
     @abstractmethod
-    def dparam_names(self) -> list[str]:
-        """Return a list of first derivative method names (used in dUdL)."""
+    def param_names(self) -> List[str]:
+        """Number of parameters this potential depends on."""
         pass
 
     @abstractmethod
-    def d2param_names(self) -> list[list[str]]:
-        """Return a 2D list of second derivative method names (for Hessian)."""
+    def dparam_names(self) -> List[str]:
+        """Return a List of first derivative method names (used in dUdL)."""
+        pass
+
+    @abstractmethod
+    def d2param_names(self) -> List[List[str]]:
+        """Return a 2D List of second derivative method names (for Hessian)."""
         pass
 
     @abstractmethod

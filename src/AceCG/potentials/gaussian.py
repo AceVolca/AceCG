@@ -8,7 +8,7 @@ class GaussianPotential(BasePotential):
         self.typ2  = typ2
         self.cutoff = cutoff
         self._params = np.array([A, r0, sigma])
-        self.param_names = ["A", "r0", "sigma"]
+        self._param_names = ["A", "r0", "sigma"]
         self._dparams = ["dA", "dr0", "dsigma"]
         self._d2params = [
             ["dA_2", "dAdr0", "dAdsigma"],
@@ -69,6 +69,9 @@ class GaussianPotential(BasePotential):
         x = r - r0
         phi = np.exp(-x**2 / (2 * sigma**2))
         return A / np.sqrt(2 * np.pi) * (x**4 - 5 * x**2 * sigma**2 + 2 * sigma**4) / sigma**7 * phi
+    
+    def param_names(self):
+        return self._param_names
 
     def dparam_names(self):
         return self._dparams
@@ -80,7 +83,7 @@ class GaussianPotential(BasePotential):
         return len(self._params)
 
     def params(self):
-        return self._params
+        return self._params.copy()
 
     def set_params(self, new_params):
         assert len(new_params) == len(self._params)
