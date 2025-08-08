@@ -12,14 +12,13 @@ class LennardJonesPotential ():
         :param epsilon: Depth of the potential well.
         :param sigma: Finite distance at which the potential is zero.
         """
-        self.epsilon = epsilon
-        self.sigma = sigma
         self.cutoff = cutoff
+        self._params = np.array([epsilon, sigma])
         self._param_names = ["epsilon", "sigma"]
-        self._dparam_names = ["dEpsilon", "dSigma"]
+        self._dparam_names = ["depsilon", "dsigma"]
         self._d2param_names = [
-            ["dEpsilon_2", "dEpsilondSigma"],
-            ["dEpsilondSigma", "dSigma_2"]
+            ["depsilon_2", "depsilondsigma"],
+            ["depsilondsigma", "dsigma_2"]
         ]
 
     def value(self, r: float) -> float:
@@ -31,11 +30,13 @@ class LennardJonesPotential ():
         """
         if r <= 0:
             raise ValueError("Distance r must be positive.")
-        
-        sigma_over_r = self.sigma / r
-        return 4 * self.epsilon * (sigma_over_r**12 - sigma_over_r**6)
 
-    def dEpsilon(self, r: float) -> float:
+        epsilon, sigma = self._params
+        
+        sigma_over_r = sigma / r
+        return 4 * epsilon * (sigma_over_r**12 - sigma_over_r**6)
+
+    def depsilon(self, r: float) -> float:
         """
         Compute the derivative of the Lennard-Jones potential with respect to epsilon.
 
@@ -45,10 +46,12 @@ class LennardJonesPotential ():
         if r <= 0:
             raise ValueError("Distance r must be positive.")
         
-        sigma_over_r = self.sigma / r
+        _, sigma = self._params
+
+        sigma_over_r = sigma / r
         return 4 * (sigma_over_r**12 - sigma_over_r**6)
 
-    def dSigma(self, r: float) -> float:
+    def dsigma(self, r: float) -> float:
         """
         Compute the derivative of the Lennard-Jones potential with respect to sigma.
 
@@ -58,10 +61,12 @@ class LennardJonesPotential ():
         if r <= 0:
             raise ValueError("Distance r must be positive.")
 
-        sigma_over_r = self.sigma / r
-        return 24 * self.epsilon / r * (2 * sigma_over_r**12 - sigma_over_r**6)
+        epsilon, sigma = self._params
 
-    def dEpsilon_2(self, r: float) -> float:
+        sigma_over_r = sigma / r
+        return 24 * epsilon / r * (2 * sigma_over_r**11 - sigma_over_r**5)
+
+    def depsilon_2(self, r: float) -> float:
         """
         Compute the second derivative of the Lennard-Jones potential with respect to epsilon.
 
@@ -70,7 +75,7 @@ class LennardJonesPotential ():
         """
         return 0.0
 
-    def dEpsilondSigma(self, r: float) -> float:
+    def depsilondsigma(self, r: float) -> float:
         """
         Compute the mixed derivative of the Lennard-Jones potential with respect to epsilon and sigma.
 
@@ -80,10 +85,12 @@ class LennardJonesPotential ():
         if r <= 0:
             raise ValueError("Distance r must be positive.")
 
-        sigma_over_r = self.sigma / r
-        return 24 * self.epsilon / r * ( 2 * sigma_over_r**12 - sigma_over_r**6)
+        epsilon, sigma = self._params
 
-    def dSigma_2(self, r: float) -> float:
+        sigma_over_r = sigma / r
+        return 24 / r * (2 * sigma_over_r**11 - sigma_over_r**5)
+
+    def dsigma_2(self, r: float) -> float:
         """
         Compute the second derivative of the Lennard-Jones potential with respect to sigma.
 
@@ -93,8 +100,10 @@ class LennardJonesPotential ():
         if r <= 0:
             raise ValueError("Distance r must be positive.")
         
-        sigma_over_r = self.sigma / r
-        return 24 * self.epsilon / r**2 * (22 * sigma_over_r**10 - 5 * sigma_over_r**4)
+        epsilon, sigma = self._params
+
+        sigma_over_r = sigma / r
+        return 24 * epsilon / r**2 * (22 * sigma_over_r**10 - 5 * sigma_over_r**4)
 
     def param_names(self):
         return self._param_names
@@ -109,7 +118,7 @@ class LennardJonesPotential ():
         return len(self._params)
 
     def params(self):
-        return [self.epsilon, self.sigma]
+        return self._params
 
     def set_params(self, new_params):
         assert len(new_params) == len(self._params)
