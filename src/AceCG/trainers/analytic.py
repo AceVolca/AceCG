@@ -97,14 +97,14 @@ class REMTrainerAnalytic(BaseREMTrainer):
             H = Hessian(self.beta, d2U, dUU, dUdL_CG)
 
         # === Optimization Step ===
-        if H:
+        if H is not None:
             update = self.optimizer.step(dSdL, hessian=H) # hessian based optimizer
         else:
             update = self.optimizer.step(dSdL)
         self.update_potential(self.optimizer.L)
 
         # === Logging ===
-        if self.logger:
+        if self.logger is not None:
             mask_ratio = np.mean(self.optimizer.mask.astype(float))
             self.logger.add_scalar("REM/mask_ratio", mask_ratio, step_index)
             self.logger.add_scalar("REM/lr", getattr(self.optimizer, "lr", np.nan), step_index)
@@ -114,3 +114,4 @@ class REMTrainerAnalytic(BaseREMTrainer):
                 self.logger.add_scalar("REM/hessian_cond", np.linalg.cond(H), step_index)
 
         return dUdL_AA, dUdL_CG, dSdL, H, update
+
