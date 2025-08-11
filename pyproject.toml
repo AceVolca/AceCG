@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "AceCG"
+version = "0.1.0"
+description = "Python package for bottom-up coarse-graining"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+authors = [
+    { name="Chengxi (Ace) Yang", email="ycxace@gmail.com" },
+    { name="Sheng (Thomas) Qu", email="tqu@uchicago.edu" },
+    { name="Weizhi Xue", email="weizhixue@uchicago.edu" },
+]
+requires-python = ">=3.8"
+
+dependencies = [
+    "numpy>=1.21",
+    "scipy>=1.7",
+]
+
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/AceVolca/AceCG"
+"Bug Tracker" = "https://github.com/AceVolca/AceCG/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
