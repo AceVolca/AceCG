@@ -1,9 +1,3 @@
-<<<<<<< HEAD
-# Load packages
-import AceCG.potentials as cgp
-import AceCG.Compute as com
-import AceCG.NeighborTools as nt
-=======
 """
 AceCG: A modular framework for relative entropy minimization (REM) with analytic and neural potentials.
 """
@@ -45,4 +39,3 @@ __all__ = [
     "ReadLmpFF",
     "WriteLmpFF",
 ]
->>>>>>> 95756921103cf82eb311687791547e42f6f76f88

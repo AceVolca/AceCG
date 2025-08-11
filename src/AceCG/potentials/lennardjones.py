@@ -32,8 +32,6 @@ class LennardJonesPotential(BasePotential):
         :param r: Distance between two particles.
         :return: The value of the Lennard-Jones potential at distance r.
         """
-        if r <= 0:
-            raise ValueError("Distance r must be positive.")
 
         epsilon, sigma = self._params
         
@@ -47,8 +45,6 @@ class LennardJonesPotential(BasePotential):
         :param r: Distance between two particles.
         :return: The derivative of the potential with respect to epsilon at distance r.
         """
-        if r <= 0:
-            raise ValueError("Distance r must be positive.")
         
         _, sigma = self._params
 
@@ -62,8 +58,6 @@ class LennardJonesPotential(BasePotential):
         :param r: Distance between two particles.
         :return: The derivative of the potential with respect to sigma at distance r.
         """
-        if r <= 0:
-            raise ValueError("Distance r must be positive.")
 
         epsilon, sigma = self._params
 
@@ -86,8 +80,6 @@ class LennardJonesPotential(BasePotential):
         :param r: Distance between two particles.
         :return: The mixed derivative of the potential at distance r.
         """
-        if r <= 0:
-            raise ValueError("Distance r must be positive.")
 
         epsilon, sigma = self._params
 
@@ -101,8 +93,6 @@ class LennardJonesPotential(BasePotential):
         :param r: Distance between two particles.
         :return: The second derivative of the potential with respect to sigma at distance r.
         """
-        if r <= 0:
-            raise ValueError("Distance r must be positive.")
         
         epsilon, sigma = self._params
 
