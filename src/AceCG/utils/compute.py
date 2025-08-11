@@ -208,4 +208,51 @@ def Hessian(
     -----
     This is used in second-order optimization or uncertainty quantification of relative entropy minimization (REM).
     """
+
     return beta * (-d2UdLjdLk + beta * dUdLj_dUdLk - beta * np.outer(dUdL, dUdL))
+
+def KL_divergence(p: np.ndarray, q: np.ndarray) -> float:
+    """
+    Compute the discrete Kullback–Leibler (KL) divergence D_KL(p || q).
+
+    This function measures how one discrete probability distribution `p`
+    diverges from a second distribution `q`:
+
+        D_KL(p || q) = Σ_i p_i * log(p_i / q_i)
+
+    A small constant (1e-9) is added to both `p` and `q` to avoid numerical
+    issues when any entry is zero.
+
+    Parameters
+    ----------
+    p : np.ndarray
+        1D array of non-negative values representing the first probability
+        distribution. Should sum to ~1. Shape: (N,).
+    q : np.ndarray
+        1D array of non-negative values representing the second probability
+        distribution. Should sum to ~1. Shape must match `p`.
+
+    Returns
+    -------
+    divergence : float
+        The KL divergence D_KL(p || q). Always >= 0; equals 0 only if
+        `p` and `q` are identical (within numerical precision).
+
+    Notes
+    -----
+    - This is the **discrete** version of KL divergence, assuming `p` and `q`
+      are defined over the same set of N categories.
+    - The addition of 1e-9 prevents log(0) and division-by-zero errors, but
+      slightly biases the result for extremely sparse distributions.
+    - KL divergence is not symmetric: D_KL(p || q) ≠ D_KL(q || p).
+
+    Examples
+    --------
+    >>> p = np.array([0.5, 0.5])
+    >>> q = np.array([0.9, 0.1])
+    >>> KL_divergence(p, q)
+    0.510825623...
+    """
+    p += 1E-9
+    q += 1E-9
+    return np.sum(p * (np.log(p) - np.log(q)))
