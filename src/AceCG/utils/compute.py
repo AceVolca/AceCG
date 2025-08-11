@@ -211,6 +211,7 @@ def Hessian(
 
     return beta * (-d2UdLjdLk + beta * dUdLj_dUdLk - beta * np.outer(dUdL, dUdL))
 
+
 def KL_divergence(p: np.ndarray, q: np.ndarray) -> float:
     """
     Compute the discrete Kullback–Leibler (KL) divergence D_KL(p || q).
@@ -256,3 +257,4 @@ def KL_divergence(p: np.ndarray, q: np.ndarray) -> float:
     p += 1E-9
     q += 1E-9
     return np.sum(p * (np.log(p) - np.log(q)))
+
