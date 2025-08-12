@@ -6,9 +6,11 @@ class AdamMaskedOptimizer(BaseOptimizer):
     Adam optimizer with masked parameter updates.
 
     Supports standard Adam logic but only updates parameters where mask=True.
+    
+    Support random noise pertubation during the optimization
     """
 
-    def __init__(self, L, mask, lr=1e-2, beta1=0.9, beta2=0.999, eps=1e-8):
+    def __init__(self, L, mask, lr=1e-2, beta1=0.9, beta2=0.999, eps=1e-8, noise_sigma=0.0, seed=None):
         super().__init__(L, mask, lr)
         self.beta1 = beta1
         self.beta2 = beta2
@@ -41,9 +43,15 @@ class AdamMaskedOptimizer(BaseOptimizer):
 
         m_hat = self.m / (1 - self.beta1 ** self.t)
         v_hat = self.v / (1 - self.beta2 ** self.t)
+        denom = np.sqrt(v_hat) + self.eps
+        precond = 1.0 / denom
 
         update = np.zeros_like(g)
         update[self.mask] = self.lr * m_hat[self.mask] / (np.sqrt(v_hat[self.mask]) + self.eps)
+        if self.noise_sigma > 0.0:
+            z = np.zeros_like(g)
+            z[self.mask] = self.rng.standard_normal(np.count_nonzero(self.mask)).astype(self.L.dtype, copy=False)
+            update[self.mask] += (self.noise_sigma * self.lr) * (z[self.mask] * precond[self.mask])
 
         self.L -= update
         self.last_update = -update
