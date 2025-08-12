@@ -44,7 +44,6 @@ jobs:
     name: Publish to TestPyPI (OIDC)
     needs: build
     runs-on: ubuntu-latest
-    environment: pypi-release
     permissions:
       id-token: write
       contents: read
