@@ -8,7 +8,8 @@ AceCG/                         # Main package root
 │   └── newton_raphson.py     # Newton-Raphson optimizer using masked Hessian
 ├── potentials/               # Coarse-grained potential function modules
 │   ├── base.py               # Abstract BasePotential interface
-│   └── gaussian.py           # Gaussian pair potential implementation
+│   ├── gaussian.py           # Gaussian pair potential implementation
+│   └── lennardjones.py       # 12-6 LennardJones pair potential implementation
 ├── trainers/                 # REM training logic (analytic & NN)
 │   ├── base.py               # BaseREMTrainer interface for strategy pattern
 │   ├── analytic.py           # REMTrainer for analytical (non-NN) potentials
