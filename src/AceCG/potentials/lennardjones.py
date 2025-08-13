@@ -8,7 +8,7 @@ class LennardJonesPotential(BasePotential):
     This potential is commonly used to model interactions between particles.
     """
 
-    def __init__(self, epsilon: float, sigma: float, cutoff: float) -> None:
+    def __init__(self, typ1, typ2, epsilon: float, sigma: float, cutoff: float) -> None:
         """
         Initialize the Lennard-Jones potential with parameters epsilon and sigma.
         V_LJ (r) = 4ε[(σ/r)¹² - (σ/r)⁶]
@@ -16,6 +16,8 @@ class LennardJonesPotential(BasePotential):
         :param epsilon: Depth of the potential well.
         :param sigma: Finite distance at which the potential is zero.
         """
+        self.typ1  = typ1
+        self.typ2  = typ2
         self.cutoff = cutoff
         self._params = np.array([epsilon, sigma])
         self._param_names = ["epsilon", "sigma"]

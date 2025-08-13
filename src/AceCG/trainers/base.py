@@ -1,8 +1,8 @@
 # AceCG/trainers/base.py
 from abc import ABC, abstractmethod
 
-class BaseREMTrainer(ABC):
-    def __init__(self, potential, optimizer, beta: float, logger=None):
+class BaseTrainer(ABC):
+    def __init__(self, potential, optimizer, beta=None, logger=None):
         self.potential = potential  # dict for analytic backend, or NN wrapper for torch
         self.optimizer = optimizer
         self.beta = beta

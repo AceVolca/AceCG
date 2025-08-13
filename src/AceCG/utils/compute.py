@@ -214,7 +214,7 @@ def Hessian(
 
 def KL_divergence(p: np.ndarray, q: np.ndarray) -> float:
     """
-    Compute the discrete Kullback–Leibler (KL) divergence D_KL(p || q).
+    Compute the discrete Kullback-Leibler (KL) divergence D_KL(p || q).
 
     This function measures how one discrete probability distribution `p`
     diverges from a second distribution `q`:
@@ -246,15 +246,81 @@ def KL_divergence(p: np.ndarray, q: np.ndarray) -> float:
     - The addition of 1e-9 prevents log(0) and division-by-zero errors, but
       slightly biases the result for extremely sparse distributions.
     - KL divergence is not symmetric: D_KL(p || q) ≠ D_KL(q || p).
-
-    Examples
-    --------
-    >>> p = np.array([0.5, 0.5])
-    >>> q = np.array([0.9, 0.1])
-    >>> KL_divergence(p, q)
-    0.510825623...
     """
     p += 1E-9
     q += 1E-9
     return np.sum(p * (np.log(p) - np.log(q)))
 
+
+def dUdLByBin(
+    dUdL_frame: np.ndarray,
+    bin_idx_frame: np.ndarray,
+    frame_weight: Optional[np.ndarray] = None
+): # compute ⟨dU/dλⱼ⟩_CG|s = ⟨dU/dλⱼδ[s(r)-s]⟩ / ⟨δ[s(r)-s]⟩
+    """
+    Compute conditional averages of dU/dλ over histogram bins of a collective variable.
+
+    Groups per-frame dU/dλ values by discrete bin indices (e.g., histogram bins
+    of a reaction coordinate s(r)) and computes:
+
+        dUdL_bin[idx]     = ⟨dU/dλ_j δ[s(r) - s_bin]⟩_CG
+        p_bin[idx]        = ⟨δ[s(r) - s_bin]⟩_CG
+        dUdL_given_bin[idx] = ⟨dU/dλ_j⟩_CG | s_bin
+
+    where δ[...] is the Kronecker delta selecting frames in the given bin.
+    Weighted averages are computed using `frame_weight` if provided.
+
+    Parameters
+    ----------
+    dUdL_frame : np.ndarray
+        Array of per-frame derivatives, shape (n_frames, n_dparams).
+        Typically the output from `dUdLByFrame`.
+    bin_idx_frame : np.ndarray
+        1D integer array of length n_frames, assigning each frame to a bin
+        index (e.g., histogram bin of reaction coordinate).
+    frame_weight : np.ndarray, optional
+        1D array of length n_frames giving weights for each frame
+        (e.g., reweighting factors). If None, all frames are weighted equally.
+        Will be normalized to sum to 1 internally.
+
+    Returns
+    -------
+    dUdL_bin : dict[int, np.ndarray]
+        Weighted numerator term for each bin:
+        ⟨dU/dλ_j δ[s(r) - s_bin]⟩_CG.
+        Value shape: (n_dparams,).
+    p_bin : dict[int, float]
+        Probability mass in each bin:
+        ⟨δ[s(r) - s_bin]⟩_CG.
+        This is the sum of normalized frame weights in that bin.
+    dUdL_given_bin : dict[int, np.ndarray]
+        Conditional average in each bin:
+        ⟨dU/dλ_j⟩_CG | s_bin.
+        Value shape: (n_dparams,).
+        Should satisfy:
+            dUdL_bin[idx] / p_bin[idx] ≈ dUdL_given_bin[idx]
+
+    Notes
+    -----
+    - The equality above holds within numerical precision
+    - The helper function `dUdL(...)` must accept the subset of dUdL values
+      and weights and return the weighted average over frames in the bin.
+    - Bin indices in `bin_idx_frame` need not be contiguous; any integer
+      values are accepted.
+    """
+    if frame_weight is None:
+        frame_weight = np.ones(len(dUdL_frame))
+    frame_weight /= frame_weight.sum()
+    
+    dUdL_bin = {} # {bin_idx: weighted average of dUdL at this bin, ⟨dU/dλⱼδ[s(r)-s]⟩_CG}
+    p_bin = {} # {bin_idx: probability at this bin, <δ[s(r)-s]>_CG}
+    dUdL_given_bin = {} # {bin_idx: ⟨dU/dλⱼ⟩_CG|s}
+    idx_set = set(bin_idx_frame)
+    
+    for idx in idx_set:
+        frame_mask = bin_idx_frame == idx
+        dUdL_bin[idx] = dUdL_frame[frame_mask].T @ frame_weight[frame_mask]
+        p_bin[idx] = np.sum(frame_weight[frame_mask])
+        dUdL_given_bin[idx] = dUdL(dUdL_frame[frame_mask], frame_weight[frame_mask])
+
+    return dUdL_bin, p_bin, dUdL_given_bin

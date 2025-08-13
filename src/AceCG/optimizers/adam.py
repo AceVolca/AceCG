@@ -21,6 +21,8 @@ class AdamMaskedOptimizer(BaseOptimizer):
         self.v = np.zeros_like(L)
 
         self.last_update = None
+        self.noise_sigma = float(noise_sigma)
+        self.rng = np.random.default_rng(seed)
 
     def step(self, grad: np.ndarray) -> np.ndarray:
         """
