@@ -251,8 +251,7 @@ class MSETrainerAnalytic(BaseTrainer):
         idx_set = set(CG_bin_idx_frame)
         dErrdL_bin = {}
         for idx in idx_set:
-            dErrdL_bin[idx] = bin_width * (pmf_CG[idx] - pmf_AA[idx]) * \
-                              (dUdL_CG_given_bin[idx] - dUdL_CG)
+            dErrdL_bin[idx] = bin_width * (pmf_CG[idx] - pmf_AA[idx]) * (dUdL_CG_given_bin[idx] - dUdL_CG)
 
         # Sum over bins (missing bins contribute zero)
         dErrdL = 0

@@ -5,9 +5,12 @@ from collections import defaultdict
 from MDAnalysis.lib.distances import distance_array
 from MDAnalysis import Universe
 from MDAnalysis.core.groups import Atom, AtomGroup
+from MDAnalysis.lib.nsgrid import FastNS
+from MDAnalysis.lib.distances import calc_bonds
 
-def AtomDistance(u: Universe, a: Atom, b: Atom) -> float:  # a,b: mda.atom
-    return distance_array(a.position, b.position, box=u.dimensions)[0][0]
+def AtomDistance(u: Universe, a: Atom, b: Atom) -> float:
+    """Efficient single-pair distance with PBC support."""
+    return calc_bonds(a.position, b.position, box=u.dimensions)[0]
 
 
 def ComputeNeighborList(
@@ -17,7 +20,7 @@ def ComputeNeighborList(
     exclude: bool = True,
 ) -> List[List[int]]:
     """
-    Compute neighbor lists for each CG site in a given Universe.
+    Compute neighbor lists for each CG site using FastNS (grid-based neighbor search).
 
     Parameters
     ----------
@@ -40,17 +43,23 @@ def ComputeNeighborList(
     if frame is not None:
         u.trajectory[frame]
 
-    coords = u.atoms.positions
-    resids = u.atoms.resids
-    dist_mat = distance_array(coords, coords, box=u.dimensions)
+    positions = u.atoms.positions
+    box = u.dimensions  # Must be [lx, ly, lz, alpha, beta, gamma]
 
-    neighbor_list: List[List[int]] = []
-    for i in range(len(coords)):
-        mask = (dist_mat[i] < cutoff) & (dist_mat[i] > 1e-6)
-        if exclude: # exlude all bonded neighbors
-            mask &= (resids != resids[i])
-        neighbors = np.where(mask)[0].tolist()
-        neighbor_list.append(neighbors)
+    resids = u.atoms.resids
+    n_atoms = len(positions)
+
+    # Use FastNS for neighbor search
+    ns = FastNS(cutoff, positions, box=box)
+    pairs = ns.self_search().get_pairs()  # shape: (N_pairs, 2)
+
+    # Build neighbor list from pairs
+    neighbor_list = [[] for _ in range(n_atoms)]
+    for i, j in pairs:
+        if exclude and resids[i] == resids[j]:
+            continue
+        neighbor_list[i].append(j)
+        neighbor_list[j].append(i)  # symmetric
 
     return neighbor_list
 
@@ -102,39 +111,44 @@ def NeighborList2Pair(
 
     Notes
     -----
-    - Neighbor list construction uses `ComputeNeighborList(u, cutoff, frame, exclude)`.
     - The MDAnalysis selection `sel` is combined with atom type filters to reduce
       the number of candidate atoms.
     - Distance filtering is refined per pair type by using each potential's `.cutoff`.
-    - Neighbor detection is unidirectional: if (i,j) is stored, (j,i) is not
-      automatically added.
     """
     if frame is not None:
         u.trajectory[frame]
 
-    neigh_list = ComputeNeighborList(u, cutoff, frame, exclude)
+    sel_atoms = u.select_atoms(sel)
+    positions = sel_atoms.positions
+    box = u.dimensions
+    indices = sel_atoms.indices  # map to u.atoms
+
+    # Build a type lookup table for atoms in selection
+    index2atom = {i: a for i, a in zip(indices, sel_atoms)}
+
+    # Use FastNS on selected atoms
+    ns = FastNS(cutoff, positions, box=box)
+    pairs = ns.self_search().get_pairs()
+
     pair2atom = defaultdict(list)
-    
-    # Pre-cache atom groups by type for faster lookup
-    type_groups: Dict[str, AtomGroup] = {}
-    for pair in pair2potential:
-        t1, t2 = pair
-        if t1 not in type_groups:
-            type_groups[t1] = u.select_atoms(f"type {t1} and {sel}")
-        if t2 not in type_groups:
-            type_groups[t2] = u.select_atoms(f"type {t2} and {sel}")
 
-    for pair in pair2potential:
-        typ1_atoms = type_groups[pair[0]]
-        typ2_atoms = type_groups[pair[1]]
-        typ2_indices = set(a.index for a in typ2_atoms) # for faster `in` check
+    for ii, jj in pairs:
+        i = indices[ii]  # real atom index in u.atoms
+        j = indices[jj]
+        a = index2atom[i]
+        b = index2atom[j]
 
-        for a in typ1_atoms:
-            for j in neigh_list[a.index]:
-                if j in typ2_indices:
-                    b = u.atoms[j]
-                    if AtomDistance(u, a, b) < pair2potential[pair].cutoff: # record atom pair within potential cutoff
-                        pair2atom[pair].append((a, b))
+        if exclude and a.resid == b.resid:
+            continue
+
+        ti, tj = a.type, b.type
+
+        # check both (ti, tj) and (tj, ti)
+        for key in [(ti, tj), (tj, ti)]:
+            if key in pair2potential:
+                d = distance_array(a.position, b.position, box=box)[0, 0]
+                if d < pair2potential[key].cutoff:
+                    pair2atom[key].append((a, b) if key == (ti, tj) else (b, a))
 
     return pair2atom
 
@@ -210,9 +224,14 @@ def Pair2DistanceByFrame(
         if update and (frame - start) % nstlist == 0: # update neighbor list
             pair2atom = NeighborList2Pair(u, pair2potential, sel, cutoff, frame, exclude)
 
-        for pair, tuples in pair2atom.items(): # read atom_pairs corresponding to the pair potential
-            pair2distance_frame[frame][pair] = np.array([
-                AtomDistance(u, a1, a2) for a1, a2 in tuples
-            ])
+        for pair, tuples in pair2atom.items():
+            if not tuples:
+                pair2distance_frame[frame][pair] = np.array([])
+                continue
+
+            a_positions = np.array([a1.position for a1, _ in tuples])
+            b_positions = np.array([a2.position for _, a2 in tuples])
+
+            pair2distance_frame[frame][pair] = calc_bonds(a_positions, b_positions, box=u.dimensions)
 
     return pair2distance_frame
