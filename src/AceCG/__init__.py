@@ -12,7 +12,8 @@ from .optimizers.base import BaseOptimizer
 from .optimizers.newton_raphson import NewtonRaphsonOptimizer
 from .optimizers.adam import AdamMaskedOptimizer
 from .optimizers.adamW import AdamWMaskedOptimizer
-from. optimizers.rmsprop import RMSpropMaskedOptimizer
+from .optimizers.rmsprop import RMSpropMaskedOptimizer
+from .optimizers.multithreaded.adam import MTAdamOptimizer
 
 # Potentials
 from .potentials.gaussian import GaussianPotential
