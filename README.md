@@ -3,6 +3,7 @@ A flexible Python package for bottom-up coarse-graining, combining statistical m
 
 ## Developer Team
 
+- [@Ace Yang](https://github.com/AceVolca)
 - [@Thomas Qu](https://github.com/FreddyNietzky)
 - [@Weizhi Xue](https://github.com/KJAdams2000)
 - [@Ivan Kuang](https://github.com/Miku-keai)
