@@ -1,2 +1,4 @@
 Python>=3.8
 numpy
+MDAnalysis>=2.3
+numba>=0.56
