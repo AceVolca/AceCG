@@ -1,5 +1,5 @@
 # AceCG
-Python package for bottom-up coarse-graining
+A flexible Python package for bottom-up coarse-graining, combining statistical mechanics and optimization methods for analytic and machine-learned potentials.
 
 ## Developer Team
 
