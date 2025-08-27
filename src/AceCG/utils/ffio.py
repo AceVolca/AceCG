@@ -1,7 +1,8 @@
 # AceCG/utils/ffio.py
 import numpy as np
+import fnmatch, re
 from scipy.optimize import lsq_linear
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Tuple, Iterable, Optional, List
 from ..potentials.base import BasePotential
 
 from ..potentials.gaussian import GaussianPotential
@@ -48,6 +49,109 @@ def FFParamIndexMap(pair2potential: Dict[Tuple[str, str], BasePotential]) -> Lis
         for name in pot.param_names():
             index_map.append((pair, name))
     return index_map
+
+
+def BuildGlobalMask(
+    pair2potential: Dict[Tuple[str, str], BasePotential],
+    patterns: Optional[Dict[Tuple[str, str], Iterable[str]]] = None,
+    mode: str = "freeze",
+    strict: bool = False,
+    case_sensitive: bool = True,
+    global_patterns: Optional[Iterable[str]] = None,
+) -> np.ndarray:
+    """
+    Build a boolean mask aligned with FFParamArray(pair2potential),
+    where True = trainable, False = frozen.
+
+    Matching is per-pair and based on param_names() strings.
+
+    Pattern syntax
+    --------------
+    • Exact match: "A_0"
+    • Glob (default): 
+        - "A*"     → matches "A", "A0", "A_0", "ABC"  (any name starting with "A")
+        - "A_*"    → matches "A_0", "A_sigma" (requires the underscore)
+        - "*r0*"   → matches any name containing "r0"
+    • Regex (prefix with "re:"):
+        - "re:^A$"     → matches only the exact name "A"
+        - "re:^A_\\d+$" → matches "A_0", "A_1", etc.
+
+    Parameters
+    ----------
+    pair2potential : dict[(type1,type2) -> BasePotential]
+        Potentials concatenated by FFParamArray; iteration order must match FFParamArray.
+    patterns : dict[(type1,type2) -> Iterable[str]], optional
+        Pair-specific patterns.
+    mode : {"freeze","train"}, default "freeze"
+        - "freeze": black-list mode (all trainable by default, matching ones are frozen).
+        - "train" : white-list mode (all frozen by default, matching ones are trainable).
+    strict : bool, default False
+        If True, raise if a pattern matches no parameter names.
+    case_sensitive : bool, default True
+        Match case-sensitively.
+    global_patterns : list of str, optional
+        Patterns applied to all pairs in addition to pair-specific patterns.
+        Example: ["A_*"] freezes/trains every parameter named like A_* in all pairs.
+
+    Returns
+    -------
+    mask : np.ndarray of bool
+        Global mask aligned with FFParamArray order.
+        True = trainable, False = frozen.
+    
+    Examples
+    -------
+
+    """
+    # compute global offsets
+    pair_offsets = {}
+    total = 0
+    for pair, pot in pair2potential.items():
+        pair_offsets[pair] = total
+        total += pot.n_params()
+
+    if mode not in ("freeze","train"):
+        raise ValueError(f"mode must be 'freeze' or 'train', got {mode}")
+
+    default_train = (mode == "freeze")  # freeze模式：默认True, train模式：默认False
+    mask = np.full(total, default_train, dtype=bool)
+
+    def maybe_norm(s): return s if case_sensitive else s.lower()
+
+    # iterate pairs
+    for pair, pot in pair2potential.items():
+        base = pair_offsets[pair]
+        local_names = list(pot.param_names())
+        norm_names  = [maybe_norm(n) for n in local_names]
+
+        # collect patterns for this pair
+        pats = []
+        if global_patterns: pats.extend(global_patterns)
+        if patterns and pair in patterns: pats.extend(patterns[pair])
+
+        for pat in pats:
+            use_regex = pat.startswith("re:")
+            pat_body = pat[3:] if use_regex else pat
+            hits = []
+            if use_regex:
+                flags = 0 if case_sensitive else re.IGNORECASE
+                regex = re.compile(pat_body, flags=flags)
+                hits = [i for i,name in enumerate(local_names) if regex.search(name)]
+            else:
+                pat_cmp = maybe_norm(pat_body)
+                hits = [i for i,n in enumerate(norm_names) if fnmatch.fnmatch(n, pat_cmp)]
+
+            if not hits and strict:
+                raise KeyError(f"No params matched pattern '{pat}' for pair {pair}. "
+                               f"Available: {local_names}")
+
+            for i_local in hits:
+                gi = base + i_local
+                if mode == "freeze":
+                    mask[gi] = False
+                else:  # "train"
+                    mask[gi] = True
+    return mask
         
 
 # MultiGaussian I/O stuffs
