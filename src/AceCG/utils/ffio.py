@@ -152,6 +152,35 @@ def BuildGlobalMask(
                 else:  # "train"
                     mask[gi] = True
     return mask
+
+
+def DescribeMask(mask: np.ndarray, pair2potential: Dict[Tuple[str, str], BasePotential]) -> str:
+    """
+    Pretty-print a summary of which parameters are trainable vs frozen
+    according to the given mask.
+
+    Parameters
+    ----------
+    mask : np.ndarray of bool
+        Global mask aligned with FFParamArray order (True=trainable, False=frozen).
+    pair2potential : dict
+        Mapping (type1,type2) -> BasePotential; must match order used in FFParamArray.
+
+    Returns
+    -------
+    report : str
+        A formatted string listing trainable/frozen parameters for each pair.
+    """
+    idx_map = FFParamIndexMap(pair2potential)  # [(pair, param_name), ...]
+    assert len(mask) == len(idx_map), "Mask length mismatch."
+
+    lines = []
+    lines.append("=== Parameter Mask Summary ===")
+    for (pair, pname), m in zip(idx_map, mask):
+        status = "train" if m else "frozen"
+        lines.append(f"{pair[0]}-{pair[1]:<4s} | {pname:<12s} : {status}")
+    report = "\n".join(lines)
+    return report
         
 
 # MultiGaussian I/O stuffs
@@ -653,7 +682,7 @@ def WriteLmpTable(
 
         npoints = len(r)
         f.write(f"{table_name}\n")
-        f.write(f"N {npoints} R {r[0]:.6f} {r[-1]:.6f}\n")
+        f.write(f"N {npoints} R {r[0]:.6f} {r[-1]:.6f}\n\n")
 
         for i, (ri, vi, fi) in enumerate(zip(r, V, F), start=1):
             f.write(f"{i:6d}  {ri:16.8f}  {vi:16.8e}  {fi:16.8e}\n")
@@ -723,7 +752,11 @@ def WriteLmpFF(
                 if pair in pair2potential:
                     if style == ".table": # do not change the output line, update table file
                         r, v, f = _parse_lammps_table(tmp[3])
-                        WriteLmpTable(tmp[3], r, pair2potential[pair].value(r), pair2potential[pair].force(r), f"# Table {tmp[3]}: id, r, potential, force", pair[0]+"-"+pair[1])
+                        WriteLmpTable(
+                            tmp[3], 
+                            r, pair2potential[pair].value(r), pair2potential[pair].force(r), 
+                            f"# Table {tmp[3]}: id, r, potential, force", tmp[4]
+                        )
                     else:
                         n_param = pair2potential[pair].n_params()
                         tmp[4:4 + n_param] = map(str, L_new[idx:idx + n_param])
