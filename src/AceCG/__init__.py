@@ -16,6 +16,7 @@ from .optimizers.rmsprop import RMSpropMaskedOptimizer
 from .optimizers.multithreaded.adam import MTAdamOptimizer
 
 # Potentials
+from .potentials.multi_gaussian import MultiGaussianPotential
 from .potentials.gaussian import GaussianPotential
 from .potentials.lennardjones import LennardJonesPotential
 from .potentials.base import BasePotential
@@ -23,7 +24,9 @@ from .potentials.base import BasePotential
 # Utilities
 from .utils.compute import dUdLByFrame, dUdL, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matrix, Hessian, KL_divergence, dUdLByBin
 from .utils.neighbor import Pair2DistanceByFrame
-from .utils.ffio import FFParamArray, FFParamIndexMap, ReadLmpFF, WriteLmpFF
+from .utils.ffio import FFParamArray, FFParamIndexMap, ReadLmpFF, WriteLmpFF, ParseLmpTable
+from .utils.mask import BuildGlobalMask, DescribeMask
+from .fitters.fit_multi_gaussian import MultiGaussianConfig, MultiGaussianTableFitter
 
 __all__ = [
     "REMTrainerAnalytic",
@@ -42,11 +45,16 @@ __all__ = [
     "d2UdLjdLk_Matrix",
     "dUdLj_dUdLk_Matrix",
     "Hessian",
+	"KL_divergence",
+	"dUdLByBin",
     "Pair2DistanceByFrame",
     "FFParamArray",
     "FFParamIndexMap",
     "ReadLmpFF",
     "WriteLmpFF",
-	"KL_divergence",
-	"dUdLByBin",
+	"ParseLmpTable",
+	"BuildGlobalMask",
+	"DescribeMask",
+	"MultiGaussianConfig",
+	"MultiGaussianTableFitter",
 ]

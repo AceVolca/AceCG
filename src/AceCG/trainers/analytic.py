@@ -187,9 +187,9 @@ class MSETrainerAnalytic(BaseTrainer):
         self,
         pmf_AA: np.ndarray,
         pmf_CG: np.ndarray,
-        bin_width: float,
         CG_data: dict,
         CG_bin_idx_frame: np.ndarray,
+        weighted_gauge = False,
         step_index: int = 0
     ):
         """
@@ -201,14 +201,14 @@ class MSETrainerAnalytic(BaseTrainer):
             Reference PMF from all-atom simulation. Shape: (n_bins,).
         pmf_CG : np.ndarray
             Current CG PMF from simulation. Shape: (n_bins,).
-        bin_width : float
-            Width of each histogram bin in reaction coordinate space.
         CG_data : dict
             CG simulation data, must include:
             - 'dist' : distances per frame per pair (for dUdLByFrame).
             - 'weight' (optional) : frame weights for reweighting.
         CG_bin_idx_frame : np.ndarray
             Array mapping each frame to its bin index. Shape: (n_frames,).
+        weighted_gauge : bool, optional
+            Whether to apply weighted gauge min{Σ_s q(s)*[PMF_CG(s) - PMF_AA(s)]^2}
         step_index : int, optional
             Step number for logging (default is 0).
 
@@ -226,17 +226,16 @@ class MSETrainerAnalytic(BaseTrainer):
         -----
         - Gradient calculation:
             For each bin:
-              dErr/dλ_j(bin) = bin_width * (PMF_CG - PMF_AA)
+              dErr/dλ_j(bin) = (PMF_CG(s) - PMF_AA(s))
                                * (⟨dU/dλ_j⟩_CG|s - ⟨dU/dλ_j⟩_CG)
             Sum over all bins to get total dErr/dλ_j.
+        - PMF_CG is adjusted to min{Σ_s [PMF_CG(s) - PMF_AA(s)]^2}
+                                            or min{Σ_s q(s)*[PMF_CG(s) - PMF_AA(s)]^2}
         - Updates potential and optimizer state.
         - Logs:
             mask ratio, learning rate, MSE, gradient norm, and update norm.
         """
-        # === 1. Compute loss ===
-        mse = np.linalg.norm(pmf_AA - pmf_CG)
-
-        # === 2. Compute ⟨dU/dλ_j⟩ for CG ===
+        # === Compute ⟨dU/dλ_j⟩ for CG ===
         dUdL_CG_frame = dUdLByFrame(self.potential, CG_data['dist'])
         dUdL_CG = dUdL(dUdL_CG_frame, CG_data.get('weight'))
 
@@ -247,22 +246,34 @@ class MSETrainerAnalytic(BaseTrainer):
             CG_data.get('weight')
         )
 
-        # === 3. Compute gradient of MSE wrt parameters ===
+        # === Adjust pmf_CG ===
+        if weighted_gauge:
+            # min{Σ_s q(s)*[PMF_CG(s) - PMF_AA(s)]^2}
+            c = (pmf_CG - pmf_AA) @ np.array([p_CG_bin.get(i, 0) for i in range(len(pmf_CG))])
+        else:
+            # min{Σ_s [PMF_CG(s) - PMF_AA(s)]^2}
+            c = np.mean(pmf_CG - pmf_AA)
+        pmf_CG_shifted = pmf_CG - c
+
+        # === Compute loss ===
+        mse = np.linalg.norm(pmf_AA - pmf_CG_shifted)
+
+        # === Compute gradient of MSE wrt parameters ===
         idx_set = set(CG_bin_idx_frame)
         dErrdL_bin = {}
         for idx in idx_set:
-            dErrdL_bin[idx] = bin_width * (pmf_CG[idx] - pmf_AA[idx]) * (dUdL_CG_given_bin[idx] - dUdL_CG)
+            dErrdL_bin[idx] = (pmf_CG_shifted[idx] - pmf_AA[idx]) * (dUdL_CG_given_bin[idx] - dUdL_CG)
 
         # Sum over bins (missing bins contribute zero)
         dErrdL = 0
         for idx in range(len(pmf_AA)):
             dErrdL += dErrdL_bin.get(idx, 0)
 
-        # === 4. Optimization step ===
+        # === Optimization step ===
         update = self.optimizer.step(dErrdL)
         self.update_potential(self.optimizer.L)
 
-        # === 5. Logging ===
+        # === Logging ===
         if self.logger is not None:
             mask_ratio = np.mean(self.optimizer.mask.astype(float))
             self.logger.add_scalar("MSE/mask_ratio", mask_ratio, step_index)

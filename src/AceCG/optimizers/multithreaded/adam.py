@@ -2,10 +2,7 @@ from ..base import BaseOptimizer
 
 import math
 import numpy as np
-from numba import njit, prange, float64, boolean, int64
-
-sig = (float64[:], float64[:], float64[:], float64[:], boolean[:],
-       float64, float64, float64, float64, int64, float64, float64[:], float64[:])
+from numba import njit, prange
 
 @njit(parallel=True, fastmath=True)
 def _adam_masked_step_kernel(L, m, v, grad, mask, lr, beta1, beta2, eps,
@@ -85,6 +82,12 @@ class MTAdamOptimizer(BaseOptimizer):
         self.last_update = None
         self.noise_sigma = float(noise_sigma)
         self.rng = np.random.default_rng(seed)
+
+        # Warm-up compile
+        dummy = np.zeros_like(L, dtype=np.float64)
+        _adam_masked_step_kernel(self.L, self.m, self.v, dummy, self.mask,
+                                 self.lr, self.beta1, self.beta2, self.eps,
+                                 1, 0.0, dummy, self.last_update)
 
     def step(self, grad: np.ndarray) -> np.ndarray:
         """
