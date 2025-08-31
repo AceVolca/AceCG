@@ -232,7 +232,7 @@ def WriteLmpTable(
                 f.write(f"# {line}\n")
 
         npoints = len(r)
-        f.write(f"{table_name}\n")
+        f.write(f"\n{table_name}\n")
         f.write(f"N {npoints} R {r[0]:.6f} {r[-1]:.6f}\n\n")
 
         for i, (ri, vi, fi) in enumerate(zip(r, V, F), start=1):
@@ -306,7 +306,7 @@ def WriteLmpFF(
                         WriteLmpTable(
                             tmp[3], 
                             r, pair2potential[pair].value(r), pair2potential[pair].force(r), 
-                            f"# Table {tmp[3]}: id, r, potential, force", tmp[4]
+                            f"Table {tmp[3]}: id, r, potential, force", tmp[4]
                         )
                     else:
                         n_param = pair2potential[pair].n_params()

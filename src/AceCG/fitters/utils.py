@@ -39,30 +39,11 @@ def _model_dr_from_params(r, params):
     return _gaussian_basis_dr(r, r0, sig) @ A
 
 
-# def _init_grid(r: np.ndarray, V: np.ndarray, n_gauss: int):
-#     """
-#     Initial guess:
-#       - r0_k: equal spacing on [rmin, rmax]
-#       - sigma_k: total width / (2*n_gauss)
-#       - A_k: linear fit (r0, sigma)
-#     """
-#     rmin, rmax = float(r.min()), float(r.max())
-#     width = rmax - rmin if rmax > rmin else 1.0
-#     r0_init = np.linspace(rmin + 0.15*width, rmax - 0.15*width, n_gauss)
-#     sigma_init = np.full(n_gauss, max(width / (2.0 * n_gauss), 1e-3))
-
-#     B = _gaussian_basis(r, r0_init, sigma_init)  # (N,K)
-#     # small normalized hill
-#     lam = 1e-8
-#     A_init = np.linalg.lstsq(B.T @ B + lam * np.eye(n_gauss), B.T @ V, rcond=None)[0]
-#     return A_init, r0_init, sigma_init
-
-
 def _init_grid(
     r: np.ndarray,
     V: np.ndarray,
     n_gauss: int,
-    bounds: dict | None = None,
+    bounds: Optional[Dict] = None,
 ):
     """
     Initial guess respecting optional bounds:
