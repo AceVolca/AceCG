@@ -1,5 +1,5 @@
 """
-AceCG: A modular framework for relative entropy minimization (REM) with analytic and neural potentials.
+AceCG: A Python package for bottom-up coarse-graining.
 """
 
 # Core REM trainers
@@ -27,6 +27,7 @@ from .utils.neighbor import Pair2DistanceByFrame
 from .utils.ffio import FFParamArray, FFParamIndexMap, ReadLmpFF, WriteLmpFF, ParseLmpTable
 from .utils.mask import BuildGlobalMask, DescribeMask
 from .fitters.fit_multi_gaussian import MultiGaussianConfig, MultiGaussianTableFitter
+from .utils.bounds import BuildGlobalBounds, DescribeBounds
 
 __all__ = [
     "REMTrainerAnalytic",
@@ -37,6 +38,7 @@ __all__ = [
 	"AdamMaskedOptimizer",
 	"AdamWMaskedOptimizer",
 	"RMSpropMaskedOptimizer",
+	"MultiGaussianPotential",
     "GaussianPotential",
 	"LennardJonesPotential",
     "BasePotential",
@@ -57,4 +59,6 @@ __all__ = [
 	"DescribeMask",
 	"MultiGaussianConfig",
 	"MultiGaussianTableFitter",
+	"BuildGlobalBounds",
+	"DescribeBounds",
 ]

@@ -20,6 +20,11 @@ class GaussianPotential(BasePotential):
         A, r0, sigma = self._params
         x = r - r0
         return A / (sigma * np.sqrt(2 * np.pi)) * np.exp(-x**2 / (2 * sigma**2))
+    
+    def force(self, r):
+        A, r0, sigma = self._params
+        x = r - r0
+        return A / (sigma**3 * np.sqrt(2*np.pi)) * x * np.exp(-x**2 / (2 * sigma**2))
 
     def dA(self, r):
         _, r0, sigma = self._params

@@ -1,4 +1,5 @@
 # AceCG/utils/ffio.py
+import os
 import numpy as np
 from scipy.optimize import lsq_linear
 from typing import Dict, Tuple, Optional, List
@@ -168,6 +169,8 @@ def ReadLmpFF(
     • The fitter registry (TABLE_FITTERS) allows adding alternative table-fitting
       strategies without changing this reader's logic.
     """
+    base_dir = os.path.dirname(os.path.abspath(file)) # convert to full path
+
     pair2potential: Dict[Tuple[str, str], BasePotential] = {}
 
     with open(file, "r") as f:
@@ -183,8 +186,11 @@ def ReadLmpFF(
 
             if typ_sel is None or style in typ_sel:
                 if style == ".table":
+                    table_file = tmp[3]
+                    if not os.path.isabs(table_file): # convert to full path to the table
+                        table_file = os.path.join(base_dir, table_file)
                     fitter = TABLE_FITTERS.create(table_fit, **(table_fit_overrides or {}))
-                    pot = fitter.fit(tmp[3], typ1=pair[0], typ2=pair[1])
+                    pot = fitter.fit(table_file, typ1=pair[0], typ2=pair[1])
                     pair2potential[pair] = pot
                 else:
                     # analytical lammps potentials

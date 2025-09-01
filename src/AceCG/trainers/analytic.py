@@ -2,7 +2,6 @@
 import numpy as np
 from .base import BaseTrainer
 from ..utils.compute import dUdLByFrame, dUdL, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matrix, Hessian, dUdLByBin
-from ..utils.ffio import FFParamArray
 from .utils import optimizer_accepts_hessian
 
 
@@ -26,34 +25,6 @@ class REMTrainerAnalytic(BaseTrainer):
     logger : SummaryWriter or None
         TensorBoard writer for logging optimization metrics.
     """
-    def get_params(self) -> np.ndarray:
-        """
-        Concatenate and return the current parameter vector from all potentials.
-
-        Returns
-        -------
-        np.ndarray
-            1D parameter vector matching optimizer.L.
-        """
-        return FFParamArray(self.potential)
-
-    def update_potential(self, L_new):
-        """
-        Update self.potential based on new parameters.
-        Update parameters stored in the optimizer.
-
-        Parameters
-        ----------
-        L_new : np.ndarray
-            New parameter vector.
-        """
-        idx = 0
-        for pair in self.potential.keys():
-            pot = self.potential[pair]
-            n = pot.n_params()
-            pot.set_params(L_new[idx:idx + n])
-            idx += n
-        self.optimizer.set_params(L_new)
 
     def step(self, AA_data, CG_data, step_index: int = 0):
         """
@@ -101,7 +72,9 @@ class REMTrainerAnalytic(BaseTrainer):
             update = self.optimizer.step(dSdL, hessian=H) # hessian based optimizer
         else:
             update = self.optimizer.step(dSdL)
-        self.update_potential(self.optimizer.L)
+
+        # === clamp & sync ===
+        self.clamp_and_update()
 
         # === Logging ===
         if self.logger is not None:
@@ -141,47 +114,6 @@ class MSETrainerAnalytic(BaseTrainer):
     dUdLByFrame : Computes per-frame derivatives of U wrt parameters.
     dUdLByBin   : Computes per-bin conditional averages of derivatives.
     """
-
-    def get_params(self) -> np.ndarray:
-        """
-        Concatenate and return the current parameter vector from all potentials.
-
-        Returns
-        -------
-        np.ndarray
-            1D array containing all potential parameters in the order expected
-            by the optimizer. Shape: (n_params,).
-
-        Notes
-        -----
-        - Uses `FFParamArray(self.potential)` to flatten parameters.
-        - Parameter ordering must match `update_potential`.
-        """
-        return FFParamArray(self.potential)
-
-    def update_potential(self, L_new: np.ndarray):
-        """
-        Update the potential objects and optimizer with new parameters.
-
-        Parameters
-        ----------
-        L_new : np.ndarray
-            New parameter vector, shape (n_params,).
-
-        Notes
-        -----
-        - Iterates through `self.potential` in its key order and slices `L_new`
-          accordingly using each potential's `n_params()` size.
-        - Calls each potential's `set_params` method.
-        - Also updates the optimizer's stored parameters to keep them in sync.
-        """
-        idx = 0
-        for pair in self.potential.keys():
-            pot = self.potential[pair]
-            n = pot.n_params()
-            pot.set_params(L_new[idx:idx + n])
-            idx += n
-        self.optimizer.set_params(L_new)
 
     def step(
         self,
@@ -271,7 +203,9 @@ class MSETrainerAnalytic(BaseTrainer):
 
         # === Optimization step ===
         update = self.optimizer.step(dErrdL)
-        self.update_potential(self.optimizer.L)
+
+        # === clamp & sync ===
+        self.clamp_and_update()
 
         # === Logging ===
         if self.logger is not None:
