@@ -1,7 +1,6 @@
 # AceCG/utils/ffio.py
 import os
 import numpy as np
-from scipy.optimize import lsq_linear
 from typing import Dict, Tuple, Optional, List
 from ..potentials.base import BasePotential
 
@@ -15,7 +14,7 @@ POTENTIAL_REGISTRY = {
     "gauss/cut": GaussianPotential,
     "gauss/wall": GaussianPotential,
     "lj/cut": LennardJonesPotential,
-    ".table": MultiGaussianPotential, 
+    "table": MultiGaussianPotential, 
 }
 
 
@@ -115,7 +114,8 @@ def ParseLmpTable(table_path: str):
 
 def ReadLmpFF(
         file: str,
-        typ_sel: Optional[List[str]] = None, 
+        pair_style: str,
+        pair_typ_sel: Optional[List[str]] = None, 
         table_fit: str = "multigaussian",
         table_fit_overrides: Optional[dict] = None,
 ) -> Dict[Tuple[str, str], BasePotential]:
@@ -132,8 +132,10 @@ def ReadLmpFF(
     ----------
     file : str
         Path to a LAMMPS force field file containing `pair_coeff` lines.
-    typ_sel : list[str], optional
-        If provided, only load the specified pair styles. Otherwise, all supported
+    pair_style : str
+        Pair style defined in LAMMPS; For hybrid or hybrid/overlay pair style, parse `hybrid`; otherwise parse the defined pair style
+    pair_typ_sel : list[str], optional
+        Effective only if pair_style is hybrid. If provided, only load the specified pair styles. Otherwise, all supported
         styles found in the file are considered.
     table_fit : str, default "multigauss"
         Name of the table fitter to use for ".table" entries. The default
@@ -169,7 +171,14 @@ def ReadLmpFF(
     • The fitter registry (TABLE_FITTERS) allows adding alternative table-fitting
       strategies without changing this reader's logic.
     """
-    base_dir = os.path.dirname(os.path.abspath(file)) # convert to full path
+    assert pair_style is not None
+    if pair_style != "hybrid":
+        pair_typ_sel = None # turn off pair_typ_sel if not hybrid pair style
+        param_offset = 3
+    else:
+        param_offset = 4
+
+    base_dir = os.path.dirname(os.path.abspath(file)) # convert to absolute path
 
     pair2potential: Dict[Tuple[str, str], BasePotential] = {}
 
@@ -179,15 +188,16 @@ def ReadLmpFF(
     for line in lines:
         if "pair_coeff" in line:
             tmp = line.split()
-            style = tmp[3]
-            if style.find(".table") != -1:
-                style = ".table"
+            if pair_style == "hybrid":
+                style = tmp[3]
+            else:
+                style = pair_style
             pair = (tmp[1], tmp[2])
 
-            if typ_sel is None or style in typ_sel:
-                if style == ".table":
-                    table_file = tmp[3]
-                    if not os.path.isabs(table_file): # convert to full path to the table
+            if pair_typ_sel is None or style in pair_typ_sel:
+                if style == "table":
+                    table_file = tmp[param_offset]
+                    if not os.path.isabs(table_file): # convert to absolute path to the table
                         table_file = os.path.join(base_dir, table_file)
                     fitter = TABLE_FITTERS.create(table_fit, **(table_fit_overrides or {}))
                     pot = fitter.fit(table_file, typ1=pair[0], typ2=pair[1])
@@ -196,7 +206,7 @@ def ReadLmpFF(
                     # analytical lammps potentials
                     if style in POTENTIAL_REGISTRY:
                         constructor = POTENTIAL_REGISTRY[style]
-                        params = list(map(float, tmp[4:]))
+                        params = list(map(float, tmp[param_offset:]))
                         pair2potential[pair] = constructor(pair[0], pair[1], *params)
     return pair2potential
 
@@ -206,7 +216,7 @@ def WriteLmpTable(
     r: np.ndarray,
     V: np.ndarray,
     F: np.ndarray,
-    comment: str = None,
+    comment: str = "LAMMPS Table written by AceCG",
     table_name: str = "Table1"
 ):
     """
@@ -249,7 +259,8 @@ def WriteLmpFF(
     old_file: str,
     new_file: str,
     pair2potential: Dict[Tuple[str, str], BasePotential],
-    typ_sel: Optional[List[str]] = None
+    pair_style: str,
+    pair_typ_sel: Optional[List[str]] = None
 ):
     """
     Write updated parameters to a new LAMMPS-style force field file.
@@ -282,9 +293,11 @@ def WriteLmpFF(
         Mapping (type1, type2) → BasePotential object.
         For ".table" entries, this must be a MultiGaussianPotential (or similar) with
         `.value(r)` and `.force(r)` methods implemented.
-    typ_sel : list of str, optional
-        If provided, only update the specified pair styles. If None (default),
-        all styles found in the file are considered.
+    pair_style : str
+        Pair style defined in LAMMPS; For hybrid or hybrid/overlay pair style, parse `hybrid`; otherwise parse the defined pair style
+    pair_typ_sel : list[str], optional
+        Effective only if pair_style is hybrid. If provided, only load the specified pair styles. Otherwise, all supported
+        styles found in the file are considered.
 
     Notes
     -----
@@ -293,6 +306,15 @@ def WriteLmpFF(
     • The main LAMMPS force field file (`new_file`) is always written,
       even if only comments or table updates were applied.
     """
+    assert pair_style is not None
+    if pair_style != "hybrid":
+        pair_typ_sel = None # turn off pair_typ_sel if not hybrid pair style
+        param_offset = 3
+    else:
+        param_offset = 4
+
+    base_dir = os.path.dirname(os.path.abspath(old_file)) # convert to absolute path
+
     L_new = FFParamArray(pair2potential)
     idx = 0
     with open(old_file, "r") as f:
@@ -301,22 +323,28 @@ def WriteLmpFF(
     for i, line in enumerate(lines):
         if "pair_coeff" in line:
             tmp = line.split()
-            style = tmp[3]
-            if style.find(".table") != -1: style = ".table"
+            if pair_style == "hybrid":
+                style = tmp[3]
+            else:
+                style = pair_style
             pair = (tmp[1], tmp[2])
 
-            if typ_sel is None or style in typ_sel:
+            if pair_typ_sel is None or style in pair_typ_sel:
                 if pair in pair2potential:
-                    if style == ".table": # do not change the output line, update table file
-                        r, v, f = ParseLmpTable(tmp[3])
+                    if style == "table": # do not change the output line, update table file
+                        table_file = tmp[param_offset]
+                        if not os.path.isabs(table_file): # not absolute table
+                            table_file = os.path.join(base_dir, table_file)
+
+                        r, v, f = ParseLmpTable(table_file)
                         WriteLmpTable(
-                            tmp[3], 
+                            table_file, 
                             r, pair2potential[pair].value(r), pair2potential[pair].force(r), 
-                            f"Table {tmp[3]}: id, r, potential, force", tmp[4]
+                            f"Table {tmp[param_offset]}: id, r, potential, force", tmp[param_offset+1]
                         )
                     else:
                         n_param = pair2potential[pair].n_params()
-                        tmp[4:4 + n_param] = map(str, L_new[idx:idx + n_param])
+                        tmp[param_offset:param_offset + n_param] = map(str, L_new[idx:idx + n_param])
                         idx += n_param
                         lines[i] = "   ".join(tmp) + "\n"
 

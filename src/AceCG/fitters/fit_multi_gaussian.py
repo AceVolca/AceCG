@@ -2,7 +2,7 @@
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 import numpy as np
-from scipy.optimize import least_squares, lsq_linear
+from scipy.optimize import least_squares
 
 from .base import BaseTableFitter, TABLE_FITTERS
 from ..potentials.multi_gaussian import MultiGaussianPotential
@@ -10,8 +10,9 @@ from ..utils.ffio import ParseLmpTable
 from .utils import ( # fitting utils
     _init_grid, _pack_params, _unpack_params,
     _make_cutoff_anchors,
-    _gaussian_basis, _gaussian_basis_dr,
+    _gaussian_basis, _gaussian_basis_dr, _solve_A_with_anchors
 )
+from ..utils.bounds import BuildGlobalBounds
 
 
 @dataclass
@@ -47,14 +48,17 @@ class MultiGaussianConfig:
 			Parameter bounds, e.g. {"A": (amin, amax),
 											"r0": (rmin, rmax),
 											"sigma": (smin, smax)}.
-			Defaults: A free, r0 free, sigma ∈ [0.1, ∞).
+		pair_bounds : dict
+			Pair specific parameter bounds, e.g. {
+                                            ("1", "1"): {"A_*": (amin, amax), "r0": (rmin, rmax), "sigma": (smin, smax)},
+                                            }.
+        clamp_init_to_bounds : bool = True
+            Clamp to [lb, ub] if the initial guess is out of bounds
         use_scipy : bool
 			Whether to run nonlinear least_squares refinement after
 			the initial linear solve.
 		max_nfev: int : int
 			maximum number of iterations for scipy optimization
-		random_state : int
-			Random seed for reproducibility.
     """
     # model size
     n_gauss: int = 16
@@ -71,12 +75,12 @@ class MultiGaussianConfig:
     repulsive_A_min: float = 1e-4
     repulsive_r0_max: float = 0.0
     # bounds
-    bounds: Dict = field(default_factory=lambda: {"sigma": (0.1, np.inf)})
+    bounds: Dict = field(default_factory=dict)       # global bounds (pattern dict)
+    pair_bounds: Dict = field(default_factory=dict)  # pair-specific bounds
+    clamp_init_to_bounds: bool = True   # clamp p0 to [lb,ub]
     # nonlinear refine
     use_scipy: bool = True
     max_nfev: int = 3000
-    # seeding
-    random_state: int = 0
 
 
 class MultiGaussianTableFitter(BaseTableFitter):
@@ -119,7 +123,6 @@ class MultiGaussianTableFitter(BaseTableFitter):
 		"""
         r, V, _ = ParseLmpTable(table_path)
         cfg = self.cfg
-        rng = np.random.default_rng(cfg.random_state)
         n_gauss = int(cfg.n_gauss)
 
         # ----- init -----
@@ -138,13 +141,11 @@ class MultiGaussianTableFitter(BaseTableFitter):
             A_lower[cfg.repulsive_index] = max(0.0, cfg.repulsive_A_min)
 
         # build augmented linear system M A ≈ y
-        B  = _gaussian_basis(r, r0_lin, sigma_lin)
-        Ba = _gaussian_basis(anchors_r, r0_lin, sigma_lin)
-        Da = _gaussian_basis_dr(anchors_r, r0_lin, sigma_lin)
-        M = np.vstack([cfg.weight_data * B, cfg.weight_c0 * Ba, cfg.weight_c1 * Da])
-        y = np.concatenate([cfg.weight_data * V, np.zeros_like(anchors_r), np.zeros_like(anchors_r)])
-        res_lin = lsq_linear(M, y, bounds=(A_lower, np.full(K, np.inf)), method="trf", lsq_solver="exact", max_iter=5000)
-        A_lin = res_lin.x
+        A_lin = _solve_A_with_anchors(
+            r, V, r0_lin, sigma_lin, anchors_r,
+            w_data=cfg.weight_data, w_c0=cfg.weight_c0, w_c1=cfg.weight_c1,
+            A_lower=A_lower, A_upper=None,
+        )
         p0 = _pack_params(A_lin, r0_lin, sigma_lin)
 
         # project repulsive init onto feasible region
@@ -156,37 +157,47 @@ class MultiGaussianTableFitter(BaseTableFitter):
 
         # ----- nonlinear refine -----
         if cfg.use_scipy:
-            def model(params):
-                A, r0v, sig = _unpack_params(params)
-                return _gaussian_basis(r, r0v, sig) @ A
-            def model_dr(params):
-                A, r0v, sig = _unpack_params(params)
-                return _gaussian_basis_dr(r, r0v, sig) @ A
             def resid(params):
-                res_data = model(params) - V
+                A, r0v, sig = _unpack_params(params)
+                res_data = (_gaussian_basis(r, r0v, sig) @ A) - V
                 if cfg.anchor_to_cutoff and anchors_r.size > 0:
-                    res_c0 = (_gaussian_basis(anchors_r, _unpack_params(params)[1], _unpack_params(params)[2]) @ _unpack_params(params)[0])
-                    res_c1 = (_gaussian_basis_dr(anchors_r, _unpack_params(params)[1], _unpack_params(params)[2]) @ _unpack_params(params)[0])
+                    Ba = _gaussian_basis(anchors_r, r0v, sig)
+                    Da = _gaussian_basis_dr(anchors_r, r0v, sig)
+                    res_c0 = Ba @ A   # V(anchors)
+                    res_c1 = Da @ A   # dV/dr(anchors)
                     return np.concatenate([cfg.weight_data*res_data, cfg.weight_c0*res_c0, cfg.weight_c1*res_c1])
                 return cfg.weight_data * res_data
+            
+            # bounds
+            # build temporary pair2potential with just this pair
+            tmp_pair2pot = {
+                (typ1, typ2): MultiGaussianPotential(
+                    typ1, typ2, n_gauss=n_gauss,
+                    cutoff=float(np.max(r)), init_params=p0
+                )
+            }
 
-            def _pair(v): return (-np.inf, np.inf) if v is None else v
-            A_lb, A_ub = _pair(cfg.bounds.get("A")) if "A" in cfg.bounds else (-np.inf, np.inf)
-            sig_lb, sig_ub = _pair(cfg.bounds.get("sigma")) if "sigma" in cfg.bounds else (1e-6, np.inf)
-            # default r0 bounds: allow ≤ 0 to keep repulsive feasible
-            if "r0" in cfg.bounds: r0_lb, r0_ub = _pair(cfg.bounds["r0"])
-            else:                  r0_lb, r0_ub = (-np.inf, r.max())
-
-            lb = np.empty_like(p0);  ub = np.empty_like(p0)
-            lb[0::3] = A_lb;   ub[0::3] = A_ub
-            lb[1::3] = r0_lb;  ub[1::3] = r0_ub
-            lb[2::3] = sig_lb; ub[2::3] = sig_ub
+            # use BuildGlobalBounds to expand pattern bounds to arrays
+            lb, ub = BuildGlobalBounds(
+                tmp_pair2pot,
+                global_bounds=cfg.bounds,
+                pair_bounds=cfg.pair_bounds
+            )
 
             # tighten for the repulsive component
             if cfg.use_repulsive and cfg.repulsive_index is not None and 0 <= cfg.repulsive_index < n_gauss:
                 k = int(cfg.repulsive_index)
                 lb[3*k+0] = max(lb[3*k+0], cfg.repulsive_A_min)
                 ub[3*k+1] = min(ub[3*k+1], cfg.repulsive_r0_max)
+            
+            # feasibility check
+            viol = (p0 < lb) | (p0 > ub)
+            if np.any(viol):
+                if cfg.clamp_init_to_bounds:
+                    p0 = np.clip(p0, lb, ub)
+                else:
+                    bad = np.where((p0 < lb) | (p0 > ub))[0]
+                    raise ValueError(f"Initial guess p0 violates bounds at indices {bad}.")
 
             res = least_squares(resid, p0, bounds=(lb, ub), method="trf", max_nfev=cfg.max_nfev, verbose=0)
             p_opt = res.x

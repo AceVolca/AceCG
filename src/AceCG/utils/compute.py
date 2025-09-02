@@ -175,28 +175,32 @@ def dUdLj_dUdLk_Matrix(
 
 def Hessian(
     beta: float,
-    d2UdLjdLk: np.ndarray,
-    dUdLj_dUdLk: np.ndarray,
-    dUdL: np.ndarray
+    d2UdLjdLk_AA: np.ndarray,
+    d2UdLjdLk_CG: np.ndarray,
+    dUdLj_dUdLk_CG: np.ndarray,
+    dUdL_CG: np.ndarray
 ) -> np.ndarray:
     """
     Compute the Hessian matrix of the relative entropy S_rel with respect to λ parameters.
 
     This corresponds to the second derivative of the REM loss:
-        H_jk = β · [ -⟨∂²U/∂λⱼ∂λₖ⟩ + β·⟨∂U/∂λⱼ · ∂U/∂λₖ⟩ - β·⟨∂U/∂λⱼ⟩ · ⟨∂U/∂λₖ⟩ ]
+        H_jk = β · [⟨∂²U/∂λⱼ∂λₖ⟩_T - ⟨∂²U/∂λⱼ∂λₖ⟩_M + β·⟨∂U/∂λⱼ · ∂U/∂λₖ⟩_M - β·⟨∂U/∂λⱼ⟩_M · ⟨∂U/∂λₖ⟩_M ]
 
     Parameters
     ----------
     beta : float
         Inverse temperature 1/(k_B·T), where T is temperature and k_B is Boltzmann constant.
-    d2UdLjdLk : np.ndarray
-        Array of shape (n_params, n_params), the mean second derivatives ⟨∂²U/∂λⱼ∂λₖ⟩.
+    d2UdLjdLk_AA : np.ndarray
+        Array of shape (n_params, n_params), the mean second derivatives ⟨∂²U/∂λⱼ∂λₖ⟩ evaluated in the reference ensemble.
         Typically from `d2UdLjdLkMatrix(...)`.
-    dUdLj_dUdLk : np.ndarray
-        Array of shape (n_params, n_params), the mean outer products ⟨∂U/∂λⱼ · ∂U/∂λₖ⟩.
+    d2UdLjdLk_CG : np.ndarray
+        Array of shape (n_params, n_params), the mean second derivatives ⟨∂²U/∂λⱼ∂λₖ⟩ evaluated in the model ensemble.
+        Typically from `d2UdLjdLkMatrix(...)`.
+    dUdLj_dUdLk_CG : np.ndarray
+        Array of shape (n_params, n_params), the mean outer products ⟨∂U/∂λⱼ · ∂U/∂λₖ⟩ in the model ensemble.
         From `dUdLj_dUdLk_Matrix(...)`.
-    dUdL : np.ndarray
-        Array of shape (n_params,), the mean ⟨∂U/∂λⱼ⟩ vector.
+    dUdL_CG : np.ndarray
+        Array of shape (n_params,), the mean ⟨∂U/∂λⱼ⟩ vector evaluated in the model ensemble.
         From `dUdL(...)`.
 
     Returns
@@ -209,7 +213,7 @@ def Hessian(
     This is used in second-order optimization or uncertainty quantification of relative entropy minimization (REM).
     """
 
-    return beta * (-d2UdLjdLk + beta * dUdLj_dUdLk - beta * np.outer(dUdL, dUdL))
+    return beta * (d2UdLjdLk_AA - d2UdLjdLk_CG + beta * dUdLj_dUdLk_CG - beta * np.outer(dUdL_CG, dUdL_CG))
 
 
 def KL_divergence(p: np.ndarray, q: np.ndarray) -> float:

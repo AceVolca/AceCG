@@ -63,9 +63,10 @@ class REMTrainerAnalytic(BaseTrainer):
         # === Compute Hessian (if optimizer supports it) ===
         H = None
         if optimizer_accepts_hessian(self.optimizer):
-            d2U = d2UdLjdLk_Matrix(self.potential, CG_data['dist'], CG_data.get('weight'))
-            dUU = dUdLj_dUdLk_Matrix(dUdL_CG_frame, CG_data.get('weight'))
-            H = Hessian(self.beta, d2U, dUU, dUdL_CG)
+            d2U_AA = d2UdLjdLk_Matrix(self.potential, AA_data['dist'], AA_data.get('weight'))
+            d2U_CG = d2UdLjdLk_Matrix(self.potential, CG_data['dist'], CG_data.get('weight'))
+            dUU_CG = dUdLj_dUdLk_Matrix(dUdL_CG_frame, CG_data.get('weight'))
+            H = Hessian(self.beta, d2U_AA, d2U_CG, dUU_CG, dUdL_CG)
 
         # === Optimization Step ===
         if H is not None:

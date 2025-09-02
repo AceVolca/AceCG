@@ -165,12 +165,23 @@ class MultiGaussianPotential(BasePotential):
             return fn
 
         # dA_kdr0_k, dA_kdsigma_k, dr0_k_2, dr0_kdsigma_k, dsigma_k_2
-        m = re.match(r'^(dA_(\d+)dr0_\2|dA_(\d+)dsigma_\3|dr0_(\d+)_2|dr0_(\d+)dsigma_\5|dsigma_(\d+)_2)$', name)
+        m = re.match(
+            r'^(?:'
+            r'dA_(?P<k1>\d+)dr0_(?P=k1)|'
+            r'dA_(?P<k2>\d+)dsigma_(?P=k2)|'
+            r'dr0_(?P<k3>\d+)_2|'
+            r'dr0_(?P<k4>\d+)dsigma_(?P=k4)|'
+            r'dsigma_(?P<k5>\d+)_2'
+            r')$',
+            name
+        )
         if m:
             # Identify which pattern matched and extract k accordingly
             def make(name):
-                # extract the last integer in the name as k
-                k = int(re.findall(r'(\d+)', name)[-1])
+                # extract k
+                k_str = next(g for g in (m.group('k1'), m.group('k2'), m.group('k3'),
+                                     m.group('k4'), m.group('k5')) if g)
+                k = int(k_str)
 
                 def dA_dr0(r):
                     _, r0, sigma = self._params_of(k)
