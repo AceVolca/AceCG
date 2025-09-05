@@ -2,6 +2,7 @@
 import re
 import numpy as np
 from .base import BasePotential
+from typing import Optional
 
 SQRT2PI = np.sqrt(2.0 * np.pi)
 
@@ -18,7 +19,7 @@ class MultiGaussianPotential(BasePotential):
     """
 
     def __init__(self, typ1: str, typ2: str, n_gauss: int, cutoff: float = np.inf,
-                 init_params: np.ndarray = None):
+                 init_params: Optional[np.ndarray] = None):
         super().__init__()
         assert n_gauss >= 1
         self.typ1 = typ1
