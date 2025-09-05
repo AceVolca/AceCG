@@ -1,4 +1,5 @@
 #AceCG/potentials/bsplinepotential.py
+import re
 from .base import BasePotential
 import numpy as np
 from scipy.interpolate import BSpline
@@ -74,3 +75,53 @@ class BSplinePotential(BasePotential):
         """
         basis_spline = BSpline.basis_element(self.knots[i:i+self.degree+2], extrapolate=self.spline.extrapolate)
         return basis_spline(r)
+    
+    def __getattr__(self, name: str):
+        """
+        Dynamic accessors for parameter sensitivities:
+          - c{i}(r):     returns B_i(r)         == dV/dc_i
+          - dc{i}(r):    alias of c{i}(r)       == dV/dc_i
+          - dc{i}_2(r):  second derivative wrt c_i twice -> 0
+          - dc{i}dc{j}(r): mixed second derivative wrt c_i,c_j -> 0
+        """
+        # First-derivative: c{i} or dc{i}
+        m = re.fullmatch(r'(?:d?c)(\d+)', name)
+        if m:
+            i = int(m.group(1))
+            n_params = len(self._params)
+            if not (0 <= i < n_params):
+                raise AttributeError(f"{self.__class__.__name__} has no attribute '{name}' (index {i} out of range 0..{n_params-1})")
+
+            def basis_fn(r, i=i):
+                # ∂V/∂c_i = B_i(r)
+                return self.basis_function(i, np.asarray(r, dtype=float))
+            return basis_fn
+
+        # Second-derivative: dc{i}_2
+        m = re.fullmatch(r'dc(\d+)_2', name)
+        if m:
+            i = int(m.group(1))
+            n_params = len(self._params)
+            if not (0 <= i < n_params):
+                raise AttributeError(f"{self.__class__.__name__} has no attribute '{name}' (index {i} out of range 0..{n_params-1})")
+
+            def zero_fn(r):
+                r = np.asarray(r, dtype=float)
+                return np.zeros_like(r, dtype=float)
+            return zero_fn
+
+        # Mixed second-derivative: dc{i}dc{j}
+        m = re.fullmatch(r'dc(\d+)dc(\d+)', name)
+        if m:
+            i = int(m.group(1))
+            j = int(m.group(2))
+            n_params = len(self._params)
+            if not (0 <= i < n_params and 0 <= j < n_params):
+                raise AttributeError(f"{self.__class__.__name__} has no attribute '{name}' (indices out of range)")
+
+            def zero_fn(r):
+                r = np.asarray(r, dtype=float)
+                return np.zeros_like(r, dtype=float)
+            return zero_fn
+
+        raise AttributeError(f"{self.__class__.__name__} has no attribute '{name}'")
