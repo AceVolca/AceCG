@@ -46,7 +46,7 @@ class BSplinePotential(BasePotential):
     def knots(self) -> np.ndarray:
         return self.spline.t
 
-    def value(self, r: float) -> float:
+    def value(self, r: np.ndarray) -> np.ndarray:
         """
         Compute the B-spline potential at a distance r.
 
@@ -55,7 +55,7 @@ class BSplinePotential(BasePotential):
         """
         return self.spline(r)
     
-    def force(self, r: float) -> float:
+    def force(self, r: np.ndarray) -> np.ndarray:
         """
         Compute the force (negative derivative) of the B-spline potential at a distance r.
 
@@ -64,7 +64,7 @@ class BSplinePotential(BasePotential):
         """
         return -self.spline(r, 1)
 
-    def basis_function(self, i: int, r: float) -> float:
+    def basis_function(self, i: int, r: np.ndarray) -> np.ndarray:
         """
         Compute the i-th B-spline basis function at a distance r.
 

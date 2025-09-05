@@ -27,7 +27,7 @@ class LennardJonesPotential(BasePotential):
             ["depsilondsigma", "dsigma_2"]
         ]
 
-    def value(self, r: float) -> float:
+    def value(self, r: np.ndarray) -> np.ndarray:
         """
         Compute the Lennard-Jones potential at a distance r.
 
