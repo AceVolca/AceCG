@@ -43,6 +43,6 @@ class BasePotential(ABC):
 
     def set_params(self, new_params: np.ndarray):
         """Update parameters with new values."""
-        assert self._params is not None
-        assert len(new_params) == len(self._params)
+        # if self._params is not None:
+        #     assert len(new_params) == len(self._params)
         self._params = new_params.copy()
