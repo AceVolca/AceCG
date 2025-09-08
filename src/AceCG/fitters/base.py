@@ -1,6 +1,5 @@
 # AceCG/fitters/base.py
 from abc import ABC, abstractmethod
-from typing import Any
 from ..potentials.base import BasePotential
 
 class BaseTableFitter(ABC):

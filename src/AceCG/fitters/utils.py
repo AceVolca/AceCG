@@ -1,7 +1,7 @@
 # AceCG/utils/ffio.py
 import numpy as np
 from scipy.optimize import lsq_linear
-from typing import Dict, Tuple, Optional, List
+from typing import Dict, Optional
 
 
 # MultiGaussian table fitting stuffs
