@@ -20,6 +20,7 @@ from .potentials.multi_gaussian import MultiGaussianPotential
 from .potentials.gaussian import GaussianPotential
 from .potentials.lennardjones import LennardJonesPotential
 from .potentials.base import BasePotential
+from .potentials.bsplinepotential import BSplinePotential
 
 # Utilities
 from .utils.compute import dUdLByFrame, dUdL, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matrix, Hessian, KL_divergence, dUdLByBin

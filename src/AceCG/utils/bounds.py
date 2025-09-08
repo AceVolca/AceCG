@@ -1,5 +1,5 @@
 # AceCG/utils/bounds.py
-from typing import Dict, Tuple, Iterable, Optional, List, Union
+from typing import Dict, Tuple, Optional, List, TypeVar
 import numpy as np
 import fnmatch, re
 from ..potentials.base import BasePotential
@@ -8,8 +8,10 @@ from .ffio import FFParamIndexMap
 Pattern = str
 Bound = Tuple[Optional[float], Optional[float]]  # (lb, ub), None is nonbounded
 
+P = TypeVar("P", bound=BasePotential)
+
 def BuildGlobalBounds(
-    pair2potential: Dict[Tuple[str, str], BasePotential],
+    pair2potential: Dict[Tuple[str, str], P],
     pair_bounds: Optional[Dict[Tuple[str, str], Dict[Pattern, Bound]]] = None,
     global_bounds: Optional[Dict[Pattern, Bound]] = None,
     case_sensitive: bool = True,

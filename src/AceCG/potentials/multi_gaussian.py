@@ -98,6 +98,7 @@ class MultiGaussianPotential(BasePotential):
     def sigma(self) -> np.ndarray:
         return self._params[2::3]
 
+
     def _validate_sigmas(self):
         # enforce a small positive floor for stability
         np.maximum(self._params[2::3], self._sigma_floor, out=self._params[2::3])
