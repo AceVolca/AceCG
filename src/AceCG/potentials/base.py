@@ -15,6 +15,11 @@ class BasePotential(ABC):
         """Compute potential energy at given distances r."""
         pass
 
+    @abstractmethod
+    def force(self, r: np.ndarray) -> np.ndarray:
+        """Compute force (negative gradient of potential) at given distances r."""
+        pass
+
     # Common method
     def param_names(self) -> List[str]:
         """Parameter names of this potential depends on."""

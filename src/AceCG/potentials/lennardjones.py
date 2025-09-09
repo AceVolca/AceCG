@@ -39,6 +39,19 @@ class LennardJonesPotential(BasePotential):
         
         sigma_over_r = sigma / r
         return 4 * epsilon * (sigma_over_r**12 - sigma_over_r**6)
+    
+    def force(self, r: np.ndarray) -> np.ndarray:
+        """
+        Compute the force (negative gradient of the potential) at a distance r.
+
+        :param r: Distance between two particles.
+        :return: The force at distance r.
+        """
+
+        epsilon, sigma = self._params
+
+        sigma_over_r = sigma / r
+        return 24 * epsilon / r * (2 * sigma_over_r**12 - sigma_over_r**6)
 
     def depsilon(self, r: float) -> float:
         """

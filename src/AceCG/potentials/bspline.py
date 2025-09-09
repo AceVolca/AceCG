@@ -1,4 +1,4 @@
-#AceCG/potentials/bsplinepotential.py
+#AceCG/potentials/bspline.py
 import re
 from .base import BasePotential
 import numpy as np
