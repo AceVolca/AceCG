@@ -39,6 +39,9 @@ def prepare_Trainer_data(u, pair2potential, start, end, cutoff, sel="all", nstli
         Neighbor list update interval.
     exclude : bool, optional
         Whether to exclude bonded neighbors. Default is True.
+    weight : np.ndarray, optional
+        Assign weight for each frame to obtain a reweighted ensemble
+        Length-n_frames weight array. If None, uniform average is used.
 
     Returns
     -------
@@ -52,4 +55,5 @@ def prepare_Trainer_data(u, pair2potential, start, end, cutoff, sel="all", nstli
         pair2potential=pair2potential, sel=sel,
         nstlist=nstlist, exclude=exclude
     )
+
     return {"dist": dist, "weight": weight}
