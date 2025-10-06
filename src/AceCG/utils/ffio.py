@@ -6,6 +6,7 @@ from ..potentials.base import BasePotential
 
 from ..potentials.gaussian import GaussianPotential
 from ..potentials.lennardjones import LennardJonesPotential
+from ..potentials.lennardjones96 import LennardJones96Potential
 from ..potentials.multi_gaussian import MultiGaussianPotential
 from ..fitters.base import TABLE_FITTERS
 
@@ -14,6 +15,7 @@ POTENTIAL_REGISTRY = {
     "gauss/cut": GaussianPotential,
     "gauss/wall": GaussianPotential,
     "lj/cut": LennardJonesPotential,
+    "lj96/cut": LennardJones96Potential,
     "table": MultiGaussianPotential, 
 }
 
@@ -349,4 +351,5 @@ def WriteLmpFF(
                         lines[i] = "   ".join(tmp) + "\n"
 
     with open(new_file, "w") as f:
+
         f.writelines(lines)
