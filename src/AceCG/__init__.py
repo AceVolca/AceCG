@@ -19,6 +19,7 @@ from .optimizers.multithreaded.adam import MTAdamOptimizer
 from .potentials.multi_gaussian import MultiGaussianPotential
 from .potentials.gaussian import GaussianPotential
 from .potentials.lennardjones import LennardJonesPotential
+from .potentials.lennardjones96 import LennardJones96Potential
 from .potentials.base import BasePotential
 from .potentials.bsplinepotential import BSplinePotential
 
@@ -42,6 +43,7 @@ __all__ = [
 	"MultiGaussianPotential",
     "GaussianPotential",
 	"LennardJonesPotential",
+	"LennardJones96Potential",
     "BasePotential",
     "dUdLByFrame",
     "dUdL",
@@ -63,3 +65,4 @@ __all__ = [
 	"BuildGlobalBounds",
 	"DescribeBounds",
 ]
+
