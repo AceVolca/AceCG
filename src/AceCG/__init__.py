@@ -21,12 +21,12 @@ from .potentials.gaussian import GaussianPotential
 from .potentials.lennardjones import LennardJonesPotential
 from .potentials.lennardjones96 import LennardJones96Potential
 from .potentials.base import BasePotential
-from .potentials.bsplinepotential import BSplinePotential
+from .potentials.bspline import BSplinePotential
 
 # Utilities
 from .utils.compute import dUdLByFrame, dUdL, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matrix, Hessian, KL_divergence, dUdLByBin
 from .utils.neighbor import Pair2DistanceByFrame
-from .utils.ffio import FFParamArray, FFParamIndexMap, ReadLmpFF, WriteLmpFF, ParseLmpTable
+from .utils.ffio import FFParamArray, FFParamIndexMap, ReadLmpFF, WriteLmpTable, WriteLmpFF, ParseLmpTable
 from .utils.mask import BuildGlobalMask, DescribeMask
 from .fitters.fit_multi_gaussian import MultiGaussianConfig, MultiGaussianTableFitter
 from .utils.bounds import BuildGlobalBounds, DescribeBounds
@@ -56,6 +56,7 @@ __all__ = [
     "FFParamArray",
     "FFParamIndexMap",
     "ReadLmpFF",
+    "WriteLmpTable",
     "WriteLmpFF",
 	"ParseLmpTable",
 	"BuildGlobalMask",

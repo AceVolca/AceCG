@@ -16,7 +16,8 @@ POTENTIAL_REGISTRY = {
     "gauss/wall": GaussianPotential,
     "lj/cut": LennardJonesPotential,
     "lj96/cut": LennardJones96Potential,
-    "table": MultiGaussianPotential, 
+    "table": MultiGaussianPotential,
+    "double/gauss": MultiGaussianPotential, 
 }
 
 
@@ -118,6 +119,7 @@ def ReadLmpFF(
         file: str,
         pair_style: str,
         pair_typ_sel: Optional[List[str]] = None, 
+        cutoff: Optional[int] = None,
         table_fit: str = "multigaussian",
         table_fit_overrides: Optional[dict] = None,
 ) -> Dict[Tuple[str, str], BasePotential]:
@@ -135,10 +137,14 @@ def ReadLmpFF(
     file : str
         Path to a LAMMPS force field file containing `pair_coeff` lines.
     pair_style : str
-        Pair style defined in LAMMPS; For hybrid or hybrid/overlay pair style, parse `hybrid`; otherwise parse the defined pair style
+        Pair style defined in LAMMPS; For hybrid or hybrid/overlay pair style, parse `hybrid`; 
+        otherwise parse the defined pair style
     pair_typ_sel : list[str], optional
-        Effective only if pair_style is hybrid. If provided, only load the specified pair styles. Otherwise, all supported
-        styles found in the file are considered.
+        Effective only if pair_style is hybrid. If provided, only load the specified pair styles. 
+        Otherwise, all supported styles found in the file are considered.
+    cutoff : int, optional
+        Cutoff for all the selected pairs. If pair-specific cutoff is written in pair_coeff, 
+        the "cutoff" here should be None. Otherwise, the "cutoff" here should be provided.
     table_fit : str, default "multigauss"
         Name of the table fitter to use for ".table" entries. The default
         fitter "multigauss" fits a MultiGaussianPotential with robust defaults
@@ -209,7 +215,14 @@ def ReadLmpFF(
                     if style in POTENTIAL_REGISTRY:
                         constructor = POTENTIAL_REGISTRY[style]
                         params = list(map(float, tmp[param_offset:]))
-                        pair2potential[pair] = constructor(pair[0], pair[1], *params)
+                        if style == "double/gauss": # using multigauss for double/gauss
+                            if cutoff is None: gauss_params, cutoff = params[:-1], params[-1]
+                            else: gauss_params = params[:]
+                            pair2potential[pair] = constructor(pair[0], pair[1], 2, cutoff, gauss_params)
+                        else:
+                            if cutoff is not None:
+                                params.append(cutoff)
+                            pair2potential[pair] = constructor(pair[0], pair[1], *params)
     return pair2potential
 
 
@@ -237,7 +250,7 @@ def WriteLmpTable(
     comment : str, optional
         Comment string to put at the top of the file.
     table_name : str, optional
-        Label for the LAMMPS table (default "Table1").
+        Label for the LAMMPS table (default "Table1"). pair_coeff * * morse.table LABEL
     """
     r = np.asarray(r, dtype=float)
     V = np.asarray(V, dtype=float)
