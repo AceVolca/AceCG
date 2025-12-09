@@ -7,18 +7,12 @@ from ..potentials.base import BasePotential
 from ..potentials.gaussian import GaussianPotential
 from ..potentials.lennardjones import LennardJonesPotential
 from ..potentials.lennardjones96 import LennardJones96Potential
+from ..potentials.lennardjones_soft import LennardJonesSoftPotential
 from ..potentials.multi_gaussian import MultiGaussianPotential
+from ..potentials.srlrgaussian import SRLRGaussianPotential
+from ..potentials import POTENTIAL_REGISTRY
+
 from ..fitters.base import TABLE_FITTERS
-
-
-POTENTIAL_REGISTRY = {
-    "gauss/cut": GaussianPotential,
-    "gauss/wall": GaussianPotential,
-    "lj/cut": LennardJonesPotential,
-    "lj96/cut": LennardJones96Potential,
-    "table": MultiGaussianPotential,
-    "double/gauss": MultiGaussianPotential, 
-}
 
 
 def FFParamArray(pair2potential: Dict[Tuple[str, str], BasePotential]) -> np.ndarray:
@@ -120,6 +114,7 @@ def ReadLmpFF(
         pair_style: str,
         pair_typ_sel: Optional[List[str]] = None, 
         cutoff: Optional[int] = None,
+        global_var: Optional[dict] = None,
         table_fit: str = "multigaussian",
         table_fit_overrides: Optional[dict] = None,
 ) -> Dict[Tuple[str, str], BasePotential]:
@@ -145,6 +140,8 @@ def ReadLmpFF(
     cutoff : int, optional
         Cutoff for all the selected pairs. If pair-specific cutoff is written in pair_coeff, 
         the "cutoff" here should be None. Otherwise, the "cutoff" here should be provided.
+    global_var : dict, optional
+        Define global variables for potentials, like lj/cut/soft requires n, alpha
     table_fit : str, default "multigauss"
         Name of the table fitter to use for ".table" entries. The default
         fitter "multigauss" fits a MultiGaussianPotential with robust defaults
@@ -219,6 +216,12 @@ def ReadLmpFF(
                             if cutoff is None: gauss_params, cutoff = params[:-1], params[-1]
                             else: gauss_params = params[:]
                             pair2potential[pair] = constructor(pair[0], pair[1], 2, cutoff, gauss_params)
+                        elif style == "lj/cut/soft": # define global variable n and alpha
+                            if cutoff is not None:
+                                params.append(cutoff)
+                            params.append(global_var["n"])
+                            params.append(global_var["alpha"])
+                            pair2potential[pair] = constructor(pair[0], pair[1], *params)
                         else:
                             if cutoff is not None:
                                 params.append(cutoff)

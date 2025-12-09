@@ -1,4 +1,4 @@
-# AceCG/potentials/lennardjones.py
+# AceCG/potentials/lennardjones96.py
 from .base import BasePotential
 import numpy as np
 

@@ -5,6 +5,7 @@ AceCG: A Python package for bottom-up coarse-graining.
 # Core REM trainers
 from .trainers.analytic import REMTrainerAnalytic
 from .trainers.analytic import MSETrainerAnalytic
+from .trainers.analytic import MultiTrainerAnalytic
 from .trainers.utils import prepare_Trainer_data
 
 # Optimizers
@@ -18,10 +19,12 @@ from .optimizers.multithreaded.adam import MTAdamOptimizer
 # Potentials
 from .potentials.multi_gaussian import MultiGaussianPotential
 from .potentials.gaussian import GaussianPotential
+from .potentials.bspline import BSplinePotential
 from .potentials.lennardjones import LennardJonesPotential
 from .potentials.lennardjones96 import LennardJones96Potential
+from .potentials.lennardjones_soft import LennardJonesSoftPotential
+from .potentials.srlrgaussian import SRLRGaussianPotential
 from .potentials.base import BasePotential
-from .potentials.bspline import BSplinePotential
 
 # Utilities
 from .utils.compute import dUdLByFrame, dUdL, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matrix, Hessian, KL_divergence, dUdLByBin
@@ -34,16 +37,21 @@ from .utils.bounds import BuildGlobalBounds, DescribeBounds
 __all__ = [
     "REMTrainerAnalytic",
 	"MSETrainerAnalytic",
+    "MultiTrainerAnalytic",
     "prepare_Trainer_data",
     "BaseOptimizer",
     "NewtonRaphsonOptimizer",
 	"AdamMaskedOptimizer",
 	"AdamWMaskedOptimizer",
 	"RMSpropMaskedOptimizer",
+    "MTAdamOptimizer",
 	"MultiGaussianPotential",
     "GaussianPotential",
+    "BSplinePotential",
 	"LennardJonesPotential",
 	"LennardJones96Potential",
+    "LennardJonesSoftPotential",
+    "SRLRGaussianPotential",
     "BasePotential",
     "dUdLByFrame",
     "dUdL",

@@ -217,8 +217,9 @@ def Pair2DistanceByFrame(
     else:
         update = True
 
-    pair2distance_frame = defaultdict(dict)
+    pair2distance_frame = {}
     for frame in range(start, end):
+        pair2distance_frame[frame] = {} # initialize empty dict, in case there're no pairs within the cutoff
         u.trajectory[frame]
 
         if update and (frame - start) % nstlist == 0: # update neighbor list
