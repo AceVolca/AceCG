@@ -8,6 +8,7 @@ class GaussianPotential(BasePotential):
         self.typ2  = typ2
         self.cutoff = cutoff
         self._params = np.array([A, r0, sigma])
+        self._params_to_scale = [0]
         self._param_names = ["A", "r0", "sigma"]
         self._dparam_names = ["dA", "dr0", "dsigma"]
         self._d2param_names = [

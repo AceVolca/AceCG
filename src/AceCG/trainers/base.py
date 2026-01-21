@@ -48,6 +48,7 @@ class BaseTrainer(ABC):
         # per-index bounds (aligned with FFParamArray order)
         self._lb = None
         self._ub = None
+        self.scale_factors = None
 
     def get_params(self) -> np.ndarray:
         """
@@ -156,3 +157,27 @@ class BaseTrainer(ABC):
             Subclass-specific tuple (e.g., gradients, Hessian, update).
         """
         pass
+
+    @abstractmethod
+    def d_dz(self):
+        pass
+
+    def get_scaled_potential(self):
+
+        the_potential = cp.deepcopy(self.potential)
+        i = 0
+        items = the_potential.items()
+        assert len(scale_factor)  == len(items)
+        for pair, pot in items:
+            pot = the_potential.get_modified_potential(scale_factors[i])
+            i += 1
+        return the_potential
+
+    def set_scale_factors(self, scale_factors):
+        items = self.potential.items()
+        assert len(scale_factors) == len(items)
+        self.scale_factors = scale_factors
+
+    def unset_scale_factors(self):
+
+        self.scale_factors = None

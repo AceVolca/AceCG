@@ -47,6 +47,7 @@ class LennardJonesSoftPotential(BasePotential):
 
         # Names of parameters and their derivatives
         self._param_names = ["epsilon", "sigma", "lambda"]
+        self._params_to_scale = [0]
         self._dparam_names = ["depsilon", "dsigma", "dlambda"]
         self._d2param_names = [
             ["depsilon_2", "depsilondsigma", "depsilondlambda"],

@@ -20,6 +20,7 @@ class LennardJones96Potential(BasePotential):
         self.typ2  = typ2
         self.cutoff = cutoff
         self._params = np.array([epsilon, sigma])
+        self._params_to_scale = [0]
         self._param_names = ["epsilon", "sigma"]
         self._dparam_names = ["depsilon", "dsigma"]
         self._d2param_names = [

@@ -45,6 +45,41 @@ def dUdLByFrame(
 
     return dUdL_frame
 
+def UByFrame(
+    pair2potential: Dict[Tuple[str, str], BasePotential],
+    pair2distance_frame: Dict[int, Dict[Tuple[str, str], np.ndarray]],
+) -> np.ndarray:
+    """
+    Compute per-frame U values from stored pairwise distances and potentials.
+
+    Parameters
+    ----------
+    pair2potential : dict
+        Dictionary mapping (type1, type2) pairs to potential objects.
+        Each potential must define:
+        - .n_params() : number of parameters of this potential
+        - .dparam_names() : list of derivative method names (e.g., ["dA"])
+        - Each method should accept an array of distances and return an array of dU/dλ values.
+    pair2distance_frame : dict
+        pair2distance_frame[frame][pair] = array of distances at that frame.
+
+    Returns
+    -------
+    U_frame : np.ndarray
+        Array of shape (n_frames, k), where each row is U at that frame.
+    """
+    frames = sorted(pair2distance_frame.keys())
+    n_frames = len(frames)
+    U_frame = np.zeros((n_frames, k_interactions))
+
+    for i, frame in enumerate(frames):
+        k=0
+        for pair, pot in pair2potential.items():
+            distances = pair2distance_frame[frame].get(pair, np.array([]))
+            U_frame[i, k] = pot.value(distances) if distances.size > 0 else 0.0
+            k+=1
+    return U_frame
+
 
 def dUdL(
     dUdL_frame: np.ndarray,
@@ -75,6 +110,37 @@ def dUdL(
         return np.mean(dUdL_frame, axis=0)
     frame_weight = frame_weight / np.sum(frame_weight)
     return dUdL_frame.T @ frame_weight
+
+
+def U_total(
+        U_frame: np.ndarray,
+        frame_weight: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """
+    Compute the time-averaged U vector over all frames.
+
+    Parameters
+    ----------
+    U_frame : np.ndarray
+        Array of shape (n_frames, n_params), typically from `UByFrame(...)`,
+        where each row is U for the interaction at one frame.
+    frame_weight : np.ndarray, optional
+        Length-n_frames weight array. If None, uniform average is used.
+
+    Returns
+    -------
+    U_avg : np.ndarray
+        1D array, averaged energy vector.
+
+    Notes
+    -----
+    - This is the U vector used in gradient-based optimization or in analytical L0 REM loss.
+    - If `frame_weight` is provided, it will be normalized first then applied.
+    """
+    if frame_weight is None:
+        return np.mean(U_frame, axis=0)
+    frame_weight = frame_weight / np.sum(frame_weight)
+    return U_frame.T @ frame_weight
 
 
 def d2UdLjdLk_Matrix(
@@ -326,5 +392,79 @@ def dUdLByBin(
         dUdL_bin[idx] = dUdL_frame[frame_mask].T @ frame_weight[frame_mask]
         p_bin[idx] = np.sum(frame_weight[frame_mask])
         dUdL_given_bin[idx] = dUdL(dUdL_frame[frame_mask], frame_weight[frame_mask])
+
+    return dUdL_bin, p_bin, dUdL_given_bin
+
+
+def UByBin(
+        U_frame: np.ndarray,
+        bin_idx_frame: np.ndarray,
+        frame_weight: Optional[np.ndarray] = None
+):  # compute ⟨U⟩_CG|s = ⟨Uδ[s(r)-s]⟩ / ⟨δ[s(r)-s]⟩
+    """
+    Compute conditional averages of U over histogram bins of a collective variable.
+
+    Groups per-frame U values by discrete bin indices (e.g., histogram bins
+    of a reaction coordinate s(r)) and computes:
+
+        U_bin[idx]     = ⟨U δ[s(r) - s_bin]⟩_CG
+        p_bin[idx]        = ⟨δ[s(r) - s_bin]⟩_CG
+        U_given_bin[idx] = ⟨U⟩_CG | s_bin
+
+    where δ[...] is the Kronecker delta selecting frames in the given bin.
+    Weighted averages are computed using `frame_weight` if provided.
+
+    Parameters
+    ----------
+    U_frame : np.ndarray
+        Array of per-frame derivatives, shape (n_frames, k_interactions).
+        Typically the output from `UByFrame`.
+    bin_idx_frame : np.ndarray
+        1D integer array of length n_frames, assigning each frame to a bin
+        index (e.g., histogram bin of reaction coordinate).
+    frame_weight : np.ndarray, optional
+        1D array of length n_frames giving weights for each frame
+        (e.g., reweighting factors). If None, all frames are weighted equally.
+        Will be normalized to sum to 1 internally.
+
+    Returns
+    -------
+    U_bin : dict[int, np.ndarray]
+        Weighted numerator term for each bin:
+        ⟨U δ[s(r) - s_bin]⟩_CG.
+        Value shape: (k_interactions,).
+    p_bin : dict[int, float]
+        Probability mass in each bin:
+        ⟨δ[s(r) - s_bin]⟩_CG.
+        This is the sum of normalized frame weights in that bin.
+    U_given_bin : dict[int, np.ndarray]
+        Conditional average in each bin:
+        <U>_CG | s_bin.
+        Value shape: (K_interactions,).
+        Should satisfy:
+            U_bin[idx] / p_bin[idx] ≈ U_given_bin[idx]
+
+    Notes
+    -----
+    - The equality above holds within numerical precision
+    - The helper function `U_total(...)` must accept the subset of U values
+      and weights and return the weighted average over frames in the bin.
+    - Bin indices in `bin_idx_frame` need not be contiguous; any integer
+      values are accepted.
+    """
+    if frame_weight is None:
+        frame_weight = np.ones(len(dUdL_frame))
+    frame_weight /= frame_weight.sum()
+
+    U_bin = {}  # {bin_idx: weighted average of dUdL at this bin, ⟨Uδ[s(r)-s]⟩_CG}
+    p_bin = {}  # {bin_idx: probability at this bin, <δ[s(r)-s]>_CG}
+    U_given_bin = {}  # {bin_idx: ⟨U⟩_CG|s}
+    idx_set = set(bin_idx_frame)
+
+    for idx in idx_set:
+        frame_mask = bin_idx_frame == idx
+        U_bin[idx] = U_frame[frame_mask].T @ frame_weight[frame_mask]
+        p_bin[idx] = np.sum(frame_weight[frame_mask])
+        U_given_bin[idx] = U_total(U_frame[frame_mask], frame_weight[frame_mask])
 
     return dUdL_bin, p_bin, dUdL_given_bin

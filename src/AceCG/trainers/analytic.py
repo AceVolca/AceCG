@@ -5,6 +5,7 @@ from typing import List, Sequence, Tuple, Any
 
 from .base import BaseTrainer
 from ..utils.compute import dUdLByFrame, dUdL, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matrix, Hessian, dUdLByBin
+from ..utils.compute import UByFrame, U_total, UByBin
 from .utils import optimizer_accepts_hessian
 
 
@@ -57,8 +58,13 @@ class REMTrainerAnalytic(BaseTrainer):
             Update vector applied to parameters.
         """
         # === Compute dS/dL ===
-        dUdL_AA_frame = dUdLByFrame(self.potential, AA_data['dist'])
-        dUdL_CG_frame = dUdLByFrame(self.potential, CG_data['dist'])
+        if self.scale_factors is not None:
+            the_potential = self.get_scaled_potential(scale_factors)
+        else:
+            the_potential = self.potential
+
+        dUdL_AA_frame = dUdLByFrame(the_potential, AA_data['dist'])
+        dUdL_CG_frame = dUdLByFrame(the_potential, CG_data['dist'])
         dUdL_AA = dUdL(dUdL_AA_frame, AA_data.get('weight'))
         dUdL_CG = dUdL(dUdL_CG_frame, CG_data.get('weight'))
         dSdL = self.beta * (dUdL_AA - dUdL_CG)
@@ -66,8 +72,8 @@ class REMTrainerAnalytic(BaseTrainer):
         # === Compute Hessian (if optimizer supports it) ===
         H = None
         if optimizer_accepts_hessian(self.optimizer):
-            d2U_AA = d2UdLjdLk_Matrix(self.potential, AA_data['dist'], AA_data.get('weight'))
-            d2U_CG = d2UdLjdLk_Matrix(self.potential, CG_data['dist'], CG_data.get('weight'))
+            d2U_AA = d2UdLjdLk_Matrix(the_potential, AA_data['dist'], AA_data.get('weight'))
+            d2U_CG = d2UdLjdLk_Matrix(the_potential, CG_data['dist'], CG_data.get('weight'))
             dUU_CG = dUdLj_dUdLk_Matrix(dUdL_CG_frame, CG_data.get('weight'))
             H = Hessian(self.beta, d2U_AA, d2U_CG, dUU_CG, dUdL_CG)
 
@@ -91,6 +97,15 @@ class REMTrainerAnalytic(BaseTrainer):
                 self.logger.add_scalar("REM/hessian_cond", np.linalg.cond(H), step_index)
 
         return dUdL_AA, dUdL_CG, dSdL, H, update
+
+    def d_dz(self, AA_data, CG_data, step_index: int = 0):
+
+        U_AA = U_total(self.potential, AA_data['dist'])
+        U_CG = U_total(self.potential, CG_data['dist'])
+
+        return self.beta * np.subtract(U_AA, U_CG)
+
+
 
 
 class MSETrainerAnalytic(BaseTrainer):
@@ -172,7 +187,12 @@ class MSETrainerAnalytic(BaseTrainer):
             mask ratio, learning rate, MSE, gradient norm, and update norm.
         """
         # === Compute ⟨dU/dλ_j⟩ for CG ===
-        dUdL_CG_frame = dUdLByFrame(self.potential, CG_data['dist'])
+        if self.scale_factors is not None:
+            the_potential = self.get_scaled_potential()
+        else:
+            the_potential = self.potential
+
+        dUdL_CG_frame = dUdLByFrame(the_potential, CG_data['dist'])
         dUdL_CG = dUdL(dUdL_CG_frame, CG_data.get('weight'))
 
         # Per-bin averages
@@ -221,6 +241,68 @@ class MSETrainerAnalytic(BaseTrainer):
             self.logger.add_scalar("MSE/update_norm", np.linalg.norm(update), step_index)
 
         return mse, dErrdL, update
+
+    def d_dz(self,pmf_AA: np.ndarray,
+        pmf_CG: np.ndarray,
+        CG_data: dict,
+        CG_bin_idx_frame: np.ndarray,
+        weighted_gauge = False, step_index: int = 0):
+
+        """
+                Parameters
+        ----------
+        pmf_AA : np.ndarray
+            Reference PMF from all-atom simulation. Shape: (n_bins,).
+        pmf_CG : np.ndarray
+            Current CG PMF from simulation. Shape: (n_bins,).
+        CG_data : dict
+            CG simulation data, must include:
+            - 'dist' : distances per frame per pair (for dUdLByFrame).
+            - 'weight' (optional) : frame weights for reweighting.
+        CG_bin_idx_frame : np.ndarray
+            Array mapping each frame to its bin index. Shape: (n_frames,).
+        weighted_gauge : bool, optional
+            Whether to apply weighted gauge min{Σ_s q(s)*[PMF_CG(s) - PMF_AA(s)]^2}
+
+        """
+
+        # === Compute ⟨U⟩ for CG ===
+        U_CG_frame = UByFrame(self.potential, CG_data['dist'])
+
+        U_CG = U_total(U_CG_frame, CG_data.get('weight'))
+
+        # Per-bin averages
+        U_CG_bin, p_CG_bin, U_CG_given_bin = UByBin(
+            U_CG_frame,
+            CG_bin_idx_frame,
+            CG_data.get('weight')
+        )
+
+        # === Adjust pmf_CG ===
+        if weighted_gauge:
+            # min{Σ_s q(s)*[PMF_CG(s) - PMF_AA(s)]^2}
+            c = (pmf_CG - pmf_AA) @ np.array([p_CG_bin.get(i, 0) for i in range(len(pmf_CG))])
+        else:
+            # min{Σ_s [PMF_CG(s) - PMF_AA(s)]^2}
+            c = np.mean(pmf_CG - pmf_AA)
+        pmf_CG_shifted = pmf_CG - c
+
+        # === Compute loss ===
+        mse = np.linalg.norm(pmf_AA - pmf_CG_shifted)
+
+        # === Compute gradient of MSE wrt parameters ===
+        idx_set = set(CG_bin_idx_frame)
+        Err_bin = {}
+        for idx in idx_set:
+            Err_bin[idx] = (pmf_CG_shifted[idx] - pmf_AA[idx]) * (U_CG_given_bin[idx] - U_CG)
+
+        # Sum over bins (missing bins contribute zero)
+        Err = 0
+        for idx in range(len(pmf_AA)):
+            Err += Err_bin.get(idx, 0)
+
+        return Err
+
 
 
 class MultiTrainerAnalytic(BaseTrainer):
@@ -318,7 +400,7 @@ class MultiTrainerAnalytic(BaseTrainer):
         # Optional: sanity check presence of meta-optimizer L
         assert hasattr(self.optimizer, "L"), "Meta-optimizer must expose attribute `.L`"
 
-    def step(self, param_list: Sequence[Tuple[Any, ...]], return_idx_list: Sequence[Sequence[int]]):
+    def step(self, param_list: Sequence[Tuple[Any, ...]], return_idx_list: Sequence[Sequence[int]], scale_factors=None):
         """
         Run one combined step over all sub-trainers and apply a weighted update.
 
