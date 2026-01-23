@@ -12,7 +12,7 @@ class Gate(object):
         if log_alpha_init is not None:
             self.log_alpha = log_alpha_init
         else:
-            self.log_alpha = [0 for _ in range(k)]
+            self.log_alpha = [1 for _ in range(k)]
         self.rng = np.random.default_rng(seed=5)
         self.beta_k = beta_k
         self.omega_k = omega_k
@@ -25,6 +25,12 @@ class Gate(object):
     def sigmoid(self, x):
 
         return 1 / (1 + np.exp(-x))
+
+    def get_determinsitic_values(self):
+
+        s_k = self.sigmoid(self.log_alpha / self.beta_k)
+        s_k = np.multiply(s_k, (self.zeta_k - self.omega_k)) + self.omega_k
+        return np.maximum(np.zeros_like(s_k), np.minimum(np.ones_like(s_k), s_k))
     def forward(self, step_index: int = 0):
 
         u_k = self.rng.uniform(size=len(self.z))
@@ -54,10 +60,12 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
         beta: float = None,
         logger=None, log_alpha_init=None, beta_k = 0.666, omega_k=-0.1, zeta_k=-0.1
     ):
-        super().__init__(potential, optimizer, trainer_list, weight_array, beta, logger)
+        super().__init__(potential, optimizer, trainer_list, weight_array[:-1], beta, logger)
 
         k = len(potential)
         self.gate = Gate(k, log_alpha_init=log_alpha_init, beta_k=beta_k, omega_k=omega_k, zeta_k=zeta_k)
+        self.set_optimizer()
+        self.weights = weight_array
 
 
     def get_modified_potential(self):
@@ -74,7 +82,12 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
 
         return potential
 
-    def step_L0(self, param_list: Sequence[Tuple[Any, ...]], return_idx_list: Sequence[Sequence[int]]):
+    def update_potential(self, L_new: np.ndarray):
+
+        self.optimizer.L = L_new.copy()
+        self.set_optimizer()
+
+    def step(self, param_list: Sequence[Tuple[Any, ...]], return_idx_list: Sequence[Sequence[int]]):
         """
         Run one combined step over all sub-trainers and apply a weighted update.
 
@@ -124,20 +137,32 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
         - The stacking/weighting assumes all updates share the same shape as
           `self.optimizer.L`.
         """
-        for trainer in self.trainers:
+        param_gradients = np.zeros_like(self.get_params())
+        gate_gradients = np.zeros_like(self.gate.log_alpha)
+
+        for i, trainer in self.trainers:
             trainer.set_scale_factors(self.gate.z)
-
-        self.step(param_list, return_idx_list)
-
-        for trainer in self.trainers:
+            param_gradients = np.add(self.weights[i] * param_gradients, trainer.get_gradients(*param_list[i]))
             trainer.unset_scale_factors()
-
-
-
-        for i, trainer in enumerate(self.trainers):
             d_dlogalpha = np.multiply(trainer.d_dz(*param_list[i]), self.gate.dz_logalpha())
+            gate_gradients = np.add(gate_gradients, self.weights[i] * d_dlogalpha)
 
-        gate_gradients = self.gate.dpi_dlogalpha()
+        gate_gradients = np.add(gate_gradients, self.weights[-1]*self.gate.dpi_dlogalpha())
+
+        total_gradients = param_gradients.extend(gate_gradients)
+
+        final_update = self.optimizer.step(total_gradients)
+
+        # === clamp & sync meta parameters ===
+        self.clamp_and_update()
+
+        # === sync sub-trainers' potentials with the new global L ===
+        # (Ensure consistent L across sub-trainers after meta update)
+        for tr in self.trainers:
+            tr.update_potential(self.optimizer.L[:len(self.get_params())])
+        self.gate.log_alpha = self.optimizer.L[len(self.get_params()):]
+
+        return final_update
 
 
     def get_gated_potential(self):
@@ -146,8 +171,19 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
         self.get_scaled_potential(self.gate.z)
 
     def forward(self):
-        
         self.gate.forward()
+
+    def set_optimizer(self):
+
+        correct_length = len(self.get_parans()) + len(self.gate.log_alpha)
+
+        if len(self.optimizer.L) != correct_length:
+            if len(self.optimizer.L) == len(self.get_params()):
+                self.optimizer.L.extend(self.gate.log_alpha)
+                self.optimizer.mask.extend([False for _ in range(len(self.gate.log_alpha))])
+            else:
+                raise ValueError("Optimizer of length " + str(len(self.optimizer.L)) + "is in an illegal state.")
+
 
 
 

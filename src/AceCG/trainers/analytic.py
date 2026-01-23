@@ -59,7 +59,7 @@ class REMTrainerAnalytic(BaseTrainer):
         """
         # === Compute dS/dL ===
         if self.scale_factors is not None:
-            the_potential = self.get_scaled_potential(scale_factors)
+            the_potential = self.get_scaled_potential(self.scale_factors)
         else:
             the_potential = self.potential
 
@@ -105,7 +105,20 @@ class REMTrainerAnalytic(BaseTrainer):
 
         return self.beta * np.subtract(U_AA, U_CG)
 
+    def get_gradients(self, AA_data, CG_data):
 
+        # === Compute dS/dL ===
+        if self.scale_factors is not None:
+            the_potential = self.get_scaled_potential(self.scale_factors)
+        else:
+            the_potential = self.potential
+
+        dUdL_AA_frame = dUdLByFrame(the_potential, AA_data['dist'])
+        dUdL_CG_frame = dUdLByFrame(the_potential, CG_data['dist'])
+        dUdL_AA = dUdL(dUdL_AA_frame, AA_data.get('weight'))
+        dUdL_CG = dUdL(dUdL_CG_frame, CG_data.get('weight'))
+        dSdL = self.beta * (dUdL_AA - dUdL_CG)
+        return dSdL
 
 
 class MSETrainerAnalytic(BaseTrainer):
@@ -241,6 +254,53 @@ class MSETrainerAnalytic(BaseTrainer):
             self.logger.add_scalar("MSE/update_norm", np.linalg.norm(update), step_index)
 
         return mse, dErrdL, update
+
+    def get_gradients(self, pmf_AA: np.ndarray,
+        pmf_CG: np.ndarray,
+        CG_data: dict,
+        CG_bin_idx_frame: np.ndarray,
+        weighted_gauge = False):
+        # === Compute ⟨dU/dλ_j⟩ for CG ===
+        if self.scale_factors is not None:
+            the_potential = self.get_scaled_potential()
+        else:
+            the_potential = self.potential
+
+        dUdL_CG_frame = dUdLByFrame(the_potential, CG_data['dist'])
+        dUdL_CG = dUdL(dUdL_CG_frame, CG_data.get('weight'))
+
+        # Per-bin averages
+        dUdL_CG_bin, p_CG_bin, dUdL_CG_given_bin = dUdLByBin(
+            dUdL_CG_frame,
+            CG_bin_idx_frame,
+            CG_data.get('weight')
+        )
+
+        # === Adjust pmf_CG ===
+        if weighted_gauge:
+            # min{Σ_s q(s)*[PMF_CG(s) - PMF_AA(s)]^2}
+            c = (pmf_CG - pmf_AA) @ np.array([p_CG_bin.get(i, 0) for i in range(len(pmf_CG))])
+        else:
+            # min{Σ_s [PMF_CG(s) - PMF_AA(s)]^2}
+            c = np.mean(pmf_CG - pmf_AA)
+        pmf_CG_shifted = pmf_CG - c
+
+        # === Compute loss ===
+        mse = np.linalg.norm(pmf_AA - pmf_CG_shifted)
+
+        # === Compute gradient of MSE wrt parameters ===
+        idx_set = set(CG_bin_idx_frame)
+        dErrdL_bin = {}
+        for idx in idx_set:
+            dErrdL_bin[idx] = (pmf_CG_shifted[idx] - pmf_AA[idx]) * (dUdL_CG_given_bin[idx] - dUdL_CG)
+
+        # Sum over bins (missing bins contribute zero)
+        dErrdL = 0
+        for idx in range(len(pmf_AA)):
+            dErrdL += dErrdL_bin.get(idx, 0)
+
+        return dErrdL
+
 
     def d_dz(self,pmf_AA: np.ndarray,
         pmf_CG: np.ndarray,
@@ -400,7 +460,7 @@ class MultiTrainerAnalytic(BaseTrainer):
         # Optional: sanity check presence of meta-optimizer L
         assert hasattr(self.optimizer, "L"), "Meta-optimizer must expose attribute `.L`"
 
-    def step(self, param_list: Sequence[Tuple[Any, ...]], return_idx_list: Sequence[Sequence[int]], scale_factors=None):
+    def step(self, param_list: Sequence[Tuple[Any, ...]], return_idx_list: Sequence[Sequence[int]]):
         """
         Run one combined step over all sub-trainers and apply a weighted update.
 

@@ -162,6 +162,10 @@ class BaseTrainer(ABC):
     def d_dz(self):
         pass
 
+    @abstractmethod
+    def get_gradients(self):
+        pass
+
     def get_scaled_potential(self):
 
         the_potential = cp.deepcopy(self.potential)
