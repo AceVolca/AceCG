@@ -70,13 +70,13 @@ def UByFrame(
     """
     frames = sorted(pair2distance_frame.keys())
     n_frames = len(frames)
-    U_frame = np.zeros((n_frames, k_interactions))
+    U_frame = np.zeros((n_frames, len(pair2potential)))
 
     for i, frame in enumerate(frames):
         k=0
         for pair, pot in pair2potential.items():
             distances = pair2distance_frame[frame].get(pair, np.array([]))
-            U_frame[i, k] = pot.value(distances) if distances.size > 0 else 0.0
+            U_frame[i, k] = pot.value(distances[0]) if distances.size > 0 else 0.0
             k+=1
     return U_frame
 
@@ -453,7 +453,7 @@ def UByBin(
       values are accepted.
     """
     if frame_weight is None:
-        frame_weight = np.ones(len(dUdL_frame))
+        frame_weight = np.ones(len(U_frame))
     frame_weight /= frame_weight.sum()
 
     U_bin = {}  # {bin_idx: weighted average of dUdL at this bin, ⟨Uδ[s(r)-s]⟩_CG}
@@ -467,4 +467,4 @@ def UByBin(
         p_bin[idx] = np.sum(frame_weight[frame_mask])
         U_given_bin[idx] = U_total(U_frame[frame_mask], frame_weight[frame_mask])
 
-    return dUdL_bin, p_bin, dUdL_given_bin
+    return U_bin, p_bin, U_given_bin

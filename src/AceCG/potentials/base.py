@@ -2,6 +2,9 @@
 from abc import ABC, abstractmethod
 from typing import List
 import numpy as np
+import copy
+
+import copy as cp
 
 class BasePotential(ABC):
     def __init__(self):
@@ -53,7 +56,7 @@ class BasePotential(ABC):
         #     assert len(new_params) == len(self._params)
         self._params = new_params.copy()
 
-    def get_scaled_potential(self, z):
+    def get_modified_potential(self, z):
 
         if self._params_to_scale is None:
             return cp.deepcopy(self)

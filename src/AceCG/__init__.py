@@ -7,6 +7,7 @@ from .trainers.analytic import REMTrainerAnalytic
 from .trainers.analytic import MSETrainerAnalytic
 from .trainers.analytic import MultiTrainerAnalytic
 from .trainers.utils import prepare_Trainer_data
+from .trainers.regularized import L0MultiTrainerAnalytic
 
 # Optimizers
 from .optimizers.base import BaseOptimizer
@@ -39,6 +40,7 @@ __all__ = [
 	"MSETrainerAnalytic",
     "MultiTrainerAnalytic",
     "prepare_Trainer_data",
+    "L0MultiTrainerAnalytic",
     "BaseOptimizer",
     "NewtonRaphsonOptimizer",
 	"AdamMaskedOptimizer",

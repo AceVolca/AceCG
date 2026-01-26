@@ -4,6 +4,8 @@ import copy
 from typing import List, Sequence, Tuple, Any
 
 from .analytic import MultiTrainerAnalytic
+from .base import BaseTrainer
+import copy as cp
 
 class Gate(object):
 
@@ -26,10 +28,10 @@ class Gate(object):
 
         return 1 / (1 + np.exp(-x))
 
-    def get_determinsitic_values(self):
+    def get_deterministic_values(self):
 
-        s_k = self.sigmoid(self.log_alpha / self.beta_k)
-        s_k = np.multiply(s_k, (self.zeta_k - self.omega_k)) + self.omega_k
+        s_k = self.sigmoid(np.divide(self.log_alpha, self.beta_k))
+        s_k = np.add(np.multiply(s_k, (self.zeta_k - self.omega_k)), self.omega_k)
         return np.maximum(np.zeros_like(s_k), np.minimum(np.ones_like(s_k), s_k))
     def forward(self, step_index: int = 0):
 
@@ -43,7 +45,7 @@ class Gate(object):
 
     def dpi_dlogalpha(self):
 
-        return np.multiply(self.pi, np.subtract(np.ones_like(self.pi, self.pi)))
+        return np.multiply(self.pi, np.subtract(np.ones_like(self.pi), self.pi))
 
     def dz_logalpha(self):
 
@@ -140,7 +142,7 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
         param_gradients = np.zeros_like(self.get_params())
         gate_gradients = np.zeros_like(self.gate.log_alpha)
 
-        for i, trainer in self.trainers:
+        for i, trainer in enumerate(self.trainers):
             trainer.set_scale_factors(self.gate.z)
             param_gradients = np.add(self.weights[i] * param_gradients, trainer.get_gradients(*param_list[i]))
             trainer.unset_scale_factors()
@@ -149,7 +151,7 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
 
         gate_gradients = np.add(gate_gradients, self.weights[-1]*self.gate.dpi_dlogalpha())
 
-        total_gradients = param_gradients.extend(gate_gradients)
+        total_gradients = np.append(param_gradients, gate_gradients)
 
         final_update = self.optimizer.step(total_gradients)
 
@@ -173,14 +175,23 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
     def forward(self):
         self.gate.forward()
 
+    def d_dz(self):
+        return None
+
+    def get_gradients(self):
+        return None
+
     def set_optimizer(self):
 
-        correct_length = len(self.get_parans()) + len(self.gate.log_alpha)
+        correct_length = len(self.get_params()) + len(self.gate.log_alpha)
 
         if len(self.optimizer.L) != correct_length:
             if len(self.optimizer.L) == len(self.get_params()):
-                self.optimizer.L.extend(self.gate.log_alpha)
-                self.optimizer.mask.extend([False for _ in range(len(self.gate.log_alpha))])
+                new_lr = self.optimizer.lr
+                new_L = np.append(self.optimizer.L, self.gate.log_alpha)
+                new_mask = np.append(self.optimizer.mask, [False for _ in range(len(self.gate.log_alpha))])
+                opt_cls = type(self.optimizer)
+                self.optimizer = opt_cls(new_L, new_mask, new_lr)
             else:
                 raise ValueError("Optimizer of length " + str(len(self.optimizer.L)) + "is in an illegal state.")
 

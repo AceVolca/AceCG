@@ -1,6 +1,7 @@
 # AceCG/trainers/base.py
 from abc import ABC, abstractmethod
 import numpy as np
+import copy as cp
 import copy
 from typing import Optional
 
@@ -171,9 +172,9 @@ class BaseTrainer(ABC):
         the_potential = cp.deepcopy(self.potential)
         i = 0
         items = the_potential.items()
-        assert len(scale_factor)  == len(items)
+        assert len(self.scale_factors)  == len(items)
         for pair, pot in items:
-            pot = the_potential.get_modified_potential(scale_factors[i])
+            pot = pot.get_modified_potential(self.scale_factors[i])
             i += 1
         return the_potential
 
