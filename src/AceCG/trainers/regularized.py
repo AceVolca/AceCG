@@ -9,7 +9,7 @@ import copy as cp
 
 class Gate(object):
 
-    def __init__(self, k, log_alpha_init=None, beta_k = 0.666, omega_k=-0.1, zeta_k=-0.1):
+    def __init__(self, k, log_alpha_init=None, beta_k = 0.666, omega_k=-0.1, zeta_k=1.1):
 
         if log_alpha_init is not None:
             self.log_alpha = log_alpha_init
@@ -28,6 +28,10 @@ class Gate(object):
 
         return 1 / (1 + np.exp(-x))
 
+    def get_pi(self):
+
+        return self.sigmoid(self.log_alpha - self.beta_k * np.log(-np.divide(self.omega_k, self.zeta_k)))
+
     def get_deterministic_values(self):
 
         s_k = self.sigmoid(np.divide(self.log_alpha, self.beta_k))
@@ -38,10 +42,11 @@ class Gate(object):
         u_k = self.rng.uniform(size=len(self.z))
         logistic_u_k = np.subtract(np.log(u_k), np.log(np.subtract(np.ones_like(u_k), u_k)))
 
-        s_k = self.sigmoid(np.subtract(logistic_u_k, self.log_alpha) / self.beta_k)
+        s_k = self.sigmoid(np.add(logistic_u_k, self.log_alpha) / self.beta_k)
         self.forward_s = s_k
         s_k = np.multiply(s_k, (self.zeta_k - self.omega_k)) + self.omega_k
         self.z = np.maximum(np.zeros_like(s_k), np.minimum(np.ones_like(s_k), s_k))
+        self.pi = self.get_pi()
 
     def dpi_dlogalpha(self):
 
@@ -60,7 +65,7 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
         trainer_list: Sequence[BaseTrainer],
         weight_array: np.ndarray,
         beta: float = None,
-        logger=None, log_alpha_init=None, beta_k = 0.666, omega_k=-0.1, zeta_k=-0.1
+        logger=None, log_alpha_init=None, beta_k = 0.666, omega_k=-0.1, zeta_k=1.1
     ):
         super().__init__(potential, optimizer, trainer_list, weight_array[:-1], beta, logger)
 
@@ -150,9 +155,7 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
             gate_gradients = np.add(gate_gradients, self.weights[i] * d_dlogalpha)
 
         gate_gradients = np.add(gate_gradients, self.weights[-1]*self.gate.dpi_dlogalpha())
-
         total_gradients = np.append(param_gradients, gate_gradients)
-
         final_update = self.optimizer.step(total_gradients)
 
         # === clamp & sync meta parameters ===
@@ -189,7 +192,14 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
             if len(self.optimizer.L) == len(self.get_params()):
                 new_lr = self.optimizer.lr
                 new_L = np.append(self.optimizer.L, self.gate.log_alpha)
-                new_mask = np.append(self.optimizer.mask, [False for _ in range(len(self.gate.log_alpha))])
+                if len(self.optimizer.mask) != correct_length:
+                    if len(self.optimizer.mask) == len(self.get_params()):
+                        new_mask = np.append(self.optimizer.mask, [True for _ in range(len(self.gate.log_alpha))])
+                    else:
+                        raise ValueError(
+                            "Optimizer mask of length " + str(len(self.optimizer.mask)) + "is in an illegal state.")
+                else:
+                    new_mask = self.optimizer.mask
                 opt_cls = type(self.optimizer)
                 self.optimizer = opt_cls(new_L, new_mask, new_lr)
             else:

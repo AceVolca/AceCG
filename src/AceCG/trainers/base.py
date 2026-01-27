@@ -115,12 +115,14 @@ class BaseTrainer(ABC):
         """
         if self._lb is None and self._ub is None:
             return L
+        assert len(self._lb) == len(self._ub)
         Lc = L.copy()
+        Lc_small = Lc[:len(self._lb)]
         if self._lb is not None:
-            Lc = np.maximum(Lc, self._lb)
+            Lc_small = np.maximum(Lc_small, self._lb)
         if self._ub is not None:
-            Lc = np.minimum(Lc, self._ub)
-        return Lc
+            Lc_small = np.minimum(Lc_small, self._ub)
+        return np.append(Lc_small, Lc[len(self._lb):])
 
     def clamp_and_update(self):
         """
