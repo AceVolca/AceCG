@@ -14,7 +14,7 @@ class Gate(object):
         if log_alpha_init is not None:
             self.log_alpha = log_alpha_init
         else:
-            self.log_alpha = [1 for _ in range(k)]
+            self.log_alpha = [0 for _ in range(k)]
         self.rng = np.random.default_rng(seed=5)
         self.beta_k = beta_k
         self.omega_k = omega_k
@@ -37,11 +37,11 @@ class Gate(object):
         s_k = self.sigmoid(np.divide(self.log_alpha, self.beta_k))
         s_k = np.add(np.multiply(s_k, (self.zeta_k - self.omega_k)), self.omega_k)
         return np.maximum(np.zeros_like(s_k), np.minimum(np.ones_like(s_k), s_k))
-    def forward(self, step_index: int = 0):
+    def forward(self, step_index: int = 0, noise_level=1):
 
         u_k = self.rng.uniform(size=len(self.z))
         logistic_u_k = np.subtract(np.log(u_k), np.log(np.subtract(np.ones_like(u_k), u_k)))
-
+        logistic_u_k = np.multiply(logistic_u_k, noise_level)
         s_k = self.sigmoid(np.add(logistic_u_k, self.log_alpha) / self.beta_k)
         self.forward_s = s_k
         s_k = np.multiply(s_k, (self.zeta_k - self.omega_k)) + self.omega_k
@@ -84,13 +84,20 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
 
         i = 0
         for pair, pot in potential.items():
-            pot = pot.get_scaled_potential(self.gate.z[i])
+            potential[pair] =  pot.get_modified_potential(self.gate.z[i])
             i+=1
 
         return potential
 
     def update_potential(self, L_new: np.ndarray):
 
+        L_new = L_new.copy()
+        idx = 0
+        for pair in self.potential.keys():
+            pot = self.potential[pair]
+            n = pot.n_params()
+            pot.set_params(L_new[idx:idx + n])
+            idx += n
         self.optimizer.L = L_new.copy()
         self.set_optimizer()
 
@@ -173,10 +180,28 @@ class L0MultiTrainerAnalytic(MultiTrainerAnalytic):
     def get_gated_potential(self):
 
         assert  self.gate.z[0] is not None
-        self.get_scaled_potential(self.gate.z)
+        return self.get_scaled_potential(self.gate.z)
 
-    def forward(self):
-        self.gate.forward()
+    def get_potential_to_undo_gates(self):
+
+        deterministic_z = self.gate.get_deterministic_values()
+        if np.any(deterministic_z == 0):
+            raise ValueError("Can not get the gate inverse when gates are 0")
+        elif np.any(deterministic_z < .1):
+            print("Warning some gates are low which will create a strong potential")
+        values = np.divide(np.ones_like(self.gate.z), deterministic_z)
+
+        potential = cp.deepcopy(self.potential)
+
+        i = 0
+        for pair, pot in potential.items():
+            potential[pair] = pot.get_modified_potential(values[i])
+            i += 1
+
+        return potential
+
+    def forward(self, noise_level=1):
+        self.gate.forward(noise_level=noise_level)
 
     def d_dz(self):
         return None

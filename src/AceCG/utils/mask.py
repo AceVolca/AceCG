@@ -15,6 +15,7 @@ def BuildGlobalMask(
     strict: bool = False,
     case_sensitive: bool = True,
     global_patterns: Optional[Iterable[str]] = None,
+    L0=False
 ) -> np.ndarray:
     """
     Build a boolean mask aligned with FFParamArray(pair2potential),
@@ -70,6 +71,7 @@ def BuildGlobalMask(
         pair_offsets[pair] = total
         total += pot.n_params()
 
+    l0_mask = [L0 for _ in range(len(pair2potential.items()))]
     if mode not in ("freeze","train"):
         raise ValueError(f"mode must be 'freeze' or 'train', got {mode}")
 
@@ -115,6 +117,8 @@ def BuildGlobalMask(
                     mask[gi] = False
                 else:  # "train"
                     mask[gi] = True
+    if L0:
+        mask = np.append(mask, np.array(l0_mask))
     return mask
 
 

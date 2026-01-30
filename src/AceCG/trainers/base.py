@@ -176,7 +176,7 @@ class BaseTrainer(ABC):
         items = the_potential.items()
         assert len(self.scale_factors)  == len(items)
         for pair, pot in items:
-            pot = pot.get_modified_potential(self.scale_factors[i])
+            the_potential[pair] = pot.get_modified_potential(self.scale_factors[i])
             i += 1
         return the_potential
 
