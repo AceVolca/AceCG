@@ -8,3 +8,5 @@ A flexible Python package for bottom-up coarse-graining, combining statistical m
 - [@Weizhi Xue](https://github.com/KJAdams2000)
 - [@Ivan Kuang](https://github.com/Miku-keai)
 - [@Brian Faintich](https://github.com/brianfaintich)
+- [@Curt Waltmann](https://github.com/waltmann1)
+- [@Zhikun Zhou](https://github.com/afakeoutstandingplyer)
