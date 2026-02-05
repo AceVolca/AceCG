@@ -58,6 +58,7 @@ class MultiGaussianPotential(BasePotential):
             if init_params.size != 3 * self.n_gauss:
                 raise ValueError(f"init_params must have length {3*self.n_gauss}")
             self._params = init_params.copy()
+        self._params_to_scale = [i for i in range(len(self._params)) if i%3 == 0]
 
         # Names
         self._param_names = []

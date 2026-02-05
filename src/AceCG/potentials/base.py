@@ -2,6 +2,7 @@
 from abc import ABC, abstractmethod
 from typing import List
 import numpy as np
+import copy as cp
 
 class BasePotential(ABC):
     def __init__(self):
@@ -9,6 +10,7 @@ class BasePotential(ABC):
         self._param_names = None
         self._dparam_names = None
         self._d2param_names = None
+        self._params_to_scale = None
 
     @abstractmethod
     def value(self, r: np.ndarray) -> np.ndarray:
@@ -51,3 +53,15 @@ class BasePotential(ABC):
         # if self._params is not None:
         #     assert len(new_params) == len(self._params)
         self._params = new_params.copy()
+
+    def get_scaled_potential(self, z):
+
+        if self._params_to_scale is None:
+            return cp.deepcopy(self)
+
+        copied = cp.deepcopy(self)
+
+        for idx in self._params_to_scale:
+            copied._params[idx] = self._params[idx] * z
+
+        return copied

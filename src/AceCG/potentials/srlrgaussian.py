@@ -26,6 +26,8 @@ class SRLRGaussianPotential(BasePotential):
         self._params = np.array([A, B, C, D])
         self._param_names = ["A", "B", "C", "D"]
 
+        self._params_to_scale = [0, 2]
+
         # First derivatives
         self._dparam_names = ["dA", "dB", "dC", "dD"]
 

@@ -25,6 +25,7 @@ class BSplinePotential(BasePotential):
         self.spline = BSpline(knots, coefficients, degree)
 
         n_params = len(coefficients)
+        self._params_to_scale = list(range(n_params))
         self._param_names = [f"c{i}" for i in range(n_params)]
         self._dparam_names = [f"dc{i}" for i in range(n_params)]
         self._d2param_names = [

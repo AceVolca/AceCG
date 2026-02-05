@@ -1,7 +1,9 @@
 # AceCG/utils/compute.py
 import numpy as np
-from typing import Dict, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, Union
 from ..potentials.base import BasePotential
+import MDAnalysis as mda
+from MDAnalysis.lib.distances import capped_distance
 
 # ===========================
 # Gradient and Hessian Terms
@@ -328,3 +330,428 @@ def dUdLByBin(
         dUdL_given_bin[idx] = dUdL(dUdL_frame[frame_mask], frame_weight[frame_mask])
 
     return dUdL_bin, p_bin, dUdL_given_bin
+
+
+def compute_weighted_rdf(
+    u: mda.Universe,
+    sel1: str,
+    sel2: str,
+    weights: Optional[np.ndarray] = None,
+    r_range: Tuple[float, float] = (0.0, 15.0),
+    nbins: int = 150,
+    pbc: bool = True,
+    exclude_self: bool = False,
+    mode: str = "liquid_gr",  # "liquid_gr" | "bound_pr" | "liquid_gr_fixed_rho"
+    rho2_override: Optional[float] = None,
+    dtype: np.dtype = np.float64,
+) -> Dict[str, Any]:
+    """
+    Compute weighted distance distributions between two MDAnalysis selections.
+
+    This function provides a unified interface for computing either:
+
+    (1) **Liquid-style radial distribution functions g(r)**, normalized by the
+        bulk number density of `sel2`, or
+    (2) **Bound-state pair-distance probability densities p(r)**, suitable for
+        protein–protein complexes that remain associated and do not sample bulk.
+
+    The statistical estimator supports per-frame importance weights (e.g. from
+    REM / umbrella reweighting). The weights do NOT need to be normalized; only
+    their relative values matter.
+
+    Parameters
+    ----------
+    u : MDAnalysis.Universe
+        Universe containing topology and trajectory.
+    sel1, sel2 : str
+        MDAnalysis selection strings defining the two groups whose pairwise
+        distances are analyzed.
+    weights : np.ndarray, optional
+        Per-frame importance weights of shape (n_frames,).
+        - If None, all frames are weighted equally (standard time average).
+        - If provided, weights are applied consistently in both numerator and
+          normalization terms.
+        Notes:
+            Weights do NOT need to sum to 1. Global scaling cancels in all outputs.
+    r_range : (float, float)
+        Minimum and maximum distances (r_min, r_max) for histogramming.
+    nbins : int
+        Number of histogram bins.
+    pbc : bool
+        Whether to apply periodic boundary conditions. Required for liquid-style
+        g(r) normalization.
+    exclude_self : bool
+        If True and `sel1` and `sel2` overlap, exclude i == j self-pairs.
+    mode : str
+        Defines the physical meaning and normalization of the output.
+        Supported values:
+            - "liquid_gr":
+                Standard RDF:
+                    g(r) = <h(r)> / [N1 * rho2 * shell_volume]
+                where rho2 = N2 / V is computed per frame.
+                Appropriate for bulk liquids or well-defined concentrations.
+            - "liquid_gr_fixed_rho":
+                Same as "liquid_gr", but using a fixed reference density
+                `rho2_override` instead of per-frame N2/V.
+                Useful when comparing trajectories with different box sizes
+                or concentrations.
+            - "bound_pr":
+                Bound-state pair-distance probability density p(r), normalized
+                such that:
+                    sum_i p(r_i) * dr = 1
+                This mode does NOT use box volume or bulk density and is the
+                recommended choice for protein–protein complexes that remain bound.
+    rho2_override : float, optional
+        Reference number density used when mode == "liquid_gr_fixed_rho".
+        Must be provided in that case.
+    dtype : numpy dtype
+        Floating-point type used for accumulation and normalization.
+
+    Returns
+    -------
+    out : dict
+        Dictionary containing histogrammed distance distributions and metadata.
+        Common keys:
+            - "r"        : (nbins,) bin centers
+            - "edges"    : (nbins+1,) bin edges
+            - "dr"       : float bin width
+            - "hist"     : (nbins,) weighted distance counts
+            - "shell_vol": (nbins,) spherical shell volumes
+
+        Mode-dependent keys:
+            - If mode in {"liquid_gr", "liquid_gr_fixed_rho"}:
+                - "g"        : (nbins,) radial distribution function g(r)
+                - "norm_gr"  : (nbins,) normalization term
+            - If mode == "bound_pr":
+                - "p"        : (nbins,) pair-distance probability density p(r)
+                - "norm_pr"  : float normalization constant
+
+        Metadata:
+            - "meta" : dict with diagnostic information, including:
+                * mode, selections, number of frames used
+                * box volume range (for liquid modes)
+                * weight sums and effective pair counts
+
+    Notes
+    -----
+    - For **protein–protein bound states**, liquid-style g(r) can become extremely
+      large and box-size dependent. In such cases, `mode="bound_pr"` should be used
+      for meaningful AA–CG comparisons.
+    - This function computes distributions over *all pairwise distances* between
+      `sel1` and `sel2`. If a more restrictive definition (e.g. closest-contact
+      distances) is desired, preprocessing of the distance list is recommended.
+    - The implementation mirrors the weighting conventions used elsewhere in
+      AceCG (e.g. REM estimators), ensuring internal consistency.
+    """
+
+    dtype = np.dtype(dtype).type  # callable scalar type
+    ag1 = u.select_atoms(sel1)
+    ag2 = u.select_atoms(sel2)
+    n_frames = len(u.trajectory)
+
+    # weights
+    if weights is None:
+        w = np.ones(n_frames, dtype=dtype)
+    else:
+        w = np.asarray(weights, dtype=dtype)
+        if w.shape[0] != n_frames:
+            raise ValueError(f"weights length {w.shape[0]} != n_frames {n_frames}")
+
+    rmin, rmax = float(r_range[0]), float(r_range[1])
+    edges = np.linspace(rmin, rmax, nbins + 1, dtype=dtype)
+    dr = float(edges[1] - edges[0])
+    r = 0.5 * (edges[:-1] + edges[1:])
+    shell_vol = (4.0 * np.pi / 3.0) * (edges[1:]**3 - edges[:-1]**3)
+
+    hist = np.zeros(nbins, dtype=dtype)
+
+    # For liquid g(r)
+    norm_gr = np.zeros(nbins, dtype=dtype)
+
+    # For bound p(r): total weighted number of considered pairs (for normalization)
+    # (Sum_t w_t * N_pairs_t)
+    wNpairs_sum = dtype(0.0)
+
+    V_list = []
+    n_used = 0
+
+    for iframe, ts in enumerate(u.trajectory):
+        wt = w[iframe]
+        if wt == 0.0:
+            continue
+
+        N1 = len(ag1)
+        N2 = len(ag2)
+        if N1 == 0 or N2 == 0:
+            continue
+
+        if pbc:
+            dims = ts.dimensions
+            if dims is None or dims[0] == 0:
+                raise ValueError("pbc=True but no valid ts.dimensions.")
+            V = dtype(dims[0] * dims[1] * dims[2])
+            box = dims
+        else:
+            V = None
+            box = None
+
+        pairs, dists = capped_distance(
+            ag1.positions, ag2.positions,
+            max_cutoff=rmax, min_cutoff=rmin,
+            box=box if pbc else None,
+            return_distances=True,
+        )
+        if exclude_self:
+            dists = dists[pairs[:, 0] != pairs[:, 1]]
+
+        h, _ = np.histogram(dists, bins=edges)
+        h = h.astype(dtype, copy=False)
+        hist += wt * h
+
+        # pair count used in this frame (for p(r) normalization)
+        # Using N1*N2 is consistent with "all pairs" definition.
+        # If you later change to unique pairs actually considered, replace here.
+        Npairs = dtype(N1 * N2)
+        wNpairs_sum += wt * Npairs
+
+        # liquid-style normalization
+        if mode in ("liquid_gr", "liquid_gr_fixed_rho"):
+            if not pbc:
+                raise ValueError("liquid_gr requires pbc and a meaningful volume.")
+            if mode == "liquid_gr_fixed_rho":
+                if rho2_override is None:
+                    raise ValueError("rho2_override must be provided for liquid_gr_fixed_rho.")
+                rho2 = dtype(rho2_override)
+            else:
+                rho2 = dtype(N2) / V
+            norm_gr += wt * dtype(N1) * rho2 * shell_vol
+            V_list.append(float(V))
+
+        n_used += 1
+
+    out: Dict[str, Any] = {
+        "r": r,
+        "edges": edges,
+        "dr": dr,
+        "hist": hist,
+        "shell_vol": shell_vol,
+    }
+
+    # Compute outputs per mode
+    if mode in ("liquid_gr", "liquid_gr_fixed_rho"):
+        with np.errstate(divide="ignore", invalid="ignore"):
+            g = hist / norm_gr
+            g[~np.isfinite(g)] = 0.0
+        out["g"] = g
+        out["norm_gr"] = norm_gr
+
+    if mode == "bound_pr":
+        # probability density p(r) s.t. sum p*dr = 1
+        # p(r_i) = (weighted counts in bin i) / (weighted total pair counts * dr)
+        denom = wNpairs_sum * dtype(dr)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            p = hist / denom
+            p[~np.isfinite(p)] = 0.0
+        out["p"] = p
+        out["norm_pr"] = denom  # scalar
+
+    meta = {
+        "mode": mode,
+        "sel1": sel1,
+        "sel2": sel2,
+        "n_frames": int(n_frames),
+        "n_used_frames": int(n_used),
+        "pbc": bool(pbc),
+        "exclude_self": bool(exclude_self),
+        "r_range": (rmin, rmax),
+        "nbins": int(nbins),
+        "N1": int(len(ag1)),
+        "N2": int(len(ag2)),
+        "rho2_override": float(rho2_override) if rho2_override is not None else None,
+        "V_min": float(np.min(V_list)) if V_list else None,
+        "V_max": float(np.max(V_list)) if V_list else None,
+        "w_sum": float(np.sum(w)),
+        "wNpairs_sum": float(wNpairs_sum),
+    }
+    out["meta"] = meta
+    return out
+
+
+# defining types
+Pair = Tuple[str, str]
+Pair2DistanceByFrame = Dict[int, Dict[Pair, np.ndarray]]
+
+def compute_weighted_pair_distance_pdfs(
+    pair2distance_frame: Pair2DistanceByFrame,
+    frame_weight: Optional[Union[np.ndarray, Dict[int, float]]] = None,
+    r_range: Tuple[float, float] = (0.0, 25.0),
+    nbins: int = 250,
+    dtype: np.dtype = np.float64,
+    drop_empty_pairs: bool = True,
+) -> Dict[Pair, Dict[str, Any]]:
+    """
+    Compute per-pair weighted distance PDFs p(r) from stored per-frame distances.
+
+    This is the "bound-state friendly" alternative to liquid-style g(r):
+    it returns the probability density of pair distances, normalized such that
+        sum_i p_i * dr = 1.
+
+    Parameters
+    ----------
+    pair2distance_frame : dict
+        Nested dictionary:
+            pair2distance_frame[frame_idx][pair] = np.ndarray of distances in that frame
+        where `pair` is typically (type1, type2) or (site_i, site_j).
+    frame_weight : np.ndarray or dict, optional
+        - If None: uniform weights over frames.
+        - If np.ndarray: length must equal number of frames (sorted by frame index).
+        - If dict: mapping {frame_idx: weight}. Missing frames default to 0.
+        Notes:
+            Weights do NOT need to sum to 1; only relative weights matter.
+    r_range : (rmin, rmax)
+        Histogram range in same distance units as your stored distances (usually Å).
+    nbins : int
+        Number of bins.
+    dtype : numpy dtype
+        Accumulation dtype.
+    drop_empty_pairs : bool
+        If True, pairs with zero total samples are omitted from output.
+
+    Returns
+    -------
+    out_by_pair : dict
+        out_by_pair[pair] = {
+            "r": (nbins,) bin centers,
+            "p": (nbins,) probability density p(r),
+            "edges": (nbins+1,) bin edges,
+            "dr": float bin width,
+            "hist": (nbins,) weighted counts per bin (sum_t w_t * h_t),
+            "norm": float, normalization scalar = (sum_t w_t * n_samples_t) * dr,
+            "meta": {
+                "pair": pair,
+                "n_frames": int,
+                "n_used_frames": int,
+                "w_sum": float,
+                "w_abs_sum": float,
+                "n_samples_weighted": float,   # sum_t w_t * n_samples_t
+                "n_samples_raw": int,          # sum_t n_samples_t (unweighted)
+                "r_range": (rmin, rmax),
+                "nbins": int,
+            }
+        }
+
+    Notes
+    -----
+    - This computes a *distance PDF* p(r), not liquid RDF g(r). It is robust to
+      differing box volumes / concentrations between trajectories and is usually
+      the right object for protein-protein bound-state comparisons.
+    """
+    dtype = np.dtype(dtype).type
+
+    frames = sorted(pair2distance_frame.keys())
+    n_frames = len(frames)
+    if n_frames == 0:
+        return {}
+
+    # Build frame weights aligned with sorted frames
+    if frame_weight is None:
+        w = np.ones(n_frames, dtype=dtype)
+    elif isinstance(frame_weight, dict):
+        w = np.array([frame_weight.get(fr, 0.0) for fr in frames], dtype=dtype)
+    else:
+        w = np.asarray(frame_weight, dtype=dtype)
+        if w.shape[0] != n_frames:
+            raise ValueError(f"frame_weight length {w.shape[0]} != n_frames {n_frames}")
+
+    rmin, rmax = float(r_range[0]), float(r_range[1])
+    if not (rmax > rmin >= 0.0):
+        raise ValueError(f"Invalid r_range={r_range}")
+
+    edges = np.linspace(rmin, rmax, nbins + 1, dtype=dtype)
+    dr = float(edges[1] - edges[0])
+    r = 0.5 * (edges[:-1] + edges[1:])
+
+    # Collect union of pairs across frames
+    pair_set = set()
+    for fr in frames:
+        pair_set.update(pair2distance_frame[fr].keys())
+
+    out_by_pair: Dict[Pair, Dict[str, Any]] = {}
+
+    w_sum = float(np.sum(w))
+    w_abs_sum = float(np.sum(np.abs(w)))
+
+    for pair in sorted(pair_set):
+        hist = np.zeros(nbins, dtype=dtype)
+
+        n_used = 0
+        n_samples_raw = 0
+        n_samples_weighted = dtype(0.0)
+
+        for i, fr in enumerate(frames):
+            wt = w[i]
+            if wt == 0.0:
+                continue
+
+            d = pair2distance_frame[fr].get(pair, None)
+            if d is None:
+                continue
+            d = np.asarray(d)
+            if d.size == 0:
+                continue
+
+            # histogram within [rmin, rmax]
+            h, _ = np.histogram(d, bins=edges)
+            hist += wt * h.astype(dtype, copy=False)
+
+            n = int(d.size)
+            n_used += 1
+            n_samples_raw += n
+            n_samples_weighted += wt * dtype(n)
+
+        if n_samples_raw == 0:
+            if not drop_empty_pairs:
+                out_by_pair[pair] = {
+                    "r": r, "p": np.zeros_like(r), "edges": edges, "dr": dr,
+                    "hist": hist, "norm": 0.0,
+                    "meta": {
+                        "pair": pair,
+                        "n_frames": int(n_frames),
+                        "n_used_frames": int(n_used),
+                        "w_sum": w_sum,
+                        "w_abs_sum": w_abs_sum,
+                        "n_samples_weighted": float(n_samples_weighted),
+                        "n_samples_raw": int(n_samples_raw),
+                        "r_range": (rmin, rmax),
+                        "nbins": int(nbins),
+                    }
+                }
+            continue
+
+        # PDF normalization: sum_i p_i * dr = 1
+        norm = float(n_samples_weighted) * dr
+        with np.errstate(divide="ignore", invalid="ignore"):
+            p = hist / norm
+            p[~np.isfinite(p)] = 0.0
+
+        out_by_pair[pair] = {
+            "r": r,
+            "p": p,
+            "edges": edges,
+            "dr": dr,
+            "hist": hist,
+            "norm": norm,
+            "meta": {
+                "pair": pair,
+                "n_frames": int(n_frames),
+                "n_used_frames": int(n_used),
+                "w_sum": w_sum,
+                "w_abs_sum": w_abs_sum,
+                "n_samples_weighted": float(n_samples_weighted),
+                "n_samples_raw": int(n_samples_raw),
+                "r_range": (rmin, rmax),
+                "nbins": int(nbins),
+            },
+        }
+
+    return out_by_pair

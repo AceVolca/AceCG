@@ -236,3 +236,38 @@ def Pair2DistanceByFrame(
             pair2distance_frame[frame][pair] = calc_bonds(a_positions, b_positions, box=u.dimensions)
 
     return pair2distance_frame
+
+
+def combine_Pair2DistanceByFrame(
+    dicts: List[Dict],
+    start_frame=0,
+):
+    """
+    Combine multiple Pair2DistanceByFrame dictionaries into one,
+    with continuous global frame indices.
+
+    Parameters
+    ----------
+    dicts : list of dict
+        Each element is a Pair2DistanceByFrame result:
+        {frame_idx: {pair: distances}}
+        frame_idx is assumed to be local (relative) index.
+        Order in list defines concatenation order.
+    start_frame : int
+        Global starting frame index.
+
+    Returns
+    -------
+    combined : dict
+        {global_frame_idx: {pair: distances}}
+    """
+    combined = {}
+    cur = start_frame
+
+    for d in dicts:
+        # sorted by frame_idx
+        for _, frame_data in sorted(d.items(), key=lambda x: x[0]):
+            combined[cur] = frame_data
+            cur += 1
+
+    return combined
