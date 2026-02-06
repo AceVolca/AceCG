@@ -2,11 +2,11 @@
 AceCG: A Python package for bottom-up coarse-graining.
 """
 
-# Core REM trainers
+# Core CG FF trainers
 from .trainers.analytic import REMTrainerAnalytic
 from .trainers.analytic import MSETrainerAnalytic
 from .trainers.analytic import MultiTrainerAnalytic
-from .trainers.utils import prepare_Trainer_data
+from .trainers.utils import prepare_Trainer_data, prepare_Trainer_data_parallel
 
 # Optimizers
 from .optimizers.base import BaseOptimizer
@@ -32,14 +32,18 @@ from .utils.compute import dUdLByFrame, dUdL, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matr
 from .utils.neighbor import Pair2DistanceByFrame, combine_Pair2DistanceByFrame
 from .utils.ffio import FFParamArray, FFParamIndexMap, ReadLmpFF, WriteLmpTable, WriteLmpFF, ParseLmpTable
 from .utils.mask import BuildGlobalMask, DescribeMask
-from .fitters.fit_multi_gaussian import MultiGaussianConfig, MultiGaussianTableFitter
 from .utils.bounds import BuildGlobalBounds, DescribeBounds
+from .utils.trjio import split_lammpstrj, split_lammpstrj_mdanalysis
+
+# Fitters
+from .fitters.fit_multi_gaussian import MultiGaussianConfig, MultiGaussianTableFitter
 
 __all__ = [
     "REMTrainerAnalytic",
 	"MSETrainerAnalytic",
     "MultiTrainerAnalytic",
     "prepare_Trainer_data",
+    "prepare_Trainer_data_parallel",
     "BaseOptimizer",
     "NewtonRaphsonOptimizer",
 	"AdamMaskedOptimizer",
@@ -78,5 +82,7 @@ __all__ = [
 	"MultiGaussianTableFitter",
 	"BuildGlobalBounds",
 	"DescribeBounds",
+    "split_lammpstrj",
+    "split_lammpstrj_mdanalysis",
 ]
 

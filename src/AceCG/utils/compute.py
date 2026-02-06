@@ -339,6 +339,9 @@ def compute_weighted_rdf(
     weights: Optional[np.ndarray] = None,
     r_range: Tuple[float, float] = (0.0, 15.0),
     nbins: int = 150,
+    start: Optional[int] = None,
+    stop: Optional[int] = None,
+    step: int = 1,
     pbc: bool = True,
     exclude_self: bool = False,
     mode: str = "liquid_gr",  # "liquid_gr" | "bound_pr" | "liquid_gr_fixed_rho"
@@ -367,16 +370,22 @@ def compute_weighted_rdf(
         MDAnalysis selection strings defining the two groups whose pairwise
         distances are analyzed.
     weights : np.ndarray, optional
-        Per-frame importance weights of shape (n_frames,).
-        - If None, all frames are weighted equally (standard time average).
-        - If provided, weights are applied consistently in both numerator and
-          normalization terms.
+        Per-frame importance weights aligned to the *full* trajectory of shape
+        (len(u.trajectory),).
+        - If None, all selected frames are weighted equally (standard time average).
+        - If provided, weights are sliced using (start, stop, step) to match the
+          selected trajectory frames.
         Notes:
             Weights do NOT need to sum to 1. Global scaling cancels in all outputs.
     r_range : (float, float)
         Minimum and maximum distances (r_min, r_max) for histogramming.
     nbins : int
         Number of histogram bins.
+    start, stop, step : int, optional
+        Subset trajectory frames using Python slicing semantics on `u.trajectory`
+        (i.e., frames = range(n_frames_total)[start:stop:step]).
+        This is useful for discarding equilibration, limiting analysis windows,
+        or subsampling for speed.
     pbc : bool
         Whether to apply periodic boundary conditions. Required for liquid-style
         g(r) normalization.
@@ -431,6 +440,7 @@ def compute_weighted_rdf(
                 * mode, selections, number of frames used
                 * box volume range (for liquid modes)
                 * weight sums and effective pair counts
+                * analysis window (start/stop/step)
 
     Notes
     -----
@@ -443,21 +453,37 @@ def compute_weighted_rdf(
     - The implementation mirrors the weighting conventions used elsewhere in
       AceCG (e.g. REM estimators), ensuring internal consistency.
     """
-
     dtype = np.dtype(dtype).type  # callable scalar type
+
     ag1 = u.select_atoms(sel1)
     ag2 = u.select_atoms(sel2)
-    n_frames = len(u.trajectory)
 
-    # weights
+    n_frames_total = len(u.trajectory)
+    start_i = 0 if start is None else int(start)
+    stop_i = n_frames_total if stop is None else int(stop)
+    step_i = int(step)
+    if step_i <= 0:
+        raise ValueError(f"step must be positive, got {step}")
+
+    # Frame indices follow Python slicing semantics on range(n_frames_total)
+    frame_indices = list(range(n_frames_total))[start_i:stop_i:step_i]
+    n_frames = len(frame_indices)
+    if n_frames == 0:
+        raise ValueError("No frames selected: check start/stop/step.")
+
+    # weights aligned to selected frames
     if weights is None:
         w = np.ones(n_frames, dtype=dtype)
     else:
-        w = np.asarray(weights, dtype=dtype)
-        if w.shape[0] != n_frames:
-            raise ValueError(f"weights length {w.shape[0]} != n_frames {n_frames}")
+        w_full = np.asarray(weights, dtype=dtype)
+        if w_full.shape[0] != n_frames_total:
+            raise ValueError(f"weights length {w_full.shape[0]} != n_frames {n_frames_total}")
+        w = w_full[frame_indices]
 
     rmin, rmax = float(r_range[0]), float(r_range[1])
+    if not (rmax > rmin >= 0.0):
+        raise ValueError(f"Invalid r_range={r_range}")
+
     edges = np.linspace(rmin, rmax, nbins + 1, dtype=dtype)
     dr = float(edges[1] - edges[0])
     r = 0.5 * (edges[:-1] + edges[1:])
@@ -475,7 +501,8 @@ def compute_weighted_rdf(
     V_list = []
     n_used = 0
 
-    for iframe, ts in enumerate(u.trajectory):
+    for iframe, frame in enumerate(frame_indices):
+        ts = u.trajectory[frame]
         wt = w[iframe]
         if wt == 0.0:
             continue
@@ -509,8 +536,6 @@ def compute_weighted_rdf(
         hist += wt * h
 
         # pair count used in this frame (for p(r) normalization)
-        # Using N1*N2 is consistent with "all pairs" definition.
-        # If you later change to unique pairs actually considered, replace here.
         Npairs = dtype(N1 * N2)
         wNpairs_sum += wt * Npairs
 
@@ -537,7 +562,6 @@ def compute_weighted_rdf(
         "shell_vol": shell_vol,
     }
 
-    # Compute outputs per mode
     if mode in ("liquid_gr", "liquid_gr_fixed_rho"):
         with np.errstate(divide="ignore", invalid="ignore"):
             g = hist / norm_gr
@@ -546,8 +570,6 @@ def compute_weighted_rdf(
         out["norm_gr"] = norm_gr
 
     if mode == "bound_pr":
-        # probability density p(r) s.t. sum p*dr = 1
-        # p(r_i) = (weighted counts in bin i) / (weighted total pair counts * dr)
         denom = wNpairs_sum * dtype(dr)
         with np.errstate(divide="ignore", invalid="ignore"):
             p = hist / denom
@@ -559,8 +581,12 @@ def compute_weighted_rdf(
         "mode": mode,
         "sel1": sel1,
         "sel2": sel2,
-        "n_frames": int(n_frames),
+        "n_frames_total": int(n_frames_total),
+        "n_frames_selected": int(n_frames),
         "n_used_frames": int(n_used),
+        "start": start,
+        "stop": stop,
+        "step": step_i,
         "pbc": bool(pbc),
         "exclude_self": bool(exclude_self),
         "r_range": (rmin, rmax),
@@ -586,32 +612,40 @@ def compute_weighted_pair_distance_pdfs(
     frame_weight: Optional[Union[np.ndarray, Dict[int, float]]] = None,
     r_range: Tuple[float, float] = (0.0, 25.0),
     nbins: int = 250,
+    start: Optional[int] = None,
+    stop: Optional[int] = None,
+    step: int = 1,
     dtype: np.dtype = np.float64,
     drop_empty_pairs: bool = True,
 ) -> Dict[Pair, Dict[str, Any]]:
     """
     Compute per-pair weighted distance PDFs p(r) from stored per-frame distances.
 
-    This is the "bound-state friendly" alternative to liquid-style g(r):
-    it returns the probability density of pair distances, normalized such that
-        sum_i p_i * dr = 1.
+    Frame selection uses the ordering of `sorted(pair2distance_frame.keys())` as the
+    canonical frame index. This is robust to non-contiguous frame ids.
 
     Parameters
     ----------
     pair2distance_frame : dict
         Nested dictionary:
-            pair2distance_frame[frame_idx][pair] = np.ndarray of distances in that frame
-        where `pair` is typically (type1, type2) or (site_i, site_j).
+            pair2distance_frame[frame_id][pair] = np.ndarray of distances at that frame.
+        `frame_id` does not need to be contiguous.
     frame_weight : np.ndarray or dict, optional
-        - If None: uniform weights over frames.
-        - If np.ndarray: length must equal number of frames (sorted by frame index).
-        - If dict: mapping {frame_idx: weight}. Missing frames default to 0.
+        - None: uniform weights over selected frames.
+        - np.ndarray: weights aligned with `sorted(pair2distance_frame.keys())`. Length must
+          equal the number of stored frames (before slicing). Will be sliced by
+          (start, stop, step).
+        - dict: mapping {frame_id: weight}. Missing frame ids default to 0. Will be aligned
+          to sorted(frame_ids) then sliced by (start, stop, step).
         Notes:
             Weights do NOT need to sum to 1; only relative weights matter.
     r_range : (rmin, rmax)
-        Histogram range in same distance units as your stored distances (usually Å).
+        Histogram range in the same units as your stored distances (usually Å).
     nbins : int
         Number of bins.
+    start, stop, step : int, optional
+        Subset frames using Python slicing semantics applied to `sorted(frame_ids)`.
+        Example: start=0, stop=None, step=10 uses every 10th stored frame in sorted order.
     dtype : numpy dtype
         Accumulation dtype.
     drop_empty_pairs : bool
@@ -625,43 +659,50 @@ def compute_weighted_pair_distance_pdfs(
             "p": (nbins,) probability density p(r),
             "edges": (nbins+1,) bin edges,
             "dr": float bin width,
-            "hist": (nbins,) weighted counts per bin (sum_t w_t * h_t),
-            "norm": float, normalization scalar = (sum_t w_t * n_samples_t) * dr,
-            "meta": {
-                "pair": pair,
-                "n_frames": int,
-                "n_used_frames": int,
-                "w_sum": float,
-                "w_abs_sum": float,
-                "n_samples_weighted": float,   # sum_t w_t * n_samples_t
-                "n_samples_raw": int,          # sum_t n_samples_t (unweighted)
-                "r_range": (rmin, rmax),
-                "nbins": int,
-            }
+            "hist": (nbins,) weighted counts per bin,
+            "norm": float normalization scalar = (sum_t w_t * n_samples_t) * dr,
+            "meta": dict diagnostics
         }
 
     Notes
     -----
     - This computes a *distance PDF* p(r), not liquid RDF g(r). It is robust to
       differing box volumes / concentrations between trajectories and is usually
-      the right object for protein-protein bound-state comparisons.
+      the right object for protein–protein bound-state comparisons.
     """
     dtype = np.dtype(dtype).type
 
-    frames = sorted(pair2distance_frame.keys())
-    n_frames = len(frames)
-    if n_frames == 0:
+    frames_all = sorted(pair2distance_frame.keys())
+    n_frames_all = len(frames_all)
+    if n_frames_all == 0:
         return {}
 
-    # Build frame weights aligned with sorted frames
+    step_i = int(step)
+    if step_i <= 0:
+        raise ValueError(f"step must be positive, got {step}")
+
+    frames_sel = frames_all[slice(start, stop, step_i)]
+    n_frames = len(frames_sel)
+    if n_frames == 0:
+        raise ValueError("No frames selected: check start/stop/step.")
+
+    # Build weights aligned to frames_all then slice to frames_sel
     if frame_weight is None:
         w = np.ones(n_frames, dtype=dtype)
+        w_sum_full = float(n_frames_all)
     elif isinstance(frame_weight, dict):
-        w = np.array([frame_weight.get(fr, 0.0) for fr in frames], dtype=dtype)
+        w_full = np.array([frame_weight.get(fr, 0.0) for fr in frames_all], dtype=dtype)
+        w = w_full[slice(start, stop, step_i)]
+        w_sum_full = float(np.sum(w_full))
     else:
-        w = np.asarray(frame_weight, dtype=dtype)
-        if w.shape[0] != n_frames:
-            raise ValueError(f"frame_weight length {w.shape[0]} != n_frames {n_frames}")
+        w_full = np.asarray(frame_weight, dtype=dtype)
+        if w_full.shape[0] != n_frames_all:
+            raise ValueError(
+                f"frame_weight length {w_full.shape[0]} != n_frames {n_frames_all} "
+                "(aligned to sorted(pair2distance_frame.keys()))."
+            )
+        w = w_full[slice(start, stop, step_i)]
+        w_sum_full = float(np.sum(w_full))
 
     rmin, rmax = float(r_range[0]), float(r_range[1])
     if not (rmax > rmin >= 0.0):
@@ -671,9 +712,9 @@ def compute_weighted_pair_distance_pdfs(
     dr = float(edges[1] - edges[0])
     r = 0.5 * (edges[:-1] + edges[1:])
 
-    # Collect union of pairs across frames
+    # Collect union of pairs across selected frames only
     pair_set = set()
-    for fr in frames:
+    for fr in frames_sel:
         pair_set.update(pair2distance_frame[fr].keys())
 
     out_by_pair: Dict[Pair, Dict[str, Any]] = {}
@@ -688,7 +729,7 @@ def compute_weighted_pair_distance_pdfs(
         n_samples_raw = 0
         n_samples_weighted = dtype(0.0)
 
-        for i, fr in enumerate(frames):
+        for i, fr in enumerate(frames_sel):
             wt = w[i]
             if wt == 0.0:
                 continue
@@ -700,7 +741,6 @@ def compute_weighted_pair_distance_pdfs(
             if d.size == 0:
                 continue
 
-            # histogram within [rmin, rmax]
             h, _ = np.histogram(d, bins=edges)
             hist += wt * h.astype(dtype, copy=False)
 
@@ -712,23 +752,31 @@ def compute_weighted_pair_distance_pdfs(
         if n_samples_raw == 0:
             if not drop_empty_pairs:
                 out_by_pair[pair] = {
-                    "r": r, "p": np.zeros_like(r), "edges": edges, "dr": dr,
-                    "hist": hist, "norm": 0.0,
+                    "r": r,
+                    "p": np.zeros_like(r),
+                    "edges": edges,
+                    "dr": dr,
+                    "hist": hist,
+                    "norm": 0.0,
                     "meta": {
                         "pair": pair,
-                        "n_frames": int(n_frames),
+                        "frames_total": int(n_frames_all),
+                        "frames_selected": int(n_frames),
                         "n_used_frames": int(n_used),
+                        "start": start,
+                        "stop": stop,
+                        "step": step_i,
                         "w_sum": w_sum,
                         "w_abs_sum": w_abs_sum,
+                        "w_sum_full": w_sum_full,
                         "n_samples_weighted": float(n_samples_weighted),
                         "n_samples_raw": int(n_samples_raw),
                         "r_range": (rmin, rmax),
                         "nbins": int(nbins),
-                    }
+                    },
                 }
             continue
 
-        # PDF normalization: sum_i p_i * dr = 1
         norm = float(n_samples_weighted) * dr
         with np.errstate(divide="ignore", invalid="ignore"):
             p = hist / norm
@@ -743,10 +791,15 @@ def compute_weighted_pair_distance_pdfs(
             "norm": norm,
             "meta": {
                 "pair": pair,
-                "n_frames": int(n_frames),
+                "frames_total": int(n_frames_all),
+                "frames_selected": int(n_frames),
                 "n_used_frames": int(n_used),
+                "start": start,
+                "stop": stop,
+                "step": step_i,
                 "w_sum": w_sum,
                 "w_abs_sum": w_abs_sum,
+                "w_sum_full": w_sum_full,
                 "n_samples_weighted": float(n_samples_weighted),
                 "n_samples_raw": int(n_samples_raw),
                 "r_range": (rmin, rmax),
