@@ -34,8 +34,10 @@ from .utils.ffio import FFParamArray, FFParamIndexMap, ReadLmpFF, WriteLmpTable,
 from .utils.mask import BuildGlobalMask, DescribeMask
 from .utils.bounds import BuildGlobalBounds, DescribeBounds
 from .utils.trjio import split_lammpstrj, split_lammpstrj_mdanalysis
+from .utils.cgcoords import load_mapping_yaml, build_CG_coords
 
 # Fitters
+from .fitters.fit_bspline import BSplineConfig, BSplineTableFitter
 from .fitters.fit_multi_gaussian import MultiGaussianConfig, MultiGaussianTableFitter
 
 __all__ = [
@@ -80,8 +82,12 @@ __all__ = [
 	"DescribeMask",
 	"MultiGaussianConfig",
 	"MultiGaussianTableFitter",
+    "BSplineConfig",
+    "BSplineTableFitter",
 	"BuildGlobalBounds",
 	"DescribeBounds",
+    "load_mapping_yaml",
+    "build_CG_coords",
     "split_lammpstrj",
     "split_lammpstrj_mdanalysis",
 ]
