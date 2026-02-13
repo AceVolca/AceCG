@@ -28,7 +28,7 @@ from .potentials.unnormalized_multi_gaussian import UnnormalizedMultiGaussianPot
 from .potentials.base import BasePotential
 
 # Utilities
-from .utils.compute import dUdLByFrame, dUdL, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matrix, Hessian, KL_divergence, dUdLByBin, compute_weighted_rdf, compute_weighted_pair_distance_pdfs
+from .utils.compute import dUdLByFrame, dUdL, dUdL_parallel, d2UdLjdLk_Matrix, dUdLj_dUdLk_Matrix, Hessian, KL_divergence, dUdLByBin, compute_weighted_rdf, compute_weighted_pair_distance_pdfs
 from .utils.neighbor import Pair2DistanceByFrame, combine_Pair2DistanceByFrame
 from .utils.ffio import FFParamArray, FFParamIndexMap, ReadLmpFF, WriteLmpTable, WriteLmpFF, ParseLmpTable
 from .utils.mask import BuildGlobalMask, DescribeMask
@@ -63,6 +63,8 @@ __all__ = [
     "BasePotential",
     "dUdLByFrame",
     "dUdL",
+	"dUdL_parallel",
+	"d2UdLjdLk_Matrix",
     "d2UdLjdLk_Matrix",
     "dUdLj_dUdLk_Matrix",
     "Hessian",

@@ -186,6 +186,28 @@ class MultiOut(TypedDict, total=False):
     sub: List[Dict[str, Any]]
     meta: Dict[str, Any]
 
+class MultiStepBatch(TypedDict, total=False):
+    """Input schema for MultiTrainerAnalytic.step.
+
+    Required keys
+    -------------
+    batches : Sequence[dict]
+        One batch per sub-trainer; batches[i] must satisfy trainers[i].BATCH_SCHEMA.
+
+    Optional keys
+    -------------
+    return_keys_list : Sequence[Sequence[str]]
+        Key filter for returned sub-trainer outputs.
+
+    Notes
+    -----
+    - Frame-parallel dUdL options are specified *inside each sub-batch* (not here):
+        ``parallel_dUdL`` / ``dUdL_n_parts`` / ``dUdL_n_workers``.
+      MultiTrainerAnalytic does not interpret them; it forwards batches to trainers.
+    """
+    batches: Any
+    return_keys_list: NotRequired[Any]
+
 from .base import BaseTrainer
 from .utils import optimizer_accepts_hessian
 from ..utils.compute import (
@@ -547,7 +569,7 @@ class MultiTrainerAnalytic(BaseTrainer):
 
     # ---- Public schema objects (for documentation / validation) ----
     STEP_SCHEMA: Dict[str, Any] = {
-        "batches": "required Sequence[dict]; length == len(trainers); batches[i] must satisfy trainers[i].BATCH_SCHEMA",
+        "batches": "required Sequence[dict]; length == len(trainers); batches[i] must satisfy trainers[i].BATCH_SCHEMA. Per-trainer parallel dUdL options (parallel_dUdL, dUdL_n_parts, dUdL_n_workers) live inside each batch and are passed through unchanged.",
         "return_keys_list": "optional Sequence[Sequence[str]]; if provided, filters keys in out['sub'][i]",
     }
 
@@ -598,25 +620,70 @@ class MultiTrainerAnalytic(BaseTrainer):
         # Optional: sanity check presence of meta-optimizer L
         assert hasattr(self.optimizer, "L"), "Meta-optimizer must expose attribute `.L`"
     @staticmethod
-    def make_batches(*batches: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Convenience helper to build the `batches` list for MultiTrainerAnalytic.step().
+    def make_batches(
+        *batches: Dict[str, Any],
+        parallel_dUdL: Optional[bool] = None,
+        dUdL_n_parts: int = 8,
+        dUdL_n_workers: Optional[int] = None,
+        override: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Convenience helper to build the `batches` list for MultiTrainerAnalytic.step().
 
-        This exists purely for ergonomics, so call sites read naturally and keep
+        This is primarily for ergonomics, so call sites read naturally and keep
         multi-objective wiring explicit.
+
+        In addition, this helper can *optionally* inject per-trainer frame-parallel
+        dUdL settings (used by REMTrainerAnalytic / MSETrainerAnalytic):
+
+        - ``parallel_dUdL`` (bool): enable multiprocessing inside each trainer when
+            the corresponding ``dist`` is dict-like (Pair2DistanceByFrame).
+        - ``dUdL_n_parts`` (int): number of frame chunks.
+        - ``dUdL_n_workers`` (int|None): worker process count.
+
+        By default (``parallel_dUdL=None``), this function does not modify batches.
+
+        Parameters
+        ----------
+        *batches
+            Batch dicts produced by individual trainers' ``make_batch`` helpers.
+        parallel_dUdL
+            If not None, inject ``parallel_dUdL`` into each batch.
+        dUdL_n_parts
+            Injected as ``dUdL_n_parts`` when ``parallel_dUdL`` is not None.
+        dUdL_n_workers
+            Injected as ``dUdL_n_workers`` when provided and ``parallel_dUdL`` is not None.
+        override
+            If False (default), do not overwrite keys that already exist in a batch.
+            If True, overwrite existing parallel dUdL keys.
 
         Examples
         --------
         >>> rem_batch = REMTrainerAnalytic.make_batch(...)
         >>> mse_batch = MSETrainerAnalytic.make_batch(...)
-        >>> batches = MultiTrainerAnalytic.make_batches(rem_batch, mse_batch)
+        >>> batches = MultiTrainerAnalytic.make_batches(
+        ...     rem_batch, mse_batch,
+        ...     parallel_dUdL=True, dUdL_n_parts=16, dUdL_n_workers=16
+        ... )
 
         Returns
         -------
         list_of_batches : list[dict]
-            The same objects passed in, collected into a list.
+            The same objects passed in, collected into a list (potentially with
+            injected parallel dUdL keys).
         """
-        return list(batches)
+        out: List[Dict[str, Any]] = list(batches)
+
+        # Optionally inject parallel dUdL keys into each batch (shallow update only).
+        if parallel_dUdL is not None:
+            for b in out:
+                if override or ("parallel_dUdL" not in b):
+                    b["parallel_dUdL"] = bool(parallel_dUdL)
+                if override or ("dUdL_n_parts" not in b):
+                    b["dUdL_n_parts"] = int(dUdL_n_parts)
+                if dUdL_n_workers is not None and (override or ("dUdL_n_workers" not in b)):
+                    b["dUdL_n_workers"] = int(dUdL_n_workers)
+
+        return out
 
 
     def step(
@@ -655,6 +722,22 @@ class MultiTrainerAnalytic(BaseTrainer):
             contain all keys required by the corresponding trainer's ``step`` method
             (e.g. distance data, weights, beta, masks, etc.). The ordering of
             ``batches`` must match the ordering of ``self.trainers``.
+
+Notes on frame-parallel dUdL
+----------------------------
+Some sub-trainers (e.g. REMTrainerAnalytic / MSETrainerAnalytic) support
+multiprocessing inside ``trainer.step`` to accelerate dUdL evaluation on
+dict-like ``dist`` (Pair2DistanceByFrame). These options are carried in
+the batch dict itself:
+
+  - ``parallel_dUdL`` (bool)
+  - ``dUdL_n_parts`` (int)
+  - ``dUdL_n_workers`` (int|None)
+
+``MultiTrainerAnalytic`` does not interpret these keys; it simply passes
+each batch to its corresponding trainer. Use ``make_batches(..., parallel_dUdL=...)``
+to inject these keys uniformly if desired.
+
 
         return_keys_list : Optional[Sequence[Sequence[str]]], optional
             If provided, specifies which keys from each sub-trainer's output

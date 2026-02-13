@@ -17,8 +17,11 @@ Key features
   if the AA Universe contains a valid periodic box, atoms within each bead can be
   MIC-mapped ("make whole") relative to the bead's first atom to prevent internal
   bead splitting across boundaries.
+- Optional wrapping:
+  when a valid box exists, CG coordinates can be wrapped into the primary unit
+  cell before writing files (recommended for GRO/LAMMPS).
 - Outputs:
-  write .gro / .pdb / LAMMPS data (atomic style) with residue information.
+  write .gro / .pdb / LAMMPS data with residue information.
 - Returns:
   a pure-Python dict schema suitable for pickle / multiprocessing.
 
@@ -29,7 +32,7 @@ cg = {
   "box_A": np.ndarray (6,) or None,      # [lx,ly,lz,alpha,beta,gamma] in Å/deg
   "beads": [
      {"bead_id": int, "bead_type": str, "resid": int, "resname": str,
-      "aa_indices": List[int], "mass": float},
+      "aa_indices": List[int], "mass": float, "q": float},
      ...
   ],
   "type_masses": {bead_type: float},
@@ -38,7 +41,8 @@ cg = {
 
 Notes
 -----
-- AA atom indices are interpreted as 0-based MDAnalysis "index".
+- AA atom indices are interpreted as 0-based MDAnalysis "index" by default.
+  If your mapping YAML was built with 1-based indices, use `index_base=1`.
 - PDB coordinate unit is Å. GRO unit is nm, thus Å -> nm conversion is applied.
 """
 
@@ -50,7 +54,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy as np
 import yaml
 import MDAnalysis as mda
-from MDAnalysis.lib.distances import minimize_vectors
+from MDAnalysis.lib.distances import minimize_vectors, apply_PBC
 
 
 # -----------------------------
@@ -63,14 +67,43 @@ def load_mapping_yaml(path: Union[str, Path]) -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-def bead_aa_indices(mapping: Dict[str, Any], bead_type: str, base: int) -> List[int]:
+def _as_int(x: Any) -> int:
+    try:
+        return int(x)
+    except Exception as e:
+        raise ValueError(f"Expected int-like value, got {x!r}") from e
+
+
+def bead_aa_indices(
+    mapping: Dict[str, Any],
+    bead_type: str,
+    base: int,
+    *,
+    index_base: int = 0,
+) -> List[int]:
     """
     Absolute AA indices (0-based, MDAnalysis 'index') for one bead instance.
 
     base = residue_anchor + residue_offset*repeat_i + site_anchor
+
+    Parameters
+    ----------
+    index_base
+        Index base used in mapping YAML. Use 0 for 0-based, 1 for 1-based.
+        This is applied to BOTH site-type indices and base anchors consistently.
+
+    Returns
+    -------
+    list[int]
+        0-based MDAnalysis atom indices.
     """
     rel = mapping["site-types"][bead_type]["index"]
-    return [base + int(x) for x in rel]
+    if index_base not in (0, 1):
+        raise ValueError("index_base must be 0 or 1.")
+    shift = 0 if index_base == 0 else -1
+    # base is in the same base convention as YAML; shift converts to 0-based.
+    base0 = base + shift
+    return [base0 + (_as_int(x) + shift) for x in rel]
 
 
 # -----------------------------
@@ -105,6 +138,15 @@ def make_bead_positions_whole(positions_A: np.ndarray, dimensions: np.ndarray) -
     dr = positions_A - ref
     dr_mic = minimize_vectors(dr, box=dimensions)
     return ref + dr_mic
+
+
+def wrap_positions_in_box(coords_A: np.ndarray, box_A: np.ndarray) -> np.ndarray:
+    """
+    Wrap coordinates into the primary unit cell.
+
+    Uses MDAnalysis apply_PBC which supports orthorhombic and triclinic boxes.
+    """
+    return apply_PBC(coords_A.astype(float), box=box_A.astype(float))
 
 
 def bead_position_and_mass(
@@ -163,9 +205,10 @@ def sanity_check_mapping(mapping: Dict[str, Any]) -> None:
             raise ValueError(f"site-types['{bead_type}'] missing 'index'.")
         if not isinstance(st["index"], list) or len(st["index"]) == 0:
             raise ValueError(f"site-types['{bead_type}']['index'] must be a non-empty list.")
-        if "x-weight" in st:
-            if not isinstance(st["x-weight"], list):
-                raise ValueError(f"site-types['{bead_type}']['x-weight'] must be a list if provided.")
+        if "x-weight" in st and not isinstance(st["x-weight"], list):
+            raise ValueError(f"site-types['{bead_type}']['x-weight'] must be a list if provided.")
+        if "q" in st and not isinstance(st["q"], (int, float)):
+            raise ValueError(f"site-types['{bead_type}']['q'] must be a number if provided.")
 
     for gi, grp in enumerate(mapping["system"]):
         for k in ("anchor", "offset", "repeat", "sites"):
@@ -183,6 +226,7 @@ def sanity_check_against_universe(
     u: mda.Universe,
     mapping: Dict[str, Any],
     *,
+    index_base: int = 0,
     strict_weights: bool = True,
 ) -> None:
     """
@@ -192,24 +236,26 @@ def sanity_check_against_universe(
     """
     n_atoms = u.atoms.n_atoms
     for gi, grp in enumerate(mapping["system"]):
-        anchor = int(grp["anchor"])
-        offset = int(grp["offset"])
-        repeat = int(grp["repeat"])
+        anchor = _as_int(grp["anchor"])
+        offset = _as_int(grp["offset"])
+        repeat = _as_int(grp["repeat"])
         sites = grp["sites"]
 
         for rep_i in range(repeat):
             for bead_type, site_anchor in sites:
                 bead_type = str(bead_type)
-                site_anchor = int(site_anchor)
+                site_anchor = _as_int(site_anchor)
                 base = anchor + offset * rep_i + site_anchor
-                aa_idx = bead_aa_indices(mapping, bead_type, base)
+                aa_idx = bead_aa_indices(mapping, bead_type, base, index_base=index_base)
+
                 if len(aa_idx) == 0:
                     raise ValueError(f"Empty aa_idx for bead_type={bead_type} in system[{gi}] rep={rep_i}.")
+
                 if min(aa_idx) < 0 or max(aa_idx) >= n_atoms:
                     raise ValueError(
                         f"AA index out of range for bead_type={bead_type} in system[{gi}] rep={rep_i}: "
                         f"min={min(aa_idx)}, max={max(aa_idx)}, AA_n_atoms={n_atoms}. "
-                        "Check anchor/offset/site_anchor/index base."
+                        f"Check anchor/offset/site_anchor/index base; consider index_base={index_base}."
                     )
 
                 if strict_weights:
@@ -291,16 +337,28 @@ def write_lammps_data(
     type2id: Dict[str, int],
     type_masses: Dict[str, float],
     box_A: Optional[np.ndarray] = None,
+    *,
+    atom_style: str = "full",
 ) -> None:
     """
-    Write minimal LAMMPS data (atomic style):
-      Masses
-      Atoms: atom-ID mol-ID type x y z
+    Write a minimal LAMMPS data file.
 
-    - Coordinates are in Å.
-    - mol-ID is set to resid.
-    - If box is available, bounds are [0, L] (orthorhombic assumption).
+    Supported atom styles
+    ---------------------
+    - "atomic": Atoms section: atom-ID mol-ID type x y z
+    - "full":   Atoms section: atom-ID mol-ID type q x y z
+
+    Notes
+    -----
+    - Coordinates are written in Å.
+    - mol-ID is set to resid (your "mol-tag can be resid" requirement).
+    - If box is available, bounds are [0, L] (orthorhombic bounds).
+      For triclinic boxes, you may want to extend this writer to include xy/xz/yz.
     """
+    atom_style = atom_style.lower().strip()
+    if atom_style not in ("atomic", "full"):
+        raise ValueError("atom_style must be 'atomic' or 'full'.")
+
     path = Path(path)
     n_atoms = coords_A.shape[0]
     n_types = len(type2id)
@@ -321,7 +379,8 @@ def write_lammps_data(
     with path.open("w") as f:
         f.write(f"{title}\n\n")
         f.write(f"{n_atoms} atoms\n")
-        f.write(f"{n_types} atom types\n\n")
+        f.write(f"{n_types} atom types\n")
+        f.write("\n")
         f.write(f"{xlo:.6f} {xhi:.6f} xlo xhi\n")
         f.write(f"{ylo:.6f} {yhi:.6f} ylo yhi\n")
         f.write(f"{zlo:.6f} {zhi:.6f} zlo zhi\n\n")
@@ -330,12 +389,20 @@ def write_lammps_data(
         for bead_type, tid in sorted(type2id.items(), key=lambda kv: kv[1]):
             f.write(f"{tid:d} {type_masses[bead_type]:.6f} # {bead_type}\n")
 
-        f.write("\nAtoms # atomic\n\n")
+        f.write(f"\nAtoms # {atom_style}\n\n")
         for i, (xyz, br) in enumerate(zip(coords_A, beads), start=1):
             mol_id = int(br["resid"])
             bead_type = str(br["bead_type"])
             tid = int(type2id[bead_type])
-            f.write(f"{i:d} {mol_id:d} {tid:d} {float(xyz[0]):.6f} {float(xyz[1]):.6f} {float(xyz[2]):.6f}\n")
+
+            if atom_style == "atomic":
+                f.write(f"{i:d} {mol_id:d} {tid:d} {float(xyz[0]):.6f} {float(xyz[1]):.6f} {float(xyz[2]):.6f}\n")
+            else:
+                q = float(br.get("q", 0.0))
+                f.write(
+                    f"{i:d} {mol_id:d} {tid:d} {q:.6f} "
+                    f"{float(xyz[0]):.6f} {float(xyz[1]):.6f} {float(xyz[2]):.6f}\n"
+                )
 
 
 # -----------------------------
@@ -350,10 +417,13 @@ def build_CG_coords(
     resname: Union[str, Sequence[str]] = "CG",
     resname_repeat_suffix: bool = False,
     make_whole_per_bead: bool = True,
+    wrap: bool = True,
+    index_base: int = 0,
     strict_sanity: bool = True,
     strict_weights: bool = True,
     outputs: Optional[Dict[str, Union[str, Path]]] = None,
     title: str = "CG generated by AceCG",
+    lammps_atom_style: str = "full",
 ) -> Dict[str, Any]:
     """
     Build CG coordinates from AA coordinates and mapping.
@@ -371,10 +441,17 @@ def build_CG_coords(
         - str: same resname for all residues
         - Sequence[str]: one resname per mapping["system"] group (applied to its repeats)
     resname_repeat_suffix
-        If True, append repeat index to resname, e.g. "FERM1", "FERM2", ...
-        If False, all repeats share the same resname.
+        If True, append repeat index to resname, e.g. "POPC1", "POPC2", ...
+        If False, all repeats share the same resname for that group.
     make_whole_per_bead
-        If True and AA Universe has a valid box, apply MIC per-bead make-whole.
+        If True and AA Universe has a valid box, apply MIC per-bead make-whole
+        before averaging (prevents bead internal splitting).
+    wrap
+        If True and a valid box exists, wrap final CG coordinates into the primary
+        unit cell before writing outputs. This usually fixes "split slab" visuals.
+    index_base
+        Index base used in mapping YAML (0 or 1). If your mapping uses 1-based
+        anchors/indices, set index_base=1.
     strict_sanity
         If True, run mapping sanity checks and AA-index range checks.
     strict_weights
@@ -389,6 +466,8 @@ def build_CG_coords(
         Any subset is allowed.
     title
         Title used in file headers.
+    lammps_atom_style
+        LAMMPS atom style for data output: "full" (default) or "atomic".
 
     Returns
     -------
@@ -411,7 +490,7 @@ def build_CG_coords(
         u = mda.Universe(str(aa_topology), str(aa_coord))
 
     if strict_sanity:
-        sanity_check_against_universe(u, mapping_dict, strict_weights=strict_weights)
+        sanity_check_against_universe(u, mapping_dict, index_base=index_base, strict_weights=strict_weights)
 
     box_ok = has_valid_box(u)
     do_make_whole = bool(make_whole_per_bead and box_ok)
@@ -436,9 +515,9 @@ def build_CG_coords(
     resid = 1
 
     for gi, grp in enumerate(system_groups):
-        anchor = int(grp["anchor"])
-        offset = int(grp["offset"])
-        repeat = int(grp["repeat"])
+        anchor = _as_int(grp["anchor"])
+        offset = _as_int(grp["offset"])
+        repeat = _as_int(grp["repeat"])
         sites = grp["sites"]
         base_resname = group_resnames[gi]
 
@@ -447,10 +526,10 @@ def build_CG_coords(
 
             for bead_type, site_anchor in sites:
                 bead_type = str(bead_type)
-                site_anchor = int(site_anchor)
+                site_anchor = _as_int(site_anchor)
 
                 base = anchor + offset * rep_i + site_anchor
-                aa_idx = bead_aa_indices(mapping_dict, bead_type, base)
+                aa_idx = bead_aa_indices(mapping_dict, bead_type, base, index_base=index_base)
 
                 xw = mapping_dict["site-types"][bead_type].get("x-weight", None)
                 xyz_A, mass = bead_position_and_mass(u, aa_idx, xw, do_make_whole)
@@ -469,6 +548,8 @@ def build_CG_coords(
                             "This usually indicates varying AA composition for the same bead_type."
                         )
 
+                q = float(mapping_dict["site-types"][bead_type].get("q", 0.0))
+
                 beads.append(
                     {
                         "bead_id": bead_id,
@@ -477,6 +558,7 @@ def build_CG_coords(
                         "resname": resname_i,
                         "aa_indices": list(map(int, aa_idx)),
                         "mass": float(mass),
+                        "q": q,
                     }
                 )
                 coords_A_list.append(xyz_A)
@@ -485,6 +567,10 @@ def build_CG_coords(
             resid += 1
 
     coords_A = np.asarray(coords_A_list, dtype=float)
+
+    # Wrap final CG coordinates if requested and box exists
+    if wrap and box_A is not None:
+        coords_A = wrap_positions_in_box(coords_A, box_A)
 
     cg = {
         "coords_A": coords_A,
@@ -501,6 +587,9 @@ def build_CG_coords(
         if "pdb" in outputs and outputs["pdb"] is not None:
             write_pdb(outputs["pdb"], title, coords_A, beads)
         if "data" in outputs and outputs["data"] is not None:
-            write_lammps_data(outputs["data"], title, coords_A, beads, type2id, type_masses, box_A)
+            write_lammps_data(
+                outputs["data"], title, coords_A, beads, type2id, type_masses, box_A,
+                atom_style=lammps_atom_style,
+            )
 
     return cg

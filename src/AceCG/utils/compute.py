@@ -2,6 +2,7 @@
 import numpy as np
 from typing import Dict, Any, Optional, Tuple, Union
 from ..potentials.base import BasePotential
+from .ffio import FFParamArray
 import MDAnalysis as mda
 from MDAnalysis.lib.distances import capped_distance
 
@@ -132,6 +133,277 @@ def d2UdLjdLk_Matrix(
             anchor += pot.n_params()
 
     return d2UdLjdLk
+
+# ===========================
+# Parallel dU/dλ evaluation
+# ===========================
+
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import List
+
+
+def _align_frame_weight_to_frames(
+    frames_all: List[int],
+    frame_weight: Optional[Union[np.ndarray, Dict[int, float]]],
+    dtype=np.float64,
+) -> np.ndarray:
+    """Align weights to sorted frame ids.
+
+    Conventions
+    -----------
+    - If ``frame_weight`` is None: uniform weights are used.
+    - If ``frame_weight`` is a dict: mapping {frame_id: w}; missing ids default to 0.
+    - If ``frame_weight`` is a numpy array: it must already be aligned to ``frames_all``.
+    """
+    if frame_weight is None:
+        return np.ones(len(frames_all), dtype=dtype)
+
+    if isinstance(frame_weight, dict):
+        return np.array([frame_weight.get(fr, 0.0) for fr in frames_all], dtype=dtype)
+
+    w = np.asarray(frame_weight, dtype=dtype)
+    if w.shape[0] != len(frames_all):
+        raise ValueError(
+            f"frame_weight length {w.shape[0]} != n_frames {len(frames_all)} (aligned to sorted frame ids)."
+        )
+    return w
+
+
+def _chunk_frames(frames: List[int], n_parts: int) -> List[List[int]]:
+    """Split a list of frames into nearly-even chunks."""
+    n = len(frames)
+    if n_parts <= 1 or n == 0:
+        return [frames]
+    n_parts = min(n_parts, n)
+
+    base = n // n_parts
+    rem = n % n_parts
+    chunks: List[List[int]] = []
+    s = 0
+    for i in range(n_parts):
+        e = s + base + (1 if i < rem else 0)
+        chunks.append(frames[s:e])
+        s = e
+    return chunks
+
+
+def _build_subdict(pair2distance_frame: Dict[int, Any], frames_chunk: List[int]) -> Dict[int, Any]:
+    return {fr: pair2distance_frame[fr] for fr in frames_chunk}
+
+
+def _worker_sum_wg(args):
+    """Worker for avg-only mode.
+
+    Returns
+    -------
+    sum_w : float
+    sum_wg : np.ndarray, shape (n_params,)
+    """
+    pair2potential, pair2distance_sub, w_sub = args
+
+    g_frame = dUdLByFrame(pair2potential, pair2distance_sub)  # (n_chunk, n_params)
+
+    sum_w = float(np.sum(w_sub))
+    if sum_w == 0.0:
+        return 0.0, np.zeros(g_frame.shape[1], dtype=g_frame.dtype)
+
+    # Σ w_i g_i
+    sum_wg = g_frame.T @ w_sub
+    return sum_w, sum_wg
+
+
+def _worker_full_frame(args):
+    """Worker for full-frame mode.
+
+    Returns
+    -------
+    frames_chunk : list[int]
+    g_frame : np.ndarray, shape (n_chunk, n_params)
+    """
+    pair2potential, pair2distance_sub, frames_chunk = args
+    g_frame = dUdLByFrame(pair2potential, pair2distance_sub)
+    return frames_chunk, g_frame
+
+
+def dUdL_parallel(
+    pair2potential: Dict[Tuple[str, str], BasePotential],
+    pair2distance_frame: Dict[int, Dict[Tuple[str, str], np.ndarray]],
+    frame_weight: Optional[Union[np.ndarray, Dict[int, float]]] = None,
+    n_parts: int = 8,
+    n_workers: Optional[int] = None,
+    mode: str = "avg",  # "avg" | "frame"
+) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray, List[int]]]:
+    """Parallel evaluation of dU/dλ from stored per-frame distances.
+
+    This is a drop-in replacement for the common pattern::
+
+        g_frame = dUdLByFrame(pair2potential, pair2distance_frame)
+        g_avg   = dUdL(g_frame, frame_weight)
+
+    Key design:
+    -----------
+    1) We split frames into chunks.
+    2) Each worker computes dUdLByFrame on its chunk.
+    3) Parent process performs the final reduction (weighted average or stitching).
+
+    Two modes:
+    - "avg"   : memory-efficient, only returns weighted average.
+    - "frame" : returns full per-frame derivative matrix (needed by MSE/dUdLByBin).
+
+    Important:
+    ----------
+    All frame-dependent arrays are aligned to:
+
+        sorted(pair2distance_frame.keys())
+
+    This MUST match how dUdLByFrame internally orders frames.
+    """
+
+    # ------------------------------------------------------------------
+    # STEP 1 — Establish canonical frame ordering
+    # ------------------------------------------------------------------
+    # dUdLByFrame internally uses sorted(frame_ids),
+    # so we MUST enforce the same ordering everywhere.
+    frames_sorted = sorted(pair2distance_frame.keys())
+    n_frames = len(frames_sorted)
+
+    # Edge case: empty trajectory
+    if n_frames == 0:
+        # Infer number of parameters directly from potentials
+        n_params = int(sum(p.n_params() for p in pair2potential.values()))
+        if mode == "avg":
+            return np.zeros(n_params, dtype=np.float64)
+        return (
+            np.zeros(n_params, dtype=np.float64),
+            np.zeros((0, n_params), dtype=np.float64),
+            frames_sorted,
+        )
+
+    # ------------------------------------------------------------------
+    # STEP 2 — Align frame weights to canonical frame order
+    # ------------------------------------------------------------------
+    # This produces a weight vector aligned with frames_sorted.
+    # No normalization here — we do unnormalized accumulation
+    # and normalize once at the end (same behavior as dUdL()).
+    w_full = _align_frame_weight_to_frames(
+        frames_sorted,
+        frame_weight,
+        dtype=np.float64
+    )
+
+    # ------------------------------------------------------------------
+    # STEP 3 — Split frames into roughly equal chunks
+    # ------------------------------------------------------------------
+    # Each chunk is a list of frame_ids.
+    frame_chunks = _chunk_frames(frames_sorted, n_parts=n_parts)
+
+    # ==================================================================
+    # MODE 1 — Only compute weighted average (memory-efficient)
+    # ==================================================================
+    if mode == "avg":
+
+        # Map frame_id → index in frames_sorted
+        # Used to extract corresponding weight quickly
+        idx_map = {fr: i for i, fr in enumerate(frames_sorted)}
+
+        tasks = []
+
+        for ch in frame_chunks:
+            # Build sub-dictionary restricted to this chunk
+            sub = _build_subdict(pair2distance_frame, ch)
+
+            # Extract aligned weight slice for this chunk
+            w_sub = np.array(
+                [w_full[idx_map[fr]] for fr in ch],
+                dtype=np.float64
+            )
+
+            # Worker receives:
+            # - potentials
+            # - distance subdict
+            # - weight slice
+            tasks.append((pair2potential, sub, w_sub))
+
+        sum_w_total = 0.0       # Σ w_i
+        sum_wg_total = None     # Σ w_i * g_i
+
+        # Launch process pool
+        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+            futures = [ex.submit(_worker_sum_wg, t) for t in tasks]
+
+            # Accumulate partial reductions
+            for fu in as_completed(futures):
+                sum_w, sum_wg = fu.result()
+
+                sum_w_total += sum_w
+
+                if sum_wg_total is None:
+                    # First chunk initializes accumulator
+                    sum_wg_total = sum_wg
+                else:
+                    sum_wg_total += sum_wg
+
+        # If all weights are zero → derivative is zero vector
+        if sum_w_total == 0.0:
+            n_params = int(sum(p.n_params() for p in pair2potential.values()))
+            return np.zeros(n_params, dtype=np.float64)
+
+        # Final normalization:
+        # (Σ w_i g_i) / (Σ w_i)
+        # Exactly matches dUdL() normalization convention.
+        return sum_wg_total / sum_w_total
+
+    # ==================================================================
+    # MODE 2 — Materialize full per-frame derivative matrix
+    # ==================================================================
+    if mode == "frame":
+
+        tasks = []
+
+        for ch in frame_chunks:
+            sub = _build_subdict(pair2distance_frame, ch)
+
+            # Worker returns:
+            #   frames_ch (list[int])
+            #   g_ch (n_chunk, n_params)
+            tasks.append((pair2potential, sub, ch))
+
+        chunk_results = []
+
+        with ProcessPoolExecutor(max_workers=n_workers) as ex:
+            futures = [ex.submit(_worker_full_frame, t) for t in tasks]
+
+            for fu in as_completed(futures):
+                frames_ch, g_ch = fu.result()
+                chunk_results.append((frames_ch, g_ch))
+
+        # Number of parameters inferred from flattened FFParamArray
+        n_params = len(FFParamArray(pair2potential))
+
+        # Preallocate full matrix
+        g_full = np.zeros((n_frames, n_params), dtype=np.float64)
+
+        # Frame_id → row index mapping
+        pos = {fr: i for i, fr in enumerate(frames_sorted)}
+
+        # Stitch chunks back into canonical order
+        for frames_ch, g_ch in chunk_results:
+            for local_i, fr in enumerate(frames_ch):
+                # Place each row into correct global position
+                g_full[pos[fr], :] = g_ch[local_i, :]
+
+        # Compute weighted average using existing serial routine
+        # (ensures identical behavior to non-parallel code path)
+        dUdL_avg = dUdL(g_full, w_full)
+
+        return dUdL_avg, g_full, frames_sorted # dUdL_avg, dUdLByFrame, sorted frames
+
+    # ------------------------------------------------------------------
+    # Invalid mode
+    # ------------------------------------------------------------------
+    raise ValueError(
+        f"Unknown mode={mode}, expected 'avg' or 'frame'."
+    )
 
 
 def dUdLj_dUdLk_Matrix(
