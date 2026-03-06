@@ -1,0 +1,52 @@
+# Byte-compiled / cached
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+env/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# AI agent config (local only)
+.claude/
+.prompts/
+AGENTS.md
+CONTEXT.md
+PLAN.md
+AceCG_structure.md
+diagnose.md
+fm_develop.code-workspace
+.github/copilot-instructions.md
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Scratch notebooks (not part of the package)
+play.ipynb
+test.ipynb
+
+# pytest
+.pytest_cache/
+
+# Test run outputs (large trajectory data, pickles, tables)
+tests/_runs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Deprecated src layout (replaced by root-level modules)
+src/

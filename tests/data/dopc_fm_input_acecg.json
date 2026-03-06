@@ -1,0 +1,249 @@
+{
+  "fm": {
+    "alpha": 0.0,
+    "bayesian": 250,
+    "bayesian_tol": 0.000001,
+    "cutoff": 25.0,
+    "exclude": "100",
+    "selection": "all"
+  },
+  "interactions": [
+    {
+      "max": 25.0,
+      "min": 4.2,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "HG",
+        "HG"
+      ]
+    },
+    {
+      "max": 25.0,
+      "min": 4.5,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "HG",
+        "MG"
+      ]
+    },
+    {
+      "max": 25.0,
+      "min": 5.5,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "HG",
+        "T1"
+      ]
+    },
+    {
+      "max": 25.0,
+      "min": 7.7,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "HG",
+        "T2"
+      ]
+    },
+    {
+      "max": 25.0,
+      "min": 4.4,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "MG",
+        "MG"
+      ]
+    },
+    {
+      "max": 25.0,
+      "min": 4.0,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "MG",
+        "T1"
+      ]
+    },
+    {
+      "max": 25.0,
+      "min": 4.9,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "MG",
+        "T2"
+      ]
+    },
+    {
+      "max": 25.0,
+      "min": 3.5,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "T1",
+        "T1"
+      ]
+    },
+    {
+      "max": 25.0,
+      "min": 3.5,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "T1",
+        "T2"
+      ]
+    },
+    {
+      "max": 25.0,
+      "min": 3.5,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.1,
+      "style": "pair",
+      "types": [
+        "T2",
+        "T2"
+      ]
+    },
+    {
+      "max": 7.5,
+      "min": 3.25,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.05,
+      "style": "bond",
+      "types": [
+        "HG",
+        "MG"
+      ]
+    },
+    {
+      "max": 10.0,
+      "min": 3.5,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.05,
+      "style": "bond",
+      "types": [
+        "MG",
+        "T1"
+      ]
+    },
+    {
+      "max": 10.0,
+      "min": 3.25,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.05,
+      "style": "bond",
+      "types": [
+        "T1",
+        "T2"
+      ]
+    },
+    {
+      "max": 180.0,
+      "min": 40.0,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.5,
+      "style": "angle",
+      "types": [
+        "HG",
+        "MG",
+        "T1"
+      ]
+    },
+    {
+      "max": 179.5,
+      "min": 32.0,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.5,
+      "style": "angle",
+      "types": [
+        "T1",
+        "MG",
+        "T1"
+      ]
+    },
+    {
+      "max": 180.0,
+      "min": 30.0,
+      "model": "BSpline",
+      "order": 3,
+      "resolution": 0.5,
+      "style": "angle",
+      "types": [
+        "MG",
+        "T1",
+        "T2"
+      ]
+    }
+  ],
+  "name": "dopc_excl100",
+  "reference": {
+    "table_dir": "/project2/gavoth/zhikunzhou/projects/vcg_AceCG_ver/DOPC_phase_diagram/step1_FM_excl100/forcefield_excl100"
+  },
+  "source": {
+    "job_array": "/project2/gavoth/zhikunzhou/projects/vcg_AceCG_ver/DOPC_phase_diagram/step1_FM_excl100/job_array",
+    "runtask": "/project2/gavoth/zhikunzhou/projects/vcg_AceCG_ver/DOPC_phase_diagram/step1_FM_excl100/runtask",
+    "step_dir": "/project2/gavoth/zhikunzhou/projects/vcg_AceCG_ver/DOPC_phase_diagram/step1_FM_excl100"
+  },
+  "topology": {
+    "lammps_data": "/project2/gavoth/weizhixue/programs/AceCG/tests/data/system.data",
+    "top_in": "/project2/gavoth/zhikunzhou/projects/vcg_AceCG_ver/DOPC_phase_diagram/step1_FM_excl100/top.in"
+  },
+  "trajectory": {
+    "every": 1,
+    "format": "LAMMPSDUMP",
+    "frames": 500,
+    "path_pattern": "/project2/gavoth/zhikunzhou/projects/vcg_AceCG_ver/DOPC_phase_diagram/step1_FM_excl100/CG_Mapped_DOPC/cg6_{window}.lammpstrj",
+    "skip": 0,
+    "windows": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ]
+  },
+  "export": {
+    "table_policy": "excl100_reference_equivalent",
+    "reference_table_policy": "excl100_reference_equivalent",
+    "guardrail_mode": "production"
+  }
+}

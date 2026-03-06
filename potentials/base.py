@@ -1,0 +1,104 @@
+# AceCG/potentials/base.py
+from abc import ABC, abstractmethod
+from typing import List
+import numpy as np
+import copy as cp
+
+class BasePotential(ABC):
+    def __init__(self):
+        self._params = None
+        self._param_names = None
+        self._dparam_names = None
+        self._d2param_names = None
+        self._params_to_scale = None
+        # Optional FM metadata, defaulting to force-based dr channels.
+        self._dr_name = "dr"
+        self._dparam_dr_names = None
+        self._d2param_dr_names = None
+
+    @abstractmethod
+    def value(self, r: np.ndarray) -> np.ndarray:
+        """Compute potential energy at given distances r."""
+        pass
+
+    @abstractmethod
+    def force(self, r: np.ndarray) -> np.ndarray:
+        """Compute force (negative gradient of potential) at given distances r."""
+        pass
+
+    # Common method
+    def param_names(self) -> List[str]:
+        """Parameter names of this potential depends on."""
+        assert self._param_names is not None
+        return self._param_names
+    
+    def dparam_names(self) -> List[str]:
+        """Return a List of first derivative method names (used in dUdL)."""
+        assert self._dparam_names is not None
+        return self._dparam_names
+    
+    def d2param_names(self) -> List[List[str]]:
+        """Return a 2D List of second derivative method names (for Hessian)."""
+        assert self._d2param_names is not None
+        return self._d2param_names
+
+    def dr_name(self) -> str:
+        """Return method name for force-like derivative channel w.r.t. distance variable."""
+        return self._dr_name
+
+    def dparam_dr_names(self) -> List[str]:
+        """Return names for d(force)/d(param) channels used by iterative FM."""
+        if self._dparam_dr_names is None:
+            return []
+        return self._dparam_dr_names
+
+    def d2param_dr_names(self) -> List[List[str]]:
+        """Return names for d2(force)/d(param_j)d(param_k) channels."""
+        if self._d2param_dr_names is None:
+            return []
+        return self._d2param_dr_names
+    
+    def n_params(self) -> int:
+        """Number of parameters this potential depends on."""
+        assert self._params is not None
+        return len(self._params)
+
+    def get_params(self) -> np.ndarray:
+        """Return current parameter values as 1D array."""
+        assert self._params is not None
+        return self._params.copy()
+
+    def set_params(self, new_params: np.ndarray):
+        """Update parameters with new values."""
+        # if self._params is not None:
+        #     assert len(new_params) == len(self._params)
+        self._params = new_params.copy()
+
+    def basis_values(self, x: np.ndarray) -> np.ndarray:
+        """Return per-parameter basis values at x; default uses dparam methods."""
+        names = self.dparam_names()
+        if names is None:
+            return np.empty((len(np.asarray(x)), 0), dtype=float)
+        x = np.asarray(x, dtype=float)
+        cols = [np.asarray(getattr(self, name)(x), dtype=float) for name in names]
+        if not cols:
+            return np.empty((x.size, 0), dtype=float)
+        return np.vstack(cols).T
+
+    def basis_derivatives(self, x: np.ndarray) -> np.ndarray:
+        """Return derivative of basis wrt x (finite-difference fallback)."""
+        x = np.asarray(x, dtype=float)
+        eps = 1.0e-6
+        return (self.basis_values(x + eps) - self.basis_values(x - eps)) / (2.0 * eps)
+
+    def get_scaled_potential(self, z):
+
+        if self._params_to_scale is None:
+            return cp.deepcopy(self)
+
+        copied = cp.deepcopy(self)
+
+        for idx in self._params_to_scale:
+            copied._params[idx] = self._params[idx] * z
+
+        return copied

@@ -18,6 +18,7 @@ requires-python = ">=3.8"
 dependencies = [
     "numpy>=1.21",
     "scipy>=1.7",
+    "MDAnalysis>=2.3",
 ]
 
 classifiers = [
@@ -30,5 +31,17 @@ classifiers = [
 "Homepage" = "https://github.com/AceVolca/AceCG"
 "Bug Tracker" = "https://github.com/AceVolca/AceCG/issues"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools.package-dir]
+AceCG = "."
+
+[tool.setuptools]
+packages = [
+    "AceCG",
+    "AceCG.potentials",
+    "AceCG.optimizers",
+    "AceCG.optimizers.multithreaded",
+    "AceCG.trainers",
+    "AceCG.solvers",
+    "AceCG.fitters",
+    "AceCG.utils",
+]

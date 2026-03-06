@@ -8,6 +8,7 @@ class GaussianPotential(BasePotential):
         self.typ2  = typ2
         self.cutoff = cutoff
         self._params = np.array([A, r0, sigma])
+        self._params_to_scale = [0]
         self._param_names = ["A", "r0", "sigma"]
         self._dparam_names = ["dA", "dr0", "dsigma"]
         self._d2param_names = [
@@ -20,6 +21,11 @@ class GaussianPotential(BasePotential):
         A, r0, sigma = self._params
         x = r - r0
         return A / (sigma * np.sqrt(2 * np.pi)) * np.exp(-x**2 / (2 * sigma**2))
+    
+    def force(self, r):
+        A, r0, sigma = self._params
+        x = r - r0
+        return A / (sigma**3 * np.sqrt(2*np.pi)) * x * np.exp(-x**2 / (2 * sigma**2))
 
     def dA(self, r):
         _, r0, sigma = self._params
