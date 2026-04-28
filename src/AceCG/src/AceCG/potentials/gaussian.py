@@ -1,0 +1,124 @@
+"""Single-Gaussian pair potential centered at ``r0`` with amplitude ``A`` and width ``sigma``."""
+import numpy as np
+from .base import BasePotential
+
+class GaussianPotential(BasePotential):
+    """Single-Gaussian pair potential ``U(r) = A * exp(-(r - r0)^2 / (2 sigma^2))``.
+
+    Parameters are stored as ``[A, r0, sigma]``. Only ``A`` is linear.
+    """
+    def __init__(self, typ1, typ2, A, r0, sigma, cutoff):
+        """Initialize a normalized Gaussian pair potential.
+
+        Parameters
+        ----------
+        typ1, typ2 : int or str
+            Interaction type labels for the two particles.
+        A : float
+            Gaussian amplitude.
+        r0 : float
+            Gaussian center.
+        sigma : float
+            Gaussian width. Must be positive for physically meaningful values.
+        cutoff : float
+            Distance cutoff stored for compatibility with forcefield writers.
+        """
+        super().__init__()
+        self.typ1  = typ1
+        self.typ2  = typ2
+        self.cutoff = cutoff
+        self._params = np.array([A, r0, sigma])
+        self._params_to_scale = [0]
+        self._param_names = ["A", "r0", "sigma"]
+        self._dparam_names = ["dA", "dr0", "dsigma"]
+        self._d2param_names = [
+            ["dA_2", "dAdr0", "dAdsigma"],
+            ["dAdr0", "dr0_2", "dr0dsigma"],
+            ["dAdsigma", "dr0dsigma", "dsigma_2"]
+        ]
+
+    def is_param_linear(self) -> np.ndarray:
+        """Return which Gaussian parameters enter the energy linearly."""
+        return np.array([True, False, False], dtype=bool)
+
+    def value(self, r):
+        """Evaluate the Gaussian potential energy.
+
+        Parameters
+        ----------
+        r : array-like
+            Pair distance values.
+
+        Returns
+        -------
+        np.ndarray
+            Energy values at ``r``.
+        """
+        A, r0, sigma = self._params
+        x = r - r0
+        return A / (sigma * np.sqrt(2 * np.pi)) * np.exp(-x**2 / (2 * sigma**2))
+    
+    def force(self, r):
+        """Evaluate the scalar force ``-dU/dr`` for the Gaussian."""
+        A, r0, sigma = self._params
+        x = r - r0
+        return A / (sigma**3 * np.sqrt(2*np.pi)) * x * np.exp(-x**2 / (2 * sigma**2))
+
+    def dA(self, r):
+        """Return ``dU/dA`` evaluated at ``r``."""
+        _, r0, sigma = self._params
+        x = r - r0
+        return 1 / (sigma * np.sqrt(2 * np.pi)) * np.exp(-x**2 / (2 * sigma**2))
+
+    def dr0(self, r):
+        """Return ``dU/dr0`` evaluated at ``r``."""
+        A, r0, sigma = self._params
+        x = r - r0
+        return A * x / (sigma**3 * np.sqrt(2 * np.pi)) * np.exp(-x**2 / (2 * sigma**2))
+
+    def dsigma(self, r):
+        """Return ``dU/dsigma`` evaluated at ``r``."""
+        A, r0, sigma = self._params
+        x = r - r0
+        phi = np.exp(-x**2 / (2 * sigma**2))
+        return A * phi / np.sqrt(2 * np.pi) * (x**2 - sigma**2) / sigma**4
+
+    def dA_2(self, r):
+        """Return ``d2U/dA2``, which is zero for this potential."""
+        return np.zeros_like(r)
+
+    def dAdr0(self, r):
+        """Return the mixed derivative ``d2U/dA dr0``."""
+        _, r0, sigma = self._params
+        x = r - r0
+        phi = np.exp(-x**2 / (2 * sigma**2))
+        return x / (sigma**3 * np.sqrt(2 * np.pi)) * phi
+
+    def dAdsigma(self, r):
+        """Return the mixed derivative ``d2U/dA dsigma``."""
+        _, r0, sigma = self._params
+        x = r - r0
+        phi = np.exp(-x**2 / (2 * sigma**2))
+        return (x**2 - sigma**2) / (sigma**4 * np.sqrt(2 * np.pi)) * phi
+
+    def dr0_2(self, r):
+        """Return ``d2U/dr0^2`` evaluated at ``r``."""
+        A, r0, sigma = self._params
+        x = r - r0
+        phi = np.exp(-x**2 / (2 * sigma**2))
+        return A / (sigma**3 * np.sqrt(2 * np.pi)) * (x**2 / sigma**2 - 1) * phi
+
+    def dr0dsigma(self, r):
+        """Return the mixed derivative ``d2U/dr0 dsigma``."""
+        A, r0, sigma = self._params
+        x = r - r0
+        phi = np.exp(-x**2 / (2 * sigma**2))
+        return A * x / np.sqrt(2 * np.pi) * (x**2 - 3 * sigma**2) / sigma**6 * phi
+
+    def dsigma_2(self, r):
+        """Return ``d2U/dsigma^2`` evaluated at ``r``."""
+        A, r0, sigma = self._params
+        x = r - r0
+        phi = np.exp(-x**2 / (2 * sigma**2))
+        return A / np.sqrt(2 * np.pi) * (x**4 - 5 * x**2 * sigma**2 + 2 * sigma**4) / sigma**7 * phi
+    
