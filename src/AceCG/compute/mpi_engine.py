@@ -159,28 +159,92 @@ def _selected_frame_ids_from_spec(
     return list(range(frame_start, frame_end, every))
 
 
-def _frame_weight_mapping_from_spec(
+def _load_frame_weight_file(
+    frame_weight_file: Optional[str],
+    *,
+    work_dir: Path,
+) -> Optional[np.ndarray]:
+    """Load full-trajectory frame weights from a ``.npy`` or ``.npz`` file."""
+    if frame_weight_file is None:
+        return None
+
+    weight_path = Path(str(frame_weight_file))
+    if not weight_path.is_absolute():
+        weight_path = work_dir / weight_path
+    if not weight_path.exists():
+        raise FileNotFoundError(f"frame_weight_file does not exist: {weight_path}")
+
+    suffix = weight_path.suffix.lower()
+    if suffix == ".npy":
+        values = np.load(weight_path, allow_pickle=False)
+    elif suffix == ".npz":
+        with np.load(weight_path, allow_pickle=False) as payload:
+            files = list(payload.files)
+            if "frame_weight" in payload:
+                values = payload["frame_weight"]
+            elif len(files) == 1:
+                values = payload[files[0]]
+            else:
+                raise ValueError(
+                    "frame_weight_file .npz must contain exactly one array or a "
+                    "'frame_weight' array."
+                )
+    else:
+        raise ValueError(f"frame_weight_file must end with .npy or .npz, got: {weight_path}")
+
+    return np.asarray(values, dtype=np.float32)
+
+
+def _frame_weight_array_from_spec(
     shared_spec: Dict[str, Any],
     total_frames: int,
-) -> Optional[Dict[int, float]]:
-    """Convert ``spec['frame_weight']`` into a ``{frame_idx: weight}`` mapping.
+    *,
+    loaded_frame_weight: Optional[np.ndarray] = None,
+) -> Optional[np.ndarray]:
+    """Return a full-trajectory frame-weight array for the current spec.
 
-    The mapping form is convenient because ``analysis.rdf`` can consume it both
-    for ``Universe`` input and for ``TrajectoryCache`` input, and
-    unspecified frame indices naturally default to weight 1 when a mapping is
-    used there.
+    Inline ``spec['frame_weight']`` keeps the selected-frame convention: it may
+    have length equal to the selected frame set. File-backed weights are
+    full-trajectory arrays, matching the historical ``frame_weight_file`` path.
     """
-    raw = shared_spec.get("frame_weight")
+    raw = loaded_frame_weight if loaded_frame_weight is not None else shared_spec.get("frame_weight")
     if raw is None:
         return None
+
     selected_ids = _selected_frame_ids_from_spec(shared_spec, total_frames)
-    weights = np.asarray(raw, dtype=np.float64)
+    selected = np.asarray(selected_ids, dtype=np.int64)
+    if selected.size and (np.any(selected < 0) or np.any(selected >= int(total_frames))):
+        raise ValueError("selected frame ids must be within the input trajectory length")
+
+    weights = np.asarray(raw, dtype=np.float32)
+    if weights.ndim != 1:
+        raise ValueError(f"frame_weight must be a 1D array, got shape {weights.shape}")
+    if np.any(weights < 0.0):
+        raise ValueError("frame_weight must be nonnegative with positive sum")
+
+    if loaded_frame_weight is not None or weights.shape == (int(total_frames),):
+        if weights.shape != (int(total_frames),):
+            raise ValueError(
+                "frame_weight_file must have length equal to the input trajectory length: "
+                f"expected {int(total_frames)}, got {weights.shape[0]}"
+            )
+        selected_weights = weights[selected] if selected.size else np.empty((0,), dtype=np.float32)
+        if float(np.sum(selected_weights)) <= 0.0:
+            raise ValueError("frame_weight must be nonnegative with positive sum")
+        return weights
+
     if weights.shape != (len(selected_ids),):
         raise ValueError(
             "spec['frame_weight'] must have the same length as the selected frame set: "
             f"expected {len(selected_ids)}, got {weights.shape}"
         )
-    return {int(fid): float(w) for fid, w in zip(selected_ids, weights)}
+    if float(np.sum(weights)) <= 0.0:
+        raise ValueError("frame_weight must be nonnegative with positive sum")
+
+    full_weights = np.ones(int(total_frames), dtype=np.float32)
+    if selected.size:
+        full_weights[selected] = weights
+    return full_weights
 
 
 def _run_rdf_step(
@@ -189,7 +253,7 @@ def _run_rdf_step(
     source: Any,
     topology_arrays: TopologyArrays,
     forcefield_snapshot: Forcefield,
-    frame_weights: Optional[Mapping[int, float]],
+    frame_weights: Optional[Sequence[float]],
     default_cutoff: Optional[float],
     default_sel_indices: Optional[np.ndarray],
     default_exclude_option: str,
@@ -900,6 +964,7 @@ class MPIComputeEngine:
             local_count = base_count + (1 if rank < remainder else 0)
             local_offset = rank * base_count + min(rank, remainder)
             local_ids = all_ids[local_offset : local_offset + local_count]
+            selected_frame_ids = list(local_ids)
             # Contiguous-range variables are unused on this path.
             local_start = local_end = every = None
         else:
@@ -920,14 +985,38 @@ class MPIComputeEngine:
             local_offset = rank * base_count + min(rank, remainder)
             local_start = frame_start + local_offset * every
             local_end = frame_start + (local_offset + local_count) * every
+            selected_frame_ids = list(range(local_start, local_end, every))
 
-        if shared_spec.get("frame_weight") is None:
+        if shared_spec.get("frame_weight") is not None and shared_spec.get("frame_weight_file") is not None:
+            raise ValueError("Specify only one of spec['frame_weight'] or spec['frame_weight_file'].")
+
+        frame_weight_load_error = None
+        loaded_frame_weight = None
+        if rank == 0:
+            try:
+                loaded_frame_weight = _load_frame_weight_file(
+                    shared_spec.get("frame_weight_file"),
+                    work_dir=work_dir,
+                )
+            except Exception as exc:
+                frame_weight_load_error = exc
+        if comm is not None and size > 1:
+            frame_weight_load_error = comm.bcast(frame_weight_load_error, root=0)
+            if frame_weight_load_error is not None:
+                raise frame_weight_load_error
+            loaded_frame_weight = comm.bcast(loaded_frame_weight, root=0)
+        elif frame_weight_load_error is not None:
+            raise frame_weight_load_error
+
+        frame_weight_all = _frame_weight_array_from_spec(
+            shared_spec,
+            int(total_frames),
+            loaded_frame_weight=loaded_frame_weight,
+        )
+        if frame_weight_all is None:
             frame_weight_local = None
         else:
-            frame_weight_all = np.asarray(shared_spec["frame_weight"], dtype=np.float32)
-            if np.any(frame_weight_all < 0.0) or np.sum(frame_weight_all) <= 0.0:
-                raise ValueError("frame_weight must be nonnegative with positive sum")
-            frame_weight_local = frame_weight_all[local_offset : local_offset + local_count]
+            frame_weight_local = frame_weight_all[np.asarray(selected_frame_ids, dtype=np.int64)]
 
         pair_cutoff = (
             None if shared_spec.get("cutoff") is None else float(shared_spec["cutoff"])
@@ -1107,7 +1196,6 @@ class MPIComputeEngine:
                 )
 
         if rank == 0 and rdf_steps:
-            rdf_frame_weights = _frame_weight_mapping_from_spec(shared_spec, int(total_frames))
             for step in rdf_steps:
                 rdf_source_mode = str(step.get("rdf_source", "auto")).strip().lower()
                 if rdf_source_mode not in {"auto", "cache", "universe"}:
@@ -1130,7 +1218,7 @@ class MPIComputeEngine:
                     source=rdf_source,
                     topology_arrays=topology_arrays,
                     forcefield_snapshot=forcefield_snapshot,
-                    frame_weights=rdf_frame_weights,
+                    frame_weights=frame_weight_all,
                     default_cutoff=pair_cutoff,
                     default_sel_indices=sel_indices,
                     default_exclude_option=exclude_option,
