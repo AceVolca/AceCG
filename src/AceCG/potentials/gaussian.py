@@ -55,30 +55,35 @@ class GaussianPotential(BasePotential):
         np.ndarray
             Energy values at ``r``.
         """
+        r = np.asarray(r, dtype=float)
         A, r0, sigma = self._params
         x = r - r0
         return A / (sigma * np.sqrt(2 * np.pi)) * np.exp(-x**2 / (2 * sigma**2))
     
     def force(self, r):
         """Evaluate the scalar force ``-dU/dr`` for the Gaussian."""
+        r = np.asarray(r, dtype=float)
         A, r0, sigma = self._params
         x = r - r0
         return A / (sigma**3 * np.sqrt(2*np.pi)) * x * np.exp(-x**2 / (2 * sigma**2))
 
     def dA(self, r):
         """Return ``dU/dA`` evaluated at ``r``."""
+        r = np.asarray(r, dtype=float)
         _, r0, sigma = self._params
         x = r - r0
         return 1 / (sigma * np.sqrt(2 * np.pi)) * np.exp(-x**2 / (2 * sigma**2))
 
     def dr0(self, r):
         """Return ``dU/dr0`` evaluated at ``r``."""
+        r = np.asarray(r, dtype=float)
         A, r0, sigma = self._params
         x = r - r0
         return A * x / (sigma**3 * np.sqrt(2 * np.pi)) * np.exp(-x**2 / (2 * sigma**2))
 
     def dsigma(self, r):
         """Return ``dU/dsigma`` evaluated at ``r``."""
+        r = np.asarray(r, dtype=float)
         A, r0, sigma = self._params
         x = r - r0
         phi = np.exp(-x**2 / (2 * sigma**2))
@@ -86,10 +91,11 @@ class GaussianPotential(BasePotential):
 
     def dA_2(self, r):
         """Return ``d2U/dA2``, which is zero for this potential."""
-        return np.zeros_like(r)
+        return np.zeros_like(np.asarray(r, dtype=float), dtype=float)
 
     def dAdr0(self, r):
         """Return the mixed derivative ``d2U/dA dr0``."""
+        r = np.asarray(r, dtype=float)
         _, r0, sigma = self._params
         x = r - r0
         phi = np.exp(-x**2 / (2 * sigma**2))
@@ -97,6 +103,7 @@ class GaussianPotential(BasePotential):
 
     def dAdsigma(self, r):
         """Return the mixed derivative ``d2U/dA dsigma``."""
+        r = np.asarray(r, dtype=float)
         _, r0, sigma = self._params
         x = r - r0
         phi = np.exp(-x**2 / (2 * sigma**2))
@@ -104,6 +111,7 @@ class GaussianPotential(BasePotential):
 
     def dr0_2(self, r):
         """Return ``d2U/dr0^2`` evaluated at ``r``."""
+        r = np.asarray(r, dtype=float)
         A, r0, sigma = self._params
         x = r - r0
         phi = np.exp(-x**2 / (2 * sigma**2))
@@ -111,6 +119,7 @@ class GaussianPotential(BasePotential):
 
     def dr0dsigma(self, r):
         """Return the mixed derivative ``d2U/dr0 dsigma``."""
+        r = np.asarray(r, dtype=float)
         A, r0, sigma = self._params
         x = r - r0
         phi = np.exp(-x**2 / (2 * sigma**2))
@@ -118,6 +127,7 @@ class GaussianPotential(BasePotential):
 
     def dsigma_2(self, r):
         """Return ``d2U/dsigma^2`` evaluated at ``r``."""
+        r = np.asarray(r, dtype=float)
         A, r0, sigma = self._params
         x = r - r0
         phi = np.exp(-x**2 / (2 * sigma**2))

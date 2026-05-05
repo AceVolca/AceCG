@@ -30,12 +30,43 @@ from .base import BaseWorkflow
 _BOLTZMANN_KCAL = 0.001987204  # kcal/(mol·K)
 
 
+def resolve_aa_noise_sigma(noise: Any, *, n_epochs: int, stage: int) -> float:
+    sigma0 = float(noise.sigma)
+    sigma1 = sigma0 if noise.sigma_final is None else float(noise.sigma_final)
+    if sigma0 == sigma1:
+        return sigma0
+    interval = max(int(noise.update_interval), 1)
+    n_stages = max((int(n_epochs) + interval - 1) // interval, 1)
+    progress = 0.0 if n_stages <= 1 else min(max(int(stage), 0), n_stages - 1) / float(n_stages - 1)
+    schedule = str(noise.schedule).strip().lower()
+    if schedule == "constant":
+        return sigma0
+    if schedule == "cosine":
+        return sigma1 + 0.5 * (sigma0 - sigma1) * (1.0 + np.cos(np.pi * progress))
+    if schedule == "exponential":
+        if sigma0 <= 0.0 or sigma1 <= 0.0:
+            return sigma1 if progress >= 1.0 else sigma0
+        return sigma0 * ((sigma1 / sigma0) ** progress)
+    raise ValueError(f"Unsupported aa_ref noise schedule {schedule!r}.")
+
+
 @dataclass(frozen=True)
 class AAStats:
     """All-atom reference derivative statistics for sampling workflows."""
 
     energy_grad: np.ndarray
     d2U: Optional[np.ndarray] = None
+    gradient_convention: str = "physical"
+
+    @staticmethod
+    def _normalize_gradient_convention(value: Any) -> Optional[str]:
+        """Normalize serialized gradient-convention labels."""
+        if value is None:
+            return None
+        convention = str(value).strip()
+        if not convention:
+            return None
+        return convention.lower()
 
     @classmethod
     def from_payload(
@@ -46,6 +77,7 @@ class AAStats:
         hess_key: str,
         need_hessian: bool,
         label: str,
+        expected_gradient_convention: Optional[str] = None,
     ) -> "AAStats":
         """Build AA statistics from a serialized payload.
 
@@ -61,6 +93,8 @@ class AAStats:
             Whether missing Hessian data should raise an error.
         label : str
             Human-readable label included in validation errors.
+        expected_gradient_convention : str, optional
+            Required gradient convention for the serialized payload.
         """
         if not isinstance(payload, dict):
             raise ValueError(f"{label} must be a dict, got {type(payload).__name__}.")
@@ -69,9 +103,30 @@ class AAStats:
         d2u_raw = payload.get(hess_key)
         if need_hessian and d2u_raw is None:
             raise KeyError(f"{label} must contain {hess_key!r} when Hessian data is required.")
+        gradient_convention = cls._normalize_gradient_convention(
+            payload.get("gradient_convention")
+        )
+        expected_gradient_convention = cls._normalize_gradient_convention(
+            expected_gradient_convention
+        )
+        if expected_gradient_convention == "gauge_free" and not gradient_convention:
+            raise KeyError(
+                f"{label} must contain 'gradient_convention' for cached REM statistics. "
+                "Accepted value is 'gauge_free'."
+            )
+        if (
+            expected_gradient_convention is not None
+            and gradient_convention is not None
+            and gradient_convention != expected_gradient_convention
+        ):
+            raise ValueError(
+                f"{label} uses gradient_convention={gradient_convention!r}, "
+                f"expected {expected_gradient_convention!r}."
+            )
         return cls(
             energy_grad=np.asarray(payload[grad_key], dtype=np.float64),
             d2U=None if d2u_raw is None else np.asarray(d2u_raw, dtype=np.float64),
+            gradient_convention=gradient_convention or expected_gradient_convention or "physical",
         )
 
 
@@ -84,7 +139,7 @@ class SamplingWorkflow(BaseWorkflow):
         scheduler       – ``TaskScheduler`` for running sim + post tasks
         sampler         – ``BaseSampler`` for xz sampling
         beta            – inverse temperature (kcal/mol)^{-1}
-        aa_data_strategy – ``AAStats`` or ``Callable[[Forcefield], AAStats]``
+        aa_data_strategy – ``AAStats`` or an epoch-aware AAStats callable
     """
 
     def __init__(self, config: ACGConfig, **kwargs: Any) -> None:
@@ -98,7 +153,7 @@ class SamplingWorkflow(BaseWorkflow):
         self.scheduler = self._build_scheduler()
         self.sampler = self._build_sampler()
         self.beta = self._derive_beta()
-        self.aa_data_strategy: Optional[AAStats | Callable[[Forcefield], AAStats]] = None
+        self.aa_data_strategy: Optional[AAStats | Callable[..., AAStats]] = None
 
     # ── builders ────────────────────────────────────────────────
 
@@ -153,7 +208,7 @@ class SamplingWorkflow(BaseWorkflow):
             )
         return 1.0 / (_BOLTZMANN_KCAL * T)
 
-    def _build_aa_data_strategy(self) -> AAStats | Callable[[Forcefield], AAStats]:
+    def _build_aa_data_strategy(self) -> AAStats | Callable[..., AAStats]:
         """Build AA-reference data as a constant object or per-epoch callable."""
         if not hasattr(self, "trainer"):
             raise AttributeError("AA data strategy requires a constructed trainer.")
@@ -162,9 +217,52 @@ class SamplingWorkflow(BaseWorkflow):
             self.trainer.optimizer_accepts_hessian() or self.config.training.need_hessian
         )
         cache_path = self._resolve_config_path(self.config.aa_ref.all_atom_data_path)
-        is_linear = self.trainer.is_optimization_linear()
+        training_method = str(self.config.training.method).strip().lower()
+        expected_gradient_convention = "gauge_free" if training_method == "rem" else "physical"
+        is_cacheable = (
+            self.trainer.is_gauge_free_energy_grad_cacheable()
+            if expected_gradient_convention == "gauge_free"
+            else self.trainer.is_optimization_linear()
+        )
+        noise_enabled = bool(getattr(self.config.aa_ref.noise, "enabled", False))
 
-        if is_linear:
+        if noise_enabled:
+            if not self.config.aa_ref.trajectory_files:
+                raise ValueError(
+                    "aa_ref.trajectory_files is required when aa_ref noise is enabled."
+                )
+            aa_cache: Dict[int, AAStats] = {}
+            aa_counter = count()
+
+            def compute_noisy_aa_stats(
+                forcefield: Forcefield,
+                epoch: Optional[int] = None,
+            ) -> AAStats:
+                stage = self._aa_noise_stage(epoch)
+                use_stage_cache = is_cacheable and self.config.aa_ref.noise.cache_policy == "stage"
+                if use_stage_cache and stage in aa_cache:
+                    return aa_cache[stage]
+                if epoch is None:
+                    suffix = next(aa_counter)
+                    work_dir = self.output_dir / f"aa_noise_stage_{stage:04d}_{suffix:04d}"
+                elif is_cacheable:
+                    work_dir = self.output_dir / f"aa_noise_stage_{stage:04d}"
+                else:
+                    work_dir = self.output_dir / f"aa_recompute_{int(epoch):04d}"
+                stats = self._run_aa_post(
+                    work_dir=work_dir,
+                    forcefield=forcefield,
+                    need_hessian=need_hessian,
+                    noise_spec=self._aa_noise_runtime_spec(stage, epoch=epoch),
+                    gradient_convention=expected_gradient_convention,
+                )
+                if use_stage_cache:
+                    aa_cache[stage] = stats
+                return stats
+
+            return compute_noisy_aa_stats
+
+        if is_cacheable:
             if cache_path is not None:
                 if not cache_path.exists():
                     raise FileNotFoundError(f"all_atom_data_path {cache_path!s} does not exist.")
@@ -176,32 +274,66 @@ class SamplingWorkflow(BaseWorkflow):
                     hess_key="d2U_AA",
                     need_hessian=need_hessian,
                     label=f"AA data at {cache_path!s}",
+                    expected_gradient_convention=expected_gradient_convention,
                 )
             return self._run_aa_post(
                 work_dir=self.output_dir / "aa_precompute",
                 forcefield=self.forcefield,
                 need_hessian=need_hessian,
+                gradient_convention=expected_gradient_convention,
             )
 
         if not self.config.aa_ref.trajectory_files:
             raise ValueError(
-                "Nonlinear REM requires aa_ref.trajectory_files so AA statistics "
+                "Non-cacheable REM requires aa_ref.trajectory_files so AA statistics "
                 "can be recomputed for the current forcefield each epoch."
             )
 
         aa_counter = count()
 
-        def compute_aa_stats(forcefield: Forcefield) -> AAStats:
-            step_index = next(aa_counter)
+        def compute_aa_stats(
+            forcefield: Forcefield,
+            epoch: Optional[int] = None,
+        ) -> AAStats:
+            step_index = next(aa_counter) if epoch is None else int(epoch)
             return self._run_aa_post(
                 work_dir=self.output_dir / f"aa_recompute_{step_index:04d}",
                 forcefield=forcefield,
                 need_hessian=need_hessian,
+                gradient_convention=expected_gradient_convention,
             )
 
         return compute_aa_stats
 
     # ── FF write / snapshot helpers ─────────────────────────────
+
+    def _aa_noise_stage(self, epoch: Optional[int]) -> int:
+        noise = self.config.aa_ref.noise
+        if epoch is None:
+            return 0
+        return int(epoch) // int(noise.update_interval)
+
+    def _aa_noise_runtime_spec(
+        self,
+        stage: int,
+        *,
+        epoch: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        noise = self.config.aa_ref.noise
+        runtime = noise.to_runtime_dict()
+        runtime["sigma"] = self._aa_noise_sigma(stage)
+        runtime["seed"] = int(noise.seed) + int(stage)
+        if int(noise.subsample_per_epoch) > 0:
+            subsample_stage = int(stage) if epoch is None else int(epoch)
+            runtime["subsample_seed"] = int(noise.seed) + subsample_stage
+        return runtime
+
+    def _aa_noise_sigma(self, stage: int) -> float:
+        return resolve_aa_noise_sigma(
+            self.config.aa_ref.noise,
+            n_epochs=int(self.config.training.n_epochs),
+            stage=stage,
+        )
 
     def _write_forcefield(self, ff_dir: Path) -> Path:
         """Write the current runtime forcefield bundle under *ff_dir*."""
@@ -339,6 +471,8 @@ class SamplingWorkflow(BaseWorkflow):
         work_dir: Path,
         forcefield: Forcefield,
         need_hessian: bool,
+        noise_spec: Optional[Dict[str, Any]] = None,
+        gradient_convention: str = "physical",
     ) -> AAStats:
         """Run MPI engine in ``rem`` mode on AA reference trajectory.
 
@@ -366,7 +500,7 @@ class SamplingWorkflow(BaseWorkflow):
             "cutoff": cfg.system.cutoff,
             "steps": [
                 {
-                    "step_mode": "rem",
+                    "step_mode": cfg.training.method,
                     "need_hessian": need_hessian,
                     "output_file": str(output_file),
                 }
@@ -387,6 +521,9 @@ class SamplingWorkflow(BaseWorkflow):
             spec["frame_start"] = cfg.aa_ref.skip_frames
         if cfg.aa_ref.n_frames > 0:
             spec["frame_end"] = cfg.aa_ref.skip_frames + cfg.aa_ref.n_frames
+        if noise_spec is not None:
+            spec["noise"] = dict(noise_spec)
+        self._apply_post_runtime_options(spec)
 
         run_post(
             spec,
@@ -406,4 +543,13 @@ class SamplingWorkflow(BaseWorkflow):
             hess_key="d2U_avg",
             need_hessian=need_hessian,
             label=f"AA engine result at {output_file!s}",
+            expected_gradient_convention=gradient_convention,
         )
+
+    def _apply_post_runtime_options(self, spec: Dict[str, Any]) -> None:
+        if self.config.sampling.perf_trace:
+            spec["perf_trace"] = True
+            interval = self.config.sampling.extras.get("heartbeat_interval", 25)
+            spec["heartbeat_interval"] = int(interval)
+        if bool(self.config.sampling.extras.get("perf_trace_all_ranks", False)):
+            spec["perf_trace_all_ranks"] = True

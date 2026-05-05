@@ -1,6 +1,6 @@
 # 09 Workflow Module Developer Reference
 
-*Updated: 2026-04-23.*
+*Updated: 2026-05-05.*
 
 > This chapter covers training / orchestration workflows only. VP grower is documented separately in [10_vp_grower.md](10_vp_grower.md).
 
@@ -18,6 +18,7 @@ The workflow layer sits above scheduler, trainer, and solver. It connects config
 | `workflows/cdrem.py` | `CDREMWorkflow` |
 | `workflows/cdfm.py` | `CDFMWorkflow` |
 | `workflows/fm.py` | `FMWorkflow` |
+| `workflows/dsm.py` | `DSMWorkflow` |
 | `workflows/__init__.py` | Public workflow class exports |
 
 ---
@@ -65,7 +66,7 @@ Important shared helpers:
 
 | Method | Purpose |
 |---|---|
-| `_run_workflow_cli()` | Shared CLI wrapper for `acg-rem`, `acg-fm`, and related entry points |
+| `_run_workflow_cli()` | Shared CLI wrapper for `acg-rem`, `acg-fm`, `acg-dsm`, and related entry points |
 | `_apply_config_overrides()` | Supports `--section.field value` style overrides |
 | `_build_topology()` | Builds `TopologyArrays` from current config |
 | `_build_optimizer()` | Selects optimizer from `training.optimizer` / `training.trainer` |
@@ -95,12 +96,21 @@ Key helpers:
 | `_build_sampler()` | Build free-sampling `BaseSampler` |
 | `_build_aa_data_strategy()` | Choose constant AA stats or per-epoch recomputation for REM paths |
 | `_run_aa_post()` | Run one REM-style post on the AA trajectory with the current forcefield |
+| `_aa_noise_runtime_spec()` | Build epoch-local noisy AA-reference specs for REM AA-side post |
 | `_snapshot_forcefield()` | Write a force-field pickle for MPI post |
 | `_snapshot_optimizer()` | Save Adam/AdamW/RMSprop internal state |
 | `_write_workflow_checkpoint()` | Save full resume state |
 | `_load_workflow_checkpoint()` | Restore from the latest completed epoch |
 
 `SamplingWorkflow` itself does not define a training loop. It only collects common behavior for workflows that run simulations.
+
+When `aa_ref.noise_enabled = true`, `SamplingWorkflow` builds noisy
+AA-reference statistics for REM through the ordinary `_run_aa_post()` path.
+Noise stage is `epoch // aa_ref.noise_update_interval`; `noise_schedule` and
+`noise_sigma_final` resolve the stage-local sigma; `noise_cache_policy =
+stage` can reuse AA statistics when the active gradient convention is
+cacheable. `aa_ref.noise_subsample_per_epoch` selects a sorted, no-replacement
+frame subset after the usual AA frame slicing.
 
 ---
 
@@ -116,7 +126,14 @@ Key helpers:
 4. Build `REMTrainerAnalytic.make_batch(...)`.
 5. Call `trainer.step(batch)` and write parameters back to the runtime forcefield.
 
-AA-side statistics are selected by `_build_aa_data_strategy()`: linear paths may read cached stats directly, while nonlinear paths may recompute per epoch.
+AA-side statistics are selected by `_build_aa_data_strategy()`: linear
+gauge-free paths may read cached stats directly, while nonlinear paths may
+recompute per epoch.
+
+Noisy REM is implemented on the AA positive-phase side. The AA post spec
+receives `spec["noise"]`, and `MPIComputeEngine` computes noisy same-frame
+batches before reducer accumulation. The CG xz sampling branch remains the
+ordinary sampled-CG REM branch.
 
 ### `CDREMWorkflow`
 
@@ -157,6 +174,49 @@ FM has two execution paths:
 
 After solving, `_export_table_bundle()` exports the result as LAMMPS tables.
 
+Noisy FM is a post-processing option on the AA reference path. If
+`aa_ref.noise_enabled = true`, `_fm_noise_runtime_spec()` adds `spec["noise"]`
+to the FM post spec. Coordinate replicas are same-frame batches handled by
+`MPIComputeEngine.compute()`; reducers still see ordinary FM statistics.
+
+Mixed noisy FM is enabled with `aa_ref.noise_force_mix_ratio = alpha`.
+The original included frame, when present, keeps the unmodified reference-force
+target. Noisy replicas use:
+
+```text
+(1 - alpha) * y_ref + alpha * (-delta / (beta * sigma^2))
+```
+
+This path requires `training.temperature` or `training.beta`, positive noise
+sigma, and at least one noisy replica. It is supported only for
+`training.method = fm`.
+
+### `DSMWorkflow`
+
+`DSMWorkflow` subclasses `FMWorkflow` but forces the iterative trainer path.
+It uses `training.fm_specs` to build the trainable forcefield and requires
+`aa_ref.noise_enabled = true`, positive resolved `noise_sigma`, and positive
+`training.temperature` / `training.beta`.
+
+Each epoch writes:
+
+```text
+dsm_step_XXXX/
+  forcefield.pkl
+  dsm_batch.pkl
+  ff/
+    optimizer_snapshot.pkl
+    workflow_checkpoint.pkl
+```
+
+The post spec uses `step_mode="dsm"` plus a noise runtime spec with
+`target="dsm"` and `beta`. The compute layer generates the score target
+`-delta / (beta * sigma^2)`, and the workflow scales the returned FM-shaped
+statistics by `beta^2` before calling `FMTrainerAnalytic.step()`.
+
+To resume, set `training.start_epoch = N`; DSM restores
+`dsm_step_{N-1}/ff/workflow_checkpoint.pkl` before running epoch `N`.
+
 ---
 
 ## Directory Conventions
@@ -179,6 +239,17 @@ FM workflow layout:
 fm_step_0000/
   forcefield.pkl
   fm_batch.pkl
+```
+
+DSM workflow layout:
+
+```text
+dsm_step_0000/
+  forcefield.pkl
+  dsm_batch.pkl
+  ff/
+    optimizer_snapshot.pkl
+    workflow_checkpoint.pkl
 ```
 
 The most important debugging files are:

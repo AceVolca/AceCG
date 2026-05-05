@@ -16,11 +16,14 @@ Dynamic derivative accessors:
     dc{i}dr(r)  → ∂F/∂c_i = B_i(r)
     dr(r)       → F(r) = force(r)
 """
+from __future__ import annotations
+
 import re
 from functools import lru_cache
 
 import numpy as np
-from scipy.interpolate import BSpline
+from scipy.interpolate import BSpline, PPoly
+from scipy.sparse import coo_matrix
 
 from .base import BasePotential
 
@@ -61,10 +64,10 @@ class BSplinePotential(BasePotential):
             If ``True``, choose an energy gauge appropriate for bonded terms.
             If ``False``, anchor the energy at the cutoff side.
         """
+        super().__init__(bonded=bonded)
         self.typ1  = typ1
         self.typ2  = typ2
         self.cutoff = float(cutoff)
-        self.bonded = bool(bonded)
         self.spline = BSpline(knots, coefficients, degree)
 
         n_params = len(coefficients)
@@ -278,10 +281,17 @@ class BSplinePotential(BasePotential):
             return lo
 
         anti = self.spline.antiderivative()
-        grid_size = max(4097, 64 * (self.knots.size - 1) + 1)
-        r_grid = np.linspace(lo, hi, grid_size, dtype=float)
-        values = -(anti(r_grid) - anti(self._r_ref))
-        return float(r_grid[int(np.argmin(values))])
+        piecewise = PPoly.from_spline(anti, extrapolate=False)
+        roots = np.asarray(piecewise.derivative(1).roots(extrapolate=False), dtype=float)
+        roots = roots[np.isfinite(roots)]
+        roots = roots[(roots >= lo - 1.0e-12) & (roots <= hi + 1.0e-12)]
+        roots = np.clip(roots, lo, hi)
+        knots = np.asarray(piecewise.x, dtype=float)
+        knots = knots[(knots >= lo - 1.0e-12) & (knots <= hi + 1.0e-12)]
+        candidates = np.r_[lo, roots, hi, knots]
+        candidates = np.unique(np.round(candidates, 14))
+        values = -(piecewise(candidates) - piecewise(self._r_ref))
+        return float(candidates[int(np.nanargmin(values))])
 
     # ------------------------------------------------------------------
     # Primary evaluation: force is direct, energy is integrated
@@ -297,9 +307,10 @@ class BSplinePotential(BasePotential):
 
     def value(self, r: np.ndarray) -> np.ndarray:
         """Compute energy from the antiderivative of the full spline."""
-        r_flat = np.asarray(r, dtype=float).reshape(-1)
+        r_arr = np.asarray(r, dtype=float)
+        r_flat = r_arr.reshape(-1)
         if r_flat.size == 0:
-            return np.empty(0, dtype=float)
+            return np.empty(r_arr.shape, dtype=float)
         anti = self.spline.antiderivative()
         if self.bonded:
             reference = self._minimum_gauge_coordinate()
@@ -308,21 +319,35 @@ class BSplinePotential(BasePotential):
         values = -(anti(r_flat) - anti(reference))
         if np.isfinite(self.cutoff):
             values[r_flat > self.cutoff] = 0.0
-        return values
+        return values.reshape(r_arr.shape)
 
     def energy_grad(self, r: np.ndarray) -> np.ndarray:
         """Return ``dU/dtheta`` via the integrated B-spline basis matrix."""
-        r_flat = np.asarray(r, dtype=float).reshape(-1)
+        r_arr = np.asarray(r, dtype=float)
+        r_flat = r_arr.reshape(-1)
         grad = -self.basis_integrals(r_flat)
         if self.bonded:
             grad += self.basis_integrals(np.asarray([self._minimum_gauge_coordinate()], dtype=float))
         if np.isfinite(self.cutoff):
             grad[r_flat > self.cutoff, :] = 0.0
-        return grad
+        return grad.reshape(r_arr.shape + (self.n_params(),))
 
     def energy_grad_sum(self, r: np.ndarray) -> np.ndarray:
         """Return ``Σ_samples dU/dtheta`` without materializing the full matrix."""
-        r_flat = np.asarray(r, dtype=float).reshape(-1)
+        r_arr = np.asarray(r, dtype=float)
+        if r_arr.ndim > 1:
+            return self.energy_grad_sum_by_sample(r_arr)
+        return self._energy_grad_sum_1d(r_arr, include_gauge=True)
+
+    def _energy_grad_sum_1d(
+        self,
+        r: np.ndarray,
+        *,
+        include_gauge: bool,
+    ) -> np.ndarray:
+        """Return a one-dimensional summed integrated-basis gradient."""
+        r_arr = np.asarray(r, dtype=float)
+        r_flat = r_arr.reshape(-1)
         if np.isfinite(self.cutoff):
             r_eval = r_flat[r_flat <= self.cutoff]
         else:
@@ -330,7 +355,7 @@ class BSplinePotential(BasePotential):
         if r_eval.size == 0:
             return np.zeros(self.n_params(), dtype=float)
         gauge_shift = np.zeros(self.n_params(), dtype=float)
-        if self.bonded:
+        if include_gauge and self.bonded:
             gauge_shift = self.basis_integrals(np.asarray([self._minimum_gauge_coordinate()], dtype=float))[0]
         if hasattr(BSpline, "design_matrix"):
             try:
@@ -351,18 +376,157 @@ class BSplinePotential(BasePotential):
                 pass
         return -np.asarray(self.basis_integrals(r_eval), dtype=float).sum(axis=0) + r_eval.size * gauge_shift
 
+    def gauge_free_energy_grad_sum(self, r: np.ndarray) -> np.ndarray:
+        """Return summed ``dU/dtheta`` without parameter-dependent gauge shifts."""
+        r_arr = np.asarray(r, dtype=float)
+        if r_arr.ndim > 1:
+            return self.gauge_free_energy_grad_sum_by_sample(r_arr)
+        return self._energy_grad_sum_1d(r_arr, include_gauge=False)
+
+    def is_gauge_free_energy_grad_cacheable(self) -> np.ndarray:
+        """Return an all-true mask for force-basis gauge-free channels."""
+        return np.ones(self.n_params(), dtype=bool)
+
+    def energy_grad_sum_by_sample(
+        self,
+        r: np.ndarray,
+        *,
+        active: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Return per-sample integrated-basis sums using sparse row reduction."""
+        return self._energy_grad_sum_by_sample(r, active=active, include_gauge=True)
+
+    def gauge_free_energy_grad_sum_by_sample(
+        self,
+        r: np.ndarray,
+        *,
+        active: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Return per-sample gauge-free integrated-basis sums."""
+        return self._energy_grad_sum_by_sample(r, active=active, include_gauge=False)
+
+    def _energy_grad_sum_by_sample(
+        self,
+        r: np.ndarray,
+        *,
+        active: np.ndarray | None = None,
+        include_gauge: bool,
+    ) -> np.ndarray:
+        """Return per-sample integrated-basis sums using sparse row reduction."""
+        r_arr = np.asarray(r, dtype=float)
+        if r_arr.ndim <= 1:
+            rv = r_arr.reshape(-1)
+            if active is not None:
+                active_arr = np.asarray(active, dtype=bool)
+                if active_arr.shape != r_arr.shape:
+                    active_arr = np.broadcast_to(active_arr, r_arr.shape)
+                rv = r_arr[active_arr]
+            return np.asarray(
+                self._energy_grad_sum_1d(rv, include_gauge=include_gauge),
+                dtype=float,
+            ).reshape(self.n_params())
+
+        active_arr = np.isfinite(r_arr)
+        if np.isfinite(self.cutoff):
+            active_arr &= r_arr <= self.cutoff
+        if active is not None:
+            caller_active = np.asarray(active, dtype=bool)
+            if caller_active.shape != r_arr.shape:
+                caller_active = np.broadcast_to(caller_active, r_arr.shape)
+            active_arr &= caller_active
+
+        flat = r_arr.reshape((-1, r_arr.shape[-1]))
+        flat_active = active_arr.reshape(flat.shape)
+        n_samples = flat.shape[0]
+        n_params = self.n_params()
+        counts = flat_active.sum(axis=1).astype(np.int64, copy=False)
+        out = np.zeros((n_samples, n_params), dtype=float)
+        if int(counts.sum()) == 0:
+            return out.reshape(r_arr.shape[:-1] + (n_params,))
+        if n_samples <= 8:
+            for i, row in enumerate(flat):
+                rv = row[flat_active[i]]
+                if rv.size:
+                    out[i] = np.asarray(
+                        self._energy_grad_sum_1d(rv, include_gauge=include_gauge),
+                        dtype=float,
+                    ).reshape(n_params)
+            return out.reshape(r_arr.shape[:-1] + (n_params,))
+
+        r_eval = flat[flat_active]
+        gauge_shift = np.zeros(n_params, dtype=float)
+        if include_gauge and self.bonded:
+            gauge_shift = self.basis_integrals(
+                np.asarray([self._minimum_gauge_coordinate()], dtype=float)
+            )[0]
+        if hasattr(BSpline, "design_matrix"):
+            try:
+                payload = self._integral_basis_data()
+                if payload is not None:
+                    anti_knots, anti_degree, extrapolate, coeff_matrix, ref = payload
+                    dm = BSpline.design_matrix(
+                        r_eval,
+                        anti_knots,
+                        anti_degree,
+                        extrapolate=extrapolate,
+                    )
+                    sample_ids = np.repeat(
+                        np.arange(n_samples, dtype=np.int64),
+                        counts,
+                    )
+                    coo = dm.tocoo()
+                    n_basis = int(dm.shape[1])
+                    bins = (
+                        sample_ids[np.asarray(coo.row, dtype=np.int64)] * n_basis
+                        + np.asarray(coo.col, dtype=np.int64)
+                    )
+                    row_sums = np.bincount(
+                        bins,
+                        weights=np.asarray(coo.data, dtype=float),
+                        minlength=n_samples * n_basis,
+                    ).reshape(n_samples, n_basis)
+                    reduced = np.asarray(row_sums @ coeff_matrix, dtype=float)
+                    reduced -= counts[:, None] * ref[None, :]
+                    out = -reduced + counts[:, None] * gauge_shift[None, :]
+                    return out.reshape(r_arr.shape[:-1] + (n_params,))
+            except Exception:
+                pass
+
+        for i, row in enumerate(flat):
+            rv = row[flat_active[i]]
+            if rv.size:
+                out[i] = np.asarray(
+                    self._energy_grad_sum_1d(rv, include_gauge=include_gauge),
+                    dtype=float,
+                ).reshape(n_params)
+        return out.reshape(r_arr.shape[:-1] + (n_params,))
+
     def force_grad(self, r: np.ndarray):
         """Return ``dF/dtheta`` via the force-basis design matrix."""
-        r_flat = np.asarray(r, dtype=float).reshape(-1)
+        r_arr = np.asarray(r, dtype=float)
+        r_flat = r_arr.reshape(-1)
         if r_flat.size == 0:
-            return np.empty((0, self.n_params()), dtype=float)
+            return np.empty(r_arr.shape + (self.n_params(),), dtype=float)
+        if r_arr.ndim > 1:
+            dense = self.basis_values(r_arr)
+            if np.isfinite(self.cutoff) and np.any(r_arr > self.cutoff):
+                dense = np.asarray(dense, dtype=float)
+                dense[r_arr > self.cutoff, :] = 0.0
+            return dense
+        sparse = self.basis_values_sparse(r_flat)
+        if sparse is not None:
+            if np.isfinite(self.cutoff) and np.any(r_flat > self.cutoff):
+                coo = sparse.tocoo()
+                keep = r_flat[np.asarray(coo.row, dtype=np.int64)] <= self.cutoff
+                return coo_matrix(
+                    (coo.data[keep], (coo.row[keep], coo.col[keep])),
+                    shape=coo.shape,
+                ).tocsr()
+            return sparse
         if np.isfinite(self.cutoff) and np.any(r_flat > self.cutoff):
             dense = self.basis_values(r_flat)
             dense[r_flat > self.cutoff, :] = 0.0
             return dense
-        sparse = self.basis_values_sparse(r_flat)
-        if sparse is not None:
-            return sparse
         return self.basis_values(r_flat)
 
     # ------------------------------------------------------------------
@@ -399,21 +563,22 @@ class BSplinePotential(BasePotential):
 
         Under force-basis semantics: B_i(r) = ∂F/∂c_i.
         """
-        r = np.asarray(r, dtype=float).ravel()
+        r_arr = np.asarray(r, dtype=float)
+        r = r_arr.ravel()
         n_params = len(self._params)
         if r.size == 0:
-            return np.empty((0, n_params), dtype=float)
+            return np.empty(r_arr.shape + (n_params,), dtype=float)
         if hasattr(BSpline, "design_matrix"):
             try:
                 dm = BSpline.design_matrix(r, self.knots, self.degree, extrapolate=self.spline.extrapolate)
-                return np.asarray(dm.toarray(), dtype=float)
+                return np.asarray(dm.toarray(), dtype=float).reshape(r_arr.shape + (n_params,))
             except Exception:
                 pass
         bank = self._basis_bank(0)
         out = np.empty((r.size, len(bank)), dtype=float)
         for i, sp in enumerate(bank):
             out[:, i] = sp(r)
-        return out
+        return out.reshape(r_arr.shape + (len(bank),))
 
     def basis_values_sparse(self, r: np.ndarray):
         """Sparse force basis matrix (for pair projector optimization)."""
@@ -430,14 +595,15 @@ class BSplinePotential(BasePotential):
 
     def basis_derivatives(self, r: np.ndarray) -> np.ndarray:
         """Derivative of force basis dB_i/dr, shape (n_samples, n_params)."""
-        r = np.asarray(r, dtype=float).ravel()
+        r_arr = np.asarray(r, dtype=float)
+        r = r_arr.ravel()
         bank = self._basis_bank(1)
         if r.size == 0:
-            return np.empty((0, len(bank)), dtype=float)
+            return np.empty(r_arr.shape + (len(bank),), dtype=float)
         out = np.empty((r.size, len(bank)), dtype=float)
         for i, sp in enumerate(bank):
             out[:, i] = sp(r)
-        return out
+        return out.reshape(r_arr.shape + (len(bank),))
 
     @lru_cache(maxsize=1)
     def _integral_basis_data(self):
@@ -456,13 +622,14 @@ class BSplinePotential(BasePotential):
     def basis_integrals(self, r: np.ndarray) -> np.ndarray:
         """Raw integrated force basis I_i(r) = ∫_{r_ref}^{r} B_i(ξ) dξ.
 
-        Shape (n_samples, n_params).
+        Shape ``r.shape + (n_params,)``.
         ``r_ref`` is the nonbonded cutoff-side raw reference.
         """
-        r = np.asarray(r, dtype=float).ravel()
+        r_arr = np.asarray(r, dtype=float)
+        r = r_arr.ravel()
         n_params = len(self._params)
         if r.size == 0:
-            return np.empty((0, n_params), dtype=float)
+            return np.empty(r_arr.shape + (n_params,), dtype=float)
         if hasattr(BSpline, "design_matrix"):
             try:
                 payload = self._integral_basis_data()
@@ -476,7 +643,7 @@ class BSplinePotential(BasePotential):
                     )
                     out = np.asarray(dm @ coeff_matrix, dtype=float)
                     out -= ref[None, :]
-                    return out
+                    return out.reshape(r_arr.shape + (n_params,))
             except Exception:
                 pass
         bank = self._basis_bank(-1)
@@ -484,7 +651,7 @@ class BSplinePotential(BasePotential):
         out = np.empty((r.size, len(bank)), dtype=float)
         for i, anti in enumerate(bank):
             out[:, i] = anti(r) - anti(r_ref)
-        return out
+        return out.reshape(r_arr.shape + (len(bank),))
 
     # ------------------------------------------------------------------
     # Dynamic derivative accessors (__getattr__)

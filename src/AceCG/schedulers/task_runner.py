@@ -321,6 +321,7 @@ def run_post(
         for h in resource_pool.hosts
     )
     placement = Placement(slices=slices, n_ranks=n_ranks)
+    post_spec.setdefault("expected_mpi_size", int(n_ranks))
 
     backend = resource_pool.backend
     py = python_exe or sys.executable
@@ -335,7 +336,13 @@ def run_post(
         "env_strip_prefixes": list(launch.env_strip_prefixes),
     }
     timing: Dict[str, Any] = {}
-    _run_post_via_launch(run_dir, post_spec, post_launch, timing)
+    _run_post_via_launch(
+        run_dir,
+        post_spec,
+        post_launch,
+        timing,
+        task_extra_env=getattr(resource_pool, "extra_env", None),
+    )
 
 
 def parse_loop_time(log_path: Path) -> Optional[float]:

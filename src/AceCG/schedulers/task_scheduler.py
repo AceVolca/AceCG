@@ -477,6 +477,10 @@ class TaskScheduler:
             py_exe = self.python_exe
             post_payload = [py_exe, "-m", "AceCG.compute.mpi_engine"]
             post_launch = backend.realize(post_placement, post_payload, run_dir)
+            if spec_dict.get("post_spec") is not None:
+                spec_dict["post_spec"].setdefault(
+                    "expected_mpi_size", int(post_placement.n_ranks),
+                )
             spec_dict["post_launch"] = {
                 "argv": list(post_launch.argv),
                 "env_add": dict(post_launch.env_add),

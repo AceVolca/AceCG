@@ -3,6 +3,7 @@
 from .base import BaseWorkflow
 from .cdfm import CDFMWorkflow
 from .cdrem import CDREMWorkflow
+from .dsm import DSMWorkflow
 from .fm import FMWorkflow
 from .rem import REMWorkflow
 from .sampling import SamplingWorkflow
@@ -12,6 +13,7 @@ __all__ = [
     "BaseWorkflow",
     "CDFMWorkflow",
     "CDREMWorkflow",
+    "DSMWorkflow",
     "FMWorkflow",
     "REMWorkflow",
     "SamplingWorkflow",

@@ -1,6 +1,6 @@
 # 00 AceCG Software Architecture
 
-*Updated: 2026-04-23. Merged and expanded from draw.md (2026-04-03).*
+*Updated: 2026-05-05. Merged and expanded from draw.md (2026-04-03).*
 
 > This is the top-level architecture document for AceCG and is the recommended first document to read before diving into the code.
 
@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-AceCG is a coarse-graining force-field training system. It takes all-atom MD trajectories as input and iteratively optimizes CG force-field parameters through several training methods, including REM, FM, CDREM, CDFM, and VP growth.
+AceCG is a coarse-graining force-field training system. It takes all-atom MD trajectories as input and optimizes CG force-field parameters through several training methods, including FM, noisy FM, mixed noisy FM, DSM, REM, noisy REM, CDREM, CDFM, and VP growth.
 
 Core design principle: **each layer owns only its own concerns, exposes stable APIs upward, and depends only on the layer directly below it.**
 
@@ -19,7 +19,7 @@ Core design principle: **each layer owns only its own concerns, exposes stable A
 ```text
 L6  Workflow
     workflows/base.py, sampling.py, rem.py, cdrem.py,
-    fm.py, cdfm.py, vp_growth.py
+    fm.py, dsm.py, cdfm.py, vp_growth.py
 
 L5  Scheduler / Task Runner
     schedulers/task_scheduler.py, task_runner.py,
@@ -151,6 +151,19 @@ energy_dict   = energy(geom, forcefield, return_grad=True, ...)
 force_dict    = force(geom, forcefield, return_grad=True, ...)
 ```
 
+`FrameGeometry` is the only geometry container for both ordinary frames and
+same-frame coordinate batches. `positions` may have shape
+`(..., n_atoms, 3)`, and geometry values preserve those leading dimensions
+with the interaction-term axis last. Interaction index arrays stay shared per
+key.
+
+There are no separate public `energy_batch()` or `force_batch()` kernels.
+Potential evaluators, `compute_frame_geometry()`, `energy()`, and `force()`
+all accept batched inputs through the ordinary APIs. `MPIComputeEngine.compute()`
+is the single local frame-compute entry point; it flattens leading sample
+dimensions, chunks them for memory when requested, manages pair-cache policy,
+and folds outputs back into reducer-ready sufficient statistics.
+
 This layer does not own scheduler policy, workflow orchestration, or trainer tallies across tasks.
 
 ### L4: Trainers / Solvers / Optimizers
@@ -220,10 +233,24 @@ Typical FM flow:
 ```text
 .acg config
   -> FMWorkflow builds FM forcefield
+  -> optional aa_ref.noise_* creates same-frame coordinate replicas
   -> task_runner.run_post(...) accumulates step_mode="fm" statistics
   -> either FMTrainerAnalytic.step(...) iterates
      or FMMatrixSolver.solve(...) performs a closed-form solve
   -> tables are exported for LAMMPS
+```
+
+Typical DSM flow:
+
+```text
+.acg config
+  -> DSMWorkflow reuses FM interaction specs and trainable forcefield setup
+  -> aa_ref.noise_* creates noisy coordinate replicas
+  -> MPIComputeEngine.add_noise(target="dsm") creates score targets
+  -> step_mode="dsm" accumulates FM-shaped sufficient statistics
+  -> DSMWorkflow scales those statistics by beta^2
+  -> FMTrainerAnalytic.step(...) performs the optimizer update
+  -> DSM writes dsm_step_XXXX/ff/workflow_checkpoint.pkl for resume
 ```
 
 ---
@@ -245,10 +272,13 @@ AA trajectory (.lammpstrj)
     +-- MPI broadcast: Universe, TopologyArrays, sel_indices
     +-- each rank receives a contiguous frame segment
     +-- iter_frames -> local frame sequence
+    +-- optional spec["noise"] -> same-frame coordinate batch
+    +-- engine.compute(...) folds batch axes into reducer payloads
     +-- for each step in spec["steps"]:
            |
            +-- step_mode="rem"       -> reducers.init_rem_state / consume_rem_frame
            +-- step_mode="fm"        -> reducers.init_fm_state / consume_fm_frame
+           +-- step_mode="dsm"       -> FM reducer contract with synthetic score targets
            +-- step_mode="cdrem"     -> same reducer path as rem
            +-- step_mode="cdfm_zbx"  -> reducers.init_cdfm_zbx_state / ...
            |                           rank 0 computes y_eff first
@@ -295,6 +325,7 @@ TopologyArrays + Forcefield + positions/box
     +-- FrameGeometry (compute_frame_geometry)
             +-- energy(geom, ff) -> {energy, energy_grad, ...}
             +-- force(geom, ff)  -> {force, force_grad, fm_stats}
+            +-- same APIs accept (..., n_atoms, 3) same-frame batches
 
 MPIComputeEngine
     +-- owns: MPI comm, _registry

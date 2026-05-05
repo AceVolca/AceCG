@@ -23,6 +23,7 @@ numba = [
 
 [project.scripts]
 acg-fm = "AceCG.workflows.fm:main"
+acg-dsm = "AceCG.workflows.dsm:main"
 acg-rem = "AceCG.workflows.rem:main"
 acg-cdfm = "AceCG.workflows.cdfm:main"
 acg-cdrem = "AceCG.workflows.cdrem:main"

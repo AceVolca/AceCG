@@ -1,6 +1,6 @@
 # 01 Potential Module Developer Reference
 
-*Updated: 2026-04-23.*
+*Updated: 2026-05-05.*
 
 Potentials are the lowest-level scalar interaction models in the modeling stack. Each potential evaluates one interaction coordinate and exposes parameter derivatives for `compute/`, trainers, and solvers. A potential does not know about MPI, `FrameGeometry`, atom ownership, or workflows.
 
@@ -86,12 +86,26 @@ A potential should not own:
 | `value(r)` | Scalar potential energy at local coordinate `r` |
 | `force(r)` | Scalar force, `F = -dU/dr` |
 
-`r` is a local scalar coordinate vector, not Cartesian coordinates:
+`r` is a local scalar coordinate array, not Cartesian coordinates:
 
 - pair potential: pair distance
 - bond potential: bond length
 - angle potential: angle coordinate
 - dihedral potential: dihedral coordinate
+
+The input can have any shape. Potential evaluators must preserve the input
+shape for scalar channels:
+
+```python
+r.shape              -> value(r).shape
+r.shape              -> force(r).shape
+r.shape + (n_params,) -> energy_grad(r).shape
+r.shape + (n_params,) -> force_grad(r).shape
+```
+
+In batched compute, `r` usually has shape `sample_shape + (n_terms,)`. The
+potential should treat every leading dimension as a same-frame batch dimension
+and the last axis as the interaction-term axis.
 
 ### Common Metadata
 
@@ -116,9 +130,14 @@ Subclasses should populate:
 | `param_names()` | Parameter labels |
 | `energy_grad(r)` | Stacked `dU/dtheta` channels |
 | `force_grad(r)` | Stacked `dF/dtheta` channels |
+| `energy_grad_sum(r)` | `dU/dtheta` summed over the last coordinate axis |
+| `energy_grad_sum_by_sample(r, active=...)` | Per-sample summed gradients for `sample_shape + (n_terms,)` inputs |
+| `gauge_free_energy_grad_sum(r)` | Summed gradients with parameter-dependent gauge shifts removed |
+| `gauge_free_energy_grad_sum_by_sample(r, active=...)` | Per-sample gauge-free summed gradients |
 | `basis_values(r)` | Per-parameter force-basis values |
 | `basis_derivatives(r)` | Force-basis derivatives with respect to `r` |
 | `is_param_linear()` | Linearity mask |
+| `is_gauge_free_energy_grad_cacheable()` | Per-parameter mask for REM AA-cacheable gauge-free channels |
 | `get_scaled_potential(z)` | Return a copy with selected parameters scaled |
 
 ---
@@ -140,14 +159,26 @@ The compute layer projects scalar quantities back to Cartesian atom forces throu
 - `energy`
 - `energy_grad`, first derivative with respect to parameters
 - `energy_hessian`, second derivative with respect to parameters
+- `energy_grad_outer`, outer product of the full accumulated gradient vector
+- `gauge_free_energy_grad` and `gauge_free_energy_grad_outer` for REM
 
 These come from `value(r)`, `_dparam_names`, and `_d2param_names`.
+
+For batched geometry, `compute.energy` asks potentials for per-sample reduced
+gradients through `energy_grad_sum_by_sample()` whenever possible. This avoids
+materializing dense `(..., n_terms, n_params)` arrays when a reducer only needs
+summed energy-gradient statistics.
 
 ### Force Derivative Channels
 
 `compute.force` and FM/CDFM build force Jacobians from `force_grad(r)` or `basis_values(r)`.
 
 For performance, new potentials should provide analytic derivatives through `_df_dparam_names` or override `basis_values(r)` directly. If no derivative is provided, `BasePotential.force_grad()` falls back to finite differences. That fallback is correct but much slower and should only be treated as a development fallback.
+
+`force_grad(r)` may return a sparse matrix for one-dimensional `r` when the
+projector can consume it efficiently. For batched `r`, return a dense array
+with shape `r.shape + (n_params,)`; the force kernel owns the sparse
+same-frame batch accumulation path.
 
 ---
 
@@ -177,6 +208,10 @@ These classes expose explicit analytic first and second derivatives.
 - energy is obtained by integrating basis functions
 - all parameters are linear optimization channels
 - dense and sparse basis access are available for FM/CDFM
+- pair splines use the gauge `U(r_max) = 0`
+- bonded splines use the gauge `min(U) = 0`
+- `gauge_free_energy_grad_sum*()` omits parameter-dependent bonded gauge
+  shifts so REM can cache/use gauge-free energy gradients
 
 ### Multi-Component Gaussian Family
 
@@ -256,8 +291,11 @@ When adding a new potential:
 3. Populate `_params`, `_param_names`, `_dparam_names`, and `_param_linear_mask`.
 4. Provide `_df_dparam_names` or override `basis_values(r)` for efficient FM support.
 5. Provide `_d2param_names` if REM/CDREM Hessian support matters.
-6. Provide `param_bounds()` when natural bounds exist.
-7. Register it in `POTENTIAL_REGISTRY` if it is part of the public style set.
+6. Preserve arbitrary leading batch dimensions and append parameter channels only at the end.
+7. Override `energy_grad_sum_by_sample()` when dense term-by-parameter materialization would be expensive.
+8. Override `gauge_free_energy_grad_sum*()` if the potential has a parameter-dependent additive gauge.
+9. Provide `param_bounds()` when natural bounds exist.
+10. Register it in `POTENTIAL_REGISTRY` if it is part of the public style set.
 
 Avoid:
 

@@ -85,6 +85,7 @@ class LennardJonesSoftPotential(BasePotential):
         -------
         A, invA, invA2, invA3, invA4, g, gA, gAA, r6_over_sig6
         """
+        r = np.asarray(r, dtype=float)
         epsilon, sigma, lam = self._params
         alpha_LJ = self.alpha_LJ
 
@@ -207,7 +208,7 @@ class LennardJonesSoftPotential(BasePotential):
 
         Since the potential is linear in epsilon, this is identically zero.
         """
-        return 0.0
+        return np.zeros_like(np.asarray(r, dtype=float), dtype=float)
 
     def depsilondsigma(self, r: float) -> float:
         """

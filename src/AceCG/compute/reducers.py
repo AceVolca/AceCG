@@ -18,7 +18,7 @@ AceCG's one-pass engine supports two distinct frame-weight modes:
    external weight vector and computes its own weighted average.
 
 Every reducer mode conforms to the same uniform operator bundle, exposed via
-``MODE_OPS`` and the six top-level dispatch helpers below:
+``MODE_OPS`` and the top-level dispatch helpers below:
 
 - ``init(step, ff, topo) -> state``
 - ``request(step) -> Dict[str, bool]``
@@ -37,7 +37,7 @@ quantities (``frame_weight``, ``reference_force``, and the frame payload).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Sequence, Tuple
 
 import numpy as np
 
@@ -52,6 +52,8 @@ _REQUEST_FLAGS: Tuple[str, ...] = (
     "need_energy_grad",
     "need_energy_hessian",
     "need_energy_grad_outer",
+    "need_gauge_free_energy_grad",
+    "need_gauge_free_energy_grad_outer",
     "need_force_value",
     "need_force_grad",
     "need_fm_stats",
@@ -116,7 +118,7 @@ def init_step_state(
     return state
 
 
-def consume_step_frame(
+def consume_step_payload(
     step: Dict[str, Any],
     state: Dict[str, Any],
     payload: Dict[str, Any],
@@ -124,7 +126,7 @@ def consume_step_frame(
     frame_weight: float,
     reference_force: np.ndarray | None,
 ) -> None:
-    """Accumulate one frame's compute payload into ``state`` for this step."""
+    """Accumulate one reducer-ready payload into ``state`` for this step."""
     _ops(step).consume(
         state,
         payload,
@@ -220,15 +222,24 @@ def request_fm(step: Dict[str, Any]) -> Dict[str, bool]:
     return {"need_fm_stats": True, "need_reference_force": True}
 
 
-def consume_fm_frame(
+def request_dsm(step: Dict[str, Any]) -> Dict[str, bool]:
+    del step
+    return {"need_fm_stats": True, "need_reference_force": False}
+
+
+def _require_fm_partial(payload: Dict[str, Any], key: str, label: str) -> Dict[str, Any]:
+    partial = payload.get(key)
+    if partial is None:
+        raise ValueError(f"FM {label} payload requires payload[{key!r}].")
+    return dict(partial)
+
+
+def _consume_fm_partial(
     state: Dict[str, Any],
-    payload: Dict[str, Any],
+    partial: Dict[str, Any],
     *,
-    frame_weight: float,
-    reference_force: np.ndarray | None,
+    frame_idx: int,
 ) -> None:
-    del frame_weight, reference_force  # FM carries its own weight inside fm_stats
-    partial = payload.get("fm_stats")
     if state["reduce_stack"]:
         state["JtJ_frames"].append(np.asarray(partial["JtJ"], dtype=np.float32))
         state["Jty_frames"].append(np.asarray(partial["Jty"], dtype=np.float32))
@@ -237,7 +248,7 @@ def consume_fm_frame(
         state["f_sumsq_frames"].append(float(partial["ftf"]))
         state["fty_frames"].append(float(partial["fTy"]))
         state["weight_frames"].append(float(partial["weight_sum"]))
-        state["frame_ids"].append(int(payload["frame_idx"]))
+        state["frame_ids"].append(int(frame_idx))
         state["n_atoms_obs"] = max(state["n_atoms_obs"], int(partial["n_atoms_obs"]))
         return
     state["JtJ_sum"] += np.asarray(partial["JtJ"], dtype=np.float32)
@@ -246,9 +257,21 @@ def consume_fm_frame(
     state["y_sumsq_sum"] += float(partial["yty"])
     state["f_sumsq_sum"] += float(partial["ftf"])
     state["fty_sum"] += float(partial["fTy"])
-    state["nframe"] += int(partial["n_frames"])
+    state["nframe"] += int(partial.get("n_frames", 1))
     state["weight_sum"] += float(partial["weight_sum"])
     state["n_atoms_obs"] = max(state["n_atoms_obs"], int(partial["n_atoms_obs"]))
+
+
+def consume_fm_frame(
+    state: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    frame_weight: float,
+    reference_force: np.ndarray | None,
+) -> None:
+    del frame_weight, reference_force  # FM carries its own weight inside fm_stats
+    partial = _require_fm_partial(payload, "fm_stats", "frame")
+    _consume_fm_partial(state, partial, frame_idx=int(payload["frame_idx"]))
 
 
 def local_partials_fm(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -370,10 +393,13 @@ def init_rem_state(
     n_params = forcefield_snapshot.n_params()
     need_hessian = bool(step.get("need_hessian", False))
     reduce_stack = bool(step.get("reduce_stack", False))
+    step_mode = str(step.get("step_mode", "")).strip().lower()
+    use_gauge_free_gradient = step_mode == "rem"
     state: Dict[str, Any] = {
         "n_params": int(n_params),
         "need_hessian": need_hessian,
         "reduce_stack": reduce_stack,
+        "gradient_convention": "gauge_free" if use_gauge_free_gradient else "physical",
     }
     if reduce_stack:
         state["energy_grad_frames"] = []
@@ -394,11 +420,16 @@ def init_rem_state(
 
 
 def request_rem(step: Dict[str, Any]) -> Dict[str, bool]:
+    """Return observable requests required by the REM reducer."""
     need_hessian = bool(step.get("need_hessian", False))
+    step_mode = str(step.get("step_mode", "")).strip().lower()
+    use_gauge_free_gradient = step_mode == "rem"
     return {
-        "need_energy_grad": True,
+        "need_energy_grad": not use_gauge_free_gradient,
         "need_energy_hessian": need_hessian,
-        "need_energy_grad_outer": need_hessian,
+        "need_energy_grad_outer": need_hessian and not use_gauge_free_gradient,
+        "need_gauge_free_energy_grad": use_gauge_free_gradient,
+        "need_gauge_free_energy_grad_outer": need_hessian and use_gauge_free_gradient,
     }
 
 
@@ -410,8 +441,19 @@ def consume_rem_frame(
     reference_force: np.ndarray | None,
 ) -> None:
     del reference_force  # unused
+    gradient_convention = str(state["gradient_convention"]).strip().lower()
+    if gradient_convention == "gauge_free":
+        grad_key = "gauge_free_energy_grad"
+        grad_outer_key = "gauge_free_energy_grad_outer"
+    elif gradient_convention == "physical":
+        grad_key = "energy_grad"
+        grad_outer_key = "energy_grad_outer"
+    else:
+        raise ValueError(
+            f"Unsupported REM gradient_convention {gradient_convention!r}."
+        )
     need_hessian = bool(state["need_hessian"])
-    grad = np.asarray(payload["energy_grad"], dtype=np.float32)
+    grad = np.asarray(payload[grad_key], dtype=np.float32)
     if state["reduce_stack"]:
         state["energy_grad_frames"].append(grad)
         state["weight_frames"].append(float(frame_weight))
@@ -421,7 +463,7 @@ def consume_rem_frame(
                 np.asarray(payload["energy_hessian"], dtype=np.float32)
             )
             state["grad_outer_frames"].append(
-                np.asarray(payload["energy_grad_outer"], dtype=np.float32)
+                np.asarray(payload[grad_outer_key], dtype=np.float32)
             )
         return
     wi = float(frame_weight)
@@ -431,7 +473,7 @@ def consume_rem_frame(
     if need_hessian:
         state["d2U_sum"] += wi * np.asarray(payload["energy_hessian"], dtype=np.float32)
         state["grad_outer_sum"] += wi * np.asarray(
-            payload["energy_grad_outer"], dtype=np.float32
+            payload[grad_outer_key], dtype=np.float32
         )
         state["energy_grad_frame"].append(grad)
 
@@ -439,6 +481,12 @@ def consume_rem_frame(
 def local_partials_rem(state: Dict[str, Any]) -> Dict[str, Any]:
     n_params = int(state["n_params"])
     need_hessian = bool(state["need_hessian"])
+    gradient_convention = str(state["gradient_convention"]).strip().lower()
+    if gradient_convention not in {"gauge_free", "physical"}:
+        raise ValueError(
+            f"Unsupported REM gradient_convention {gradient_convention!r}."
+        )
+    metadata = {"gradient_convention": gradient_convention}
     if state["reduce_stack"]:
         stack_1d = lambda arrs: (
             np.stack(arrs, axis=0).astype(np.float32, copy=False)
@@ -453,6 +501,7 @@ def local_partials_rem(state: Dict[str, Any]) -> Dict[str, Any]:
         out = {
             "reduce_stack": True,
             "need_hessian": need_hessian,
+            "metadata": metadata,
             "energy_grad_frames": stack_1d(state["energy_grad_frames"]),
             "weight_frames": np.asarray(state["weight_frames"], dtype=np.float32),
             "frame_ids": np.asarray(state["frame_ids"], dtype=np.int64),
@@ -463,6 +512,7 @@ def local_partials_rem(state: Dict[str, Any]) -> Dict[str, Any]:
         return out
     out = {
         "need_hessian": need_hessian,
+        "metadata": metadata,
         "energy_grad_sum": np.asarray(state["energy_grad_sum"], dtype=np.float32),
         "weight_sum": float(state["weight_sum"]),
         "n_frames": int(state["n_frames"]),
@@ -484,17 +534,32 @@ def reduce_plan_rem(step: Dict[str, Any]) -> Dict[str, Tuple[str, ...]]:
         stack_keys = ["energy_grad_frames", "weight_frames", "frame_ids"]
         if need_hessian:
             stack_keys.extend(["d2U_frames", "grad_outer_frames"])
-        return {"sum": (), "max": (), "stack": tuple(stack_keys)}
+        return {
+            "sum": (),
+            "max": (),
+            "stack": tuple(stack_keys),
+            "dict_update": ("metadata",),
+        }
     sum_keys = ["energy_grad_sum", "weight_sum", "n_frames"]
     stack_keys: Tuple[str, ...] = ()
     if need_hessian:
         sum_keys.extend(["d2U_sum", "grad_outer_sum"])
         stack_keys = ("energy_grad_frame",)
-    return {"sum": tuple(sum_keys), "max": (), "stack": stack_keys}
+    return {
+        "sum": tuple(sum_keys),
+        "max": (),
+        "stack": stack_keys,
+        "dict_update": ("metadata",),
+    }
 
 
 def finalize_rem_root(state: Dict[str, Any]) -> Dict[str, Any]:
     need_hessian = bool(state.get("need_hessian", False))
+    gradient_convention = str(state["metadata"]["gradient_convention"]).strip().lower()
+    if gradient_convention not in {"gauge_free", "physical"}:
+        raise ValueError(
+            f"Unsupported REM gradient_convention {gradient_convention!r}."
+        )
     if state.get("reduce_stack"):
         out = {
             "reduce_stack": True,
@@ -502,6 +567,7 @@ def finalize_rem_root(state: Dict[str, Any]) -> Dict[str, Any]:
             "weight_frame": np.asarray(state["weight_frames"], dtype=np.float64),
             "frame_ids": np.asarray(state["frame_ids"], dtype=np.int64),
             "n_frames": int(np.asarray(state["frame_ids"]).size),
+            "gradient_convention": gradient_convention,
         }
         if need_hessian:
             out["d2U_frame"] = np.asarray(state["d2U_frames"], dtype=np.float64)
@@ -516,6 +582,7 @@ def finalize_rem_root(state: Dict[str, Any]) -> Dict[str, Any]:
         "energy_grad_avg": energy_grad_avg,
         "n_frames": int(state["n_frames"]),
         "weight_sum": weight_sum,
+        "gradient_convention": gradient_convention,
     }
     if need_hessian:
         if weight_sum > 0.0:
@@ -750,6 +817,36 @@ def request_cdfm_zbx(step: Dict[str, Any]) -> Dict[str, bool]:
     }
 
 
+def accumulate_cdfm_zbx_stats(
+    stats: Dict[str, Any] | None,
+    *,
+    force_value: np.ndarray,
+    force_grad: np.ndarray,
+    energy_grad: np.ndarray,
+    weights: np.ndarray,
+) -> Dict[str, Any]:
+    """Accumulate CDFM ZBX sufficient statistics from one compute chunk."""
+    f = np.asarray(force_value, dtype=np.float64)
+    J = np.asarray(force_grad, dtype=np.float64)
+    gu = np.asarray(energy_grad, dtype=np.float64)
+    w = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if stats is None:
+        stats = {
+            "J_sum": np.zeros(J.shape[1:], dtype=np.float64),
+            "f_sum": np.zeros(f.shape[1:], dtype=np.float64),
+            "gu_sum": np.zeros(gu.shape[1:], dtype=np.float64),
+            "gu_f_sum": np.zeros((gu.shape[-1], f.shape[-1]), dtype=np.float64),
+            "weight_sum": 0.0,
+            "n_samples": 1,
+        }
+    stats["J_sum"] += np.einsum("b,brp->rp", w, J, optimize=True)
+    stats["f_sum"] += np.einsum("b,br->r", w, f, optimize=True)
+    stats["gu_sum"] += np.einsum("b,bp->p", w, gu, optimize=True)
+    stats["gu_f_sum"] += np.einsum("b,bp,br->pr", w, gu, f, optimize=True)
+    stats["weight_sum"] = float(stats["weight_sum"]) + float(np.sum(w))
+    return stats
+
+
 def consume_cdfm_zbx_frame(
     state: Dict[str, Any],
     payload: Dict[str, Any],
@@ -760,6 +857,21 @@ def consume_cdfm_zbx_frame(
     del reference_force  # unused
     y_eff_arr = state["y_eff"]
     real_site_indices = state["real_site_indices"]
+    stats = payload.get("cdfm_stats")
+    if stats is not None:
+        J_sum = np.asarray(stats["J_sum"], dtype=np.float64)
+        f_sum = np.asarray(stats["f_sum"], dtype=np.float64).ravel()
+        if f_sum.size != y_eff_arr.size and real_site_indices is not None:
+            f_sum = slice_observed_rows(f_sum, real_site_indices)
+            J_sum = slice_observed_rows(J_sum, real_site_indices)
+        state["J_sum"] += J_sum
+        state["f_sum"] += f_sum
+        state["gu_sum"] += np.asarray(stats["gu_sum"], dtype=np.float64).ravel()
+        state["gu_f_sum"] += np.asarray(stats["gu_f_sum"], dtype=np.float64)
+        state["weight_sum"] += float(stats["weight_sum"])
+        state["n_samples"] += int(stats.get("n_samples", 1))
+        state["obs_rows"] = max(int(state["obs_rows"]), int(f_sum.size))
+        return
     J_i = np.asarray(payload["force_grad"], dtype=np.float64)
     f_i = np.asarray(payload["force"], dtype=np.float64).ravel()
     if f_i.size != y_eff_arr.size and real_site_indices is not None:
@@ -859,6 +971,14 @@ MODE_OPS: Dict[str, ReducerOps] = {
         local_partials=local_partials_rem,
         reduce_plan=reduce_plan_rem,
         finalize=finalize_rem_root,
+    ),
+    "dsm": ReducerOps(
+        init=init_fm_state,
+        request=request_dsm,
+        consume=consume_fm_frame,
+        local_partials=local_partials_fm,
+        reduce_plan=reduce_plan_fm,
+        finalize=finalize_fm_root,
     ),
     "cdfm_zbx": ReducerOps(
         init=init_cdfm_zbx_state,
