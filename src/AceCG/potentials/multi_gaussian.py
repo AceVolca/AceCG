@@ -161,7 +161,8 @@ class MultiGaussianPotential(BasePotential):
 
     def energy_grad(self, r: np.ndarray) -> np.ndarray:
         """Return ``dU/dtheta`` for all Gaussian components in one matrix pass."""
-        r_flat = np.asarray(r, dtype=float).reshape(-1)
+        r_arr = np.asarray(r, dtype=float)
+        r_flat = r_arr.reshape(-1)
         x, phi = self._xr_phi(r_flat)
         s = self.sigma
         pref = phi / SQRT2PI
@@ -177,11 +178,12 @@ class MultiGaussianPotential(BasePotential):
         )
         if np.isfinite(self.cutoff):
             grad[r_flat > self.cutoff, :] = 0.0
-        return grad
+        return grad.reshape(r_arr.shape + (3 * self.n_gauss,))
 
     def force_grad(self, r: np.ndarray) -> np.ndarray:
         """Return ``dF/dtheta`` for all Gaussian components in one matrix pass."""
-        r_flat = np.asarray(r, dtype=float).reshape(-1)
+        r_arr = np.asarray(r, dtype=float)
+        r_flat = r_arr.reshape(-1)
         x, phi = self._xr_phi(r_flat)
         s = self.sigma
         pref = phi / SQRT2PI
@@ -203,7 +205,7 @@ class MultiGaussianPotential(BasePotential):
         )
         if np.isfinite(self.cutoff):
             grad[r_flat > self.cutoff, :] = 0.0
-        return grad
+        return grad.reshape(r_arr.shape + (3 * self.n_gauss,))
 
     # -------- zeros for cross-terms --------
     def zero(self, r: np.ndarray) -> np.ndarray:

@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import pickle
+import socket
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -34,8 +35,9 @@ from .force import force
 from .frame_geometry import FrameGeometry, compute_frame_geometry
 from .reducers import (
     _REQUEST_FLAGS,
+    accumulate_cdfm_zbx_stats,
     canonical_step_mode,
-    consume_step_frame,
+    consume_step_payload,
     finalize_step_root,
     init_step_state,
     local_step_partials,
@@ -151,12 +153,65 @@ def _selected_frame_ids_from_spec(
     """Return the global frame ids selected by the current post-processing spec."""
     discrete_ids = shared_spec.get("frame_ids")
     if discrete_ids is not None:
-        return [int(fid) for fid in discrete_ids]
+        selected = [int(fid) for fid in discrete_ids]
+        return _subsample_frame_ids_from_noise_spec(selected, shared_spec)
 
     frame_start = 0 if shared_spec.get("frame_start") is None else int(shared_spec["frame_start"])
     frame_end = int(total_frames) if shared_spec.get("frame_end") is None else int(shared_spec["frame_end"])
     every = int(shared_spec.get("every", 1))
-    return list(range(frame_start, frame_end, every))
+    n_subsample = _noise_subsample_per_epoch_from_spec(shared_spec)
+    selected_range = range(frame_start, frame_end, every)
+    n_selected = len(selected_range)
+    if n_subsample <= 0 or n_subsample >= n_selected:
+        return list(selected_range)
+
+    rng = np.random.default_rng(_noise_subsample_seed_from_spec(shared_spec))
+    picked_offsets = rng.choice(n_selected, size=n_subsample, replace=False)
+    picked_offsets.sort()
+    return [selected_range[int(offset)] for offset in picked_offsets]
+
+
+def _noise_subsample_per_epoch_from_spec(shared_spec: Mapping[str, Any]) -> int:
+    """Return the requested AA-noise frame subsample size for one epoch."""
+    noise_spec = shared_spec.get("noise")
+    if noise_spec is None:
+        return 0
+    if not isinstance(noise_spec, Mapping):
+        return 0
+    if not bool(noise_spec.get("enabled", True)):
+        return 0
+    raw = noise_spec.get("subsample_per_epoch", 0)
+    if raw is None:
+        return 0
+    n_subsample = int(raw)
+    if n_subsample < 0:
+        raise ValueError("spec['noise']['subsample_per_epoch'] must be non-negative.")
+    return n_subsample
+
+
+def _subsample_frame_ids_from_noise_spec(
+    frame_ids: Sequence[int],
+    shared_spec: Mapping[str, Any],
+) -> List[int]:
+    """Apply sorted, no-replacement AA-noise frame subsampling."""
+    selected = [int(fid) for fid in frame_ids]
+    n_subsample = _noise_subsample_per_epoch_from_spec(shared_spec)
+    if n_subsample <= 0 or n_subsample >= len(selected):
+        return selected
+
+    rng = np.random.default_rng(_noise_subsample_seed_from_spec(shared_spec))
+    picked_offsets = rng.choice(len(selected), size=n_subsample, replace=False)
+    picked = [selected[int(offset)] for offset in picked_offsets]
+    picked.sort()
+    return picked
+
+
+def _noise_subsample_seed_from_spec(shared_spec: Mapping[str, Any]) -> int:
+    """Return the seed used only for AA-noise frame subsampling."""
+    noise_spec = shared_spec.get("noise")
+    if not isinstance(noise_spec, Mapping):
+        return 0
+    return int(noise_spec.get("subsample_seed", noise_spec.get("seed", 0)))
 
 
 def _load_frame_weight_file(
@@ -203,8 +258,8 @@ def _frame_weight_array_from_spec(
 ) -> Optional[np.ndarray]:
     """Return a full-trajectory frame-weight array for the current spec.
 
-    Inline ``spec['frame_weight']`` keeps the selected-frame convention: it may
-    have length equal to the selected frame set. File-backed weights are
+    Inline ``spec['frame_weight']`` keeps the current selected-frame convention:
+    it may have length equal to the selected frame set. File-backed weights are
     full-trajectory arrays, matching the historical ``frame_weight_file`` path.
     """
     raw = loaded_frame_weight if loaded_frame_weight is not None else shared_spec.get("frame_weight")
@@ -319,6 +374,237 @@ def _add_timing(bucket: Dict[str, Any], key: str, dt: float) -> None:
     bucket[key] = float(bucket.get(key, 0.0)) + float(dt)
 
 
+def _int_spec_value(spec: Mapping[str, Any], key: str, default: int = 0) -> int:
+    try:
+        return int(spec.get(key, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _write_rank_heartbeat(
+    work_dir: Path,
+    *,
+    rank: int,
+    size: int,
+    processed: int,
+    local_total: int,
+    global_total: int,
+    frame_id: int | None,
+    start_time: float,
+) -> None:
+    elapsed = max(time.monotonic() - start_time, 0.0)
+    payload = {
+        "rank": int(rank),
+        "size": int(size),
+        "host": socket.gethostname().split(".")[0],
+        "pid": int(os.getpid()),
+        "processed": int(processed),
+        "local_total": int(local_total),
+        "global_total": int(global_total),
+        "last_frame_id": None if frame_id is None else int(frame_id),
+        "elapsed_sec": float(elapsed),
+        "frames_per_sec": 0.0 if elapsed == 0.0 else float(processed) / elapsed,
+        "updated_at": time.time(),
+    }
+    path = work_dir / f"progress_rank_{rank:04d}.json"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
+def _normalize_box_batch(box: np.ndarray, n_samples: int) -> np.ndarray:
+    bx = np.asarray(box, dtype=np.float64)
+    if bx.ndim == 1:
+        return np.broadcast_to(bx, (int(n_samples), bx.shape[0])).copy()
+    if bx.ndim == 2 and bx.shape[0] == int(n_samples):
+        return bx.copy()
+    raise ValueError(
+        "box must have shape (6,) or (n_samples, 6), "
+        f"got {bx.shape} for n_samples={n_samples}"
+    )
+
+
+def _normalize_compute_box(box: np.ndarray, sample_shape: Tuple[int, ...]) -> np.ndarray:
+    bx = np.asarray(box, dtype=np.float64)
+    if bx.shape[-1:] != (6,):
+        raise ValueError(f"box last dimension must be 6, got {bx.shape}")
+    if not sample_shape:
+        if bx.ndim != 1:
+            raise ValueError(f"single-frame box must have shape (6,), got {bx.shape}")
+        return bx
+    if bx.ndim == 1:
+        return np.broadcast_to(bx, sample_shape + (bx.shape[0],)).copy()
+    if bx.shape == sample_shape + (bx.shape[-1],):
+        return bx.copy()
+    n_samples = int(np.prod(sample_shape, dtype=np.int64))
+    if bx.ndim == 2 and bx.shape[0] == n_samples:
+        return bx.reshape(sample_shape + (bx.shape[1],)).copy()
+    raise ValueError(
+        "batched box must have shape (6,), sample_shape + (6,), or "
+        f"(n_samples, 6); got {bx.shape} for sample_shape={sample_shape}."
+    )
+
+
+def _normalize_sample_weights(
+    frame_weights: Optional[np.ndarray],
+    n_samples: int,
+) -> np.ndarray:
+    if frame_weights is None:
+        return np.full(int(n_samples), 1.0 / float(n_samples), dtype=np.float64)
+    weights = np.asarray(frame_weights, dtype=np.float64).reshape(-1)
+    if weights.shape != (int(n_samples),):
+        raise ValueError(
+            "frame_weights must flatten to the compute batch sample count "
+            f"{int(n_samples)}; got {weights.shape}."
+        )
+    weight_sum = float(np.sum(weights))
+    if np.any(weights < 0.0) or weight_sum <= 0.0:
+        raise ValueError("frame_weights must be nonnegative with positive sum.")
+    return weights / weight_sum
+
+
+def _flatten_reference_for_compute(
+    reference_forces: Optional[np.ndarray],
+    *,
+    sample_shape: Tuple[int, ...],
+    n_samples: int,
+    n_atoms: int,
+) -> Tuple[Optional[np.ndarray], bool]:
+    if reference_forces is None:
+        return None, False
+    ref = np.asarray(reference_forces)
+    if not sample_shape:
+        return ref, False
+    if ref.ndim == 1 or ref.shape == (int(n_atoms), 3):
+        return ref, False
+    leading_ndim = len(sample_shape)
+    if ref.ndim > leading_ndim and ref.shape[:leading_ndim] == sample_shape:
+        return ref.reshape((int(n_samples),) + ref.shape[leading_ndim:]), True
+    if ref.ndim >= 3 and ref.shape[-2:] == (int(n_atoms), 3):
+        leading = int(np.prod(ref.shape[:-2], dtype=np.int64))
+        if leading == int(n_samples):
+            return ref.reshape((int(n_samples), int(n_atoms), 3)), True
+    if ref.ndim >= 2 and ref.shape[0] == int(n_samples):
+        return ref.reshape((int(n_samples),) + ref.shape[1:]), True
+    return ref, False
+
+
+def _batch_atom_values_like_reference(
+    values: np.ndarray,
+    reference_batch: np.ndarray,
+    topology_arrays: TopologyArrays,
+    *,
+    n_atoms: int,
+) -> np.ndarray:
+    """Return full-atom batch values reshaped/sliced like a reference batch."""
+    arr = np.asarray(values)
+    ref = np.asarray(reference_batch)
+    if arr.ndim != 3 or arr.shape[1:] != (int(n_atoms), 3):
+        raise ValueError(
+            "values must have shape (n_samples, n_atoms, 3), "
+            f"got {arr.shape}."
+        )
+    n_samples = int(arr.shape[0])
+    if ref.shape == arr.shape:
+        return arr.astype(ref.dtype, copy=False)
+
+    flat = arr.reshape(n_samples, int(n_atoms) * 3)
+    if ref.shape == flat.shape:
+        return flat.astype(ref.dtype, copy=False)
+
+    real_site_indices = getattr(topology_arrays, "real_site_indices", None)
+    if real_site_indices is not None:
+        atoms = np.asarray(real_site_indices, dtype=np.int32).reshape(-1)
+        observed = arr[:, atoms, :]
+        if ref.shape == observed.shape:
+            return observed.astype(ref.dtype, copy=False)
+        observed_flat = slice_observed_rows(flat, atoms)
+        if ref.shape == observed_flat.shape:
+            return observed_flat.astype(ref.dtype, copy=False)
+
+    raise ValueError(
+        "reference force shape is not compatible with full or observed noisy "
+        f"force rows: reference={ref.shape}, full={arr.shape}."
+    )
+
+
+def _weighted_accumulate(
+    out: Dict[str, Any],
+    key: str,
+    values: np.ndarray,
+    weights: np.ndarray,
+) -> None:
+    arr = np.asarray(values)
+    w = np.asarray(weights, dtype=np.float64).reshape(-1)
+    if arr.ndim == 0:
+        contribution = float(np.sum(w)) * arr
+    elif arr.shape[0] == w.size:
+        contribution = np.tensordot(w, arr, axes=(0, 0))
+    elif w.size == 1:
+        contribution = float(w[0]) * arr
+    else:
+        raise ValueError(
+            f"{key} output shape {arr.shape} is not compatible with weights shape {w.shape}."
+        )
+    if key in out:
+        out[key] = np.asarray(out[key]) + contribution
+    else:
+        out[key] = contribution
+
+
+def _merge_fm_stats(out: Dict[str, Any], partial: Dict[str, Any]) -> None:
+    if "fm_stats" not in out:
+        out["fm_stats"] = {
+            key: np.array(value, copy=True) if isinstance(value, np.ndarray) else value
+            for key, value in partial.items()
+        }
+        out["fm_stats"]["n_frames"] = 1
+        return
+    total = out["fm_stats"]
+    for key in ("JtJ", "Jtf", "Jty"):
+        total[key] = np.asarray(total[key]) + np.asarray(partial[key])
+    for key in ("ftf", "fTy", "yty", "weight_sum"):
+        total[key] = float(total[key]) + float(partial[key])
+    total["n_force_rows"] = max(int(total["n_force_rows"]), int(partial["n_force_rows"]))
+    total["n_atoms_obs"] = max(int(total["n_atoms_obs"]), int(partial["n_atoms_obs"]))
+    total["n_frames"] = 1
+
+
+def _noise_selection_indices(
+    selection: Any,
+    topology_arrays: TopologyArrays,
+    n_atoms: int,
+) -> np.ndarray:
+    if selection is None:
+        selection = "all"
+    if isinstance(selection, str):
+        key = selection.strip().lower()
+        if key == "all":
+            return np.arange(n_atoms, dtype=np.int32)
+        if key == "real":
+            real_site_indices = getattr(topology_arrays, "real_site_indices", None)
+            if real_site_indices is None:
+                raise ValueError("noise selection 'real' requires topology real_site_indices.")
+            return np.asarray(real_site_indices, dtype=np.int32).reshape(-1)
+        if key == "none":
+            return np.empty(0, dtype=np.int32)
+        parts = [part.strip() for part in selection.split(",") if part.strip()]
+        if parts:
+            return np.asarray([int(part) for part in parts], dtype=np.int32)
+        raise ValueError(f"Unsupported noise selection {selection!r}.")
+    indices = np.asarray(selection, dtype=np.int32).reshape(-1)
+    if np.any(indices < 0) or np.any(indices >= int(n_atoms)):
+        raise ValueError("noise selection indices are outside the atom range.")
+    return indices
+
+
+def _wrap_positions_in_box(positions: np.ndarray, box: np.ndarray) -> np.ndarray:
+    lengths = np.asarray(box, dtype=np.float64)[..., :3]
+    if np.any(lengths <= 0.0):
+        return positions
+    return np.mod(positions, lengths[:, None, :])
+
+
 def _write_timing_report(
     work_dir: Path,
     gathered: List[Dict[str, Any]],
@@ -356,19 +642,7 @@ def _has_enabled_style(
     interaction_mask: Optional[Dict[InteractionKey, bool]],
     style: str,
 ) -> bool:
-    """Return ``True`` if at least one enabled key of ``style`` exists.
-
-    Parameters
-    ----------
-    keys
-        All force-field keys available in the current snapshot.
-    interaction_mask
-        Optional per-key enable mask. When present, only keys with truthy mask
-        values are considered active.
-    style
-        Interaction style name such as ``"pair"``, ``"bond"``, ``"angle"``,
-        or ``"dihedral"``.
-    """
+    """Return ``True`` if at least one enabled key of ``style`` exists."""
     for key in keys:
         if getattr(key, "style", None) != style:
             continue
@@ -468,6 +742,7 @@ class MPIComputeEngine:
         topology_arrays: TopologyArrays,
         forcefield_snapshot: Forcefield,
         frame_weight: float = 1.0,
+        frame_weights: Optional[np.ndarray] = None,
         interaction_mask: Optional[np.ndarray] = None,
         pair_type_list: Optional[List[Any]] = None,
         pair_cutoff: Optional[float] = None,
@@ -476,9 +751,15 @@ class MPIComputeEngine:
         timing: Optional[Dict[str, Any]] = None,
         return_observables: bool = False,
         frame_idx: Optional[int] = None,
+        pair_cache_override: Optional[Dict[InteractionKey, Tuple[np.ndarray, np.ndarray]]] = None,
+        batch_size: Optional[int] = None,
+        neighbor_mode: str = "shared",
+        neighbor_skin: float = 0.0,
+        neighbor_reference_positions: Optional[np.ndarray] = None,
+        neighbor_reference_box: Optional[np.ndarray] = None,
         **kwargs,
     ) -> Dict[str, Any]:
-        """Compute registered observables for one frame.
+        """Compute registered observables for one frame or same-frame batch.
 
         Parameters
         ----------
@@ -487,7 +768,12 @@ class MPIComputeEngine:
             post-processing steps.
         frame
             Frame tuple in the format ``(frame_id, positions, box,
-            reference_forces)``.
+            reference_forces)``. ``positions`` may have shape ``(n_atoms, 3)``
+            or ``(..., n_atoms, 3)``.
+        frame_weights
+            Optional sample weights for batched coordinates. They are normalized
+            within this compute call. The scalar ``frame_weight`` remains the
+            outer per-base-frame weight used by reducers.
         return_observables
             If ``True``, append a light-weight ``FrameCache`` object to the
             returned payload under the legacy key
@@ -496,6 +782,15 @@ class MPIComputeEngine:
             Optional explicit frame index to use when constructing
             ``FrameCache``. If omitted, the first entry of ``frame`` is
             used, which matches the normal iter_frames contract.
+        neighbor_mode
+            Pair-cache policy for batched same-frame coordinates. ``"shared"``
+            builds one cache from the first sample, ``"skin"`` builds one
+            skin-expanded cache from the supplied reference frame when present,
+            and ``"chunk"`` rebuilds once per ``batch_size`` chunk.
+        neighbor_skin
+            Nonnegative extra distance added to ``pair_cutoff`` during pair
+            search. Force/energy kernels still apply each potential's true
+            cutoff, so skin-region pairs are candidates only.
 
         Notes
         -----
@@ -505,8 +800,60 @@ class MPIComputeEngine:
         results: Dict[str, Any] = {}
 
         frame_id, positions, box, reference_forces = frame
+        # Normalize both single frames and same-frame batches to one flat sample
+        # axis. Single-frame chunks are later passed back as the original 2D
+        # shape to preserve the public compute() contract.
+        positions_arr = np.asarray(positions, dtype=np.float64)
+        if positions_arr.ndim == 2 and positions_arr.shape[-1] == 3:
+            sample_shape: Tuple[int, ...] = ()
+            n_samples = 1
+            n_atoms = int(positions_arr.shape[0])
+            flat_positions = positions_arr.reshape(1, n_atoms, 3)
+        elif positions_arr.ndim >= 3 and positions_arr.shape[-1] == 3:
+            sample_shape = tuple(int(v) for v in positions_arr.shape[:-2])
+            n_samples = int(np.prod(sample_shape, dtype=np.int64))
+            if n_samples <= 0:
+                raise ValueError("batched compute positions must contain at least one sample.")
+            n_atoms = int(positions_arr.shape[-2])
+            flat_positions = positions_arr.reshape(n_samples, n_atoms, 3)
+        else:
+            raise ValueError(
+                "frame positions must have shape (n_atoms, 3) or "
+                f"(..., n_atoms, 3), got {positions_arr.shape}."
+            )
+        is_batch = bool(sample_shape)
+        box_arr = _normalize_compute_box(box, sample_shape)
+        flat_boxes = box_arr.reshape(n_samples, -1) if is_batch else box_arr.reshape(1, -1)
+        reference_flat, reference_is_batched = _flatten_reference_for_compute(
+            reference_forces,
+            sample_shape=sample_shape,
+            n_samples=n_samples,
+            n_atoms=n_atoms,
+        )
+        if batch_size is not None:
+            batch_size = int(batch_size)
+            if batch_size <= 0:
+                raise ValueError("batch_size must be positive when set.")
+        neighbor_mode = str(neighbor_mode or "shared").strip().lower()
+        neighbor_mode_aliases = {
+            "per_chunk": "chunk",
+            "per-batch": "chunk",
+            "per_batch": "chunk",
+            "per_sample": "chunk",
+            "per-sample": "chunk",
+        }
+        neighbor_mode = neighbor_mode_aliases.get(neighbor_mode, neighbor_mode)
+        if neighbor_mode not in {"shared", "skin", "chunk"}:
+            raise ValueError(
+                "neighbor_mode must be one of 'shared', 'skin', or 'chunk'."
+            )
+        neighbor_skin = float(neighbor_skin or 0.0)
+        if neighbor_skin < 0.0:
+            raise ValueError("neighbor_skin must be non-negative.")
+
         if frame_idx is None:
-            frame_idx = int(frame_id)
+            frame_ids_arr = np.asarray(frame_id, dtype=np.int64).reshape(-1)
+            frame_idx = int(frame_ids_arr[0]) if frame_ids_arr.size else int(frame_id)
         results["frame_idx"] = int(frame_idx)
 
         active_interaction_mask = (
@@ -521,37 +868,211 @@ class MPIComputeEngine:
         build_angles = _has_enabled_style(ff_keys, active_interaction_mask, "angle")
         build_dihedrals = _has_enabled_style(ff_keys, active_interaction_mask, "dihedral")
 
-        pair_cache = None
-        if build_pairs:
-            t0 = time.monotonic()
-            pair_cache = compute_pairs_by_type(
-                positions=positions,
-                box=box,
-                pair_type_list=pair_type_list,
-                cutoff=float(pair_cutoff),
-                topology_arrays=topology_arrays,
-                sel_indices=sel_indices,
-                exclude_option=exclude_option,
-            )
-            if timing is not None:
-                _add_timing(timing, "pair_search", time.monotonic() - t0)
-
-        t0 = time.monotonic()
-        geom = compute_frame_geometry(
-            positions,
-            box,
-            topology_arrays,
-            interaction_mask=active_interaction_mask,
-            pair_cache=pair_cache,
+        pair_cache = pair_cache_override if build_pairs else None
+        pair_search_skin = neighbor_skin if neighbor_mode in {"skin", "chunk"} else 0.0
+        pair_search_cutoff = (
+            float(pair_cutoff) + float(pair_search_skin)
+            if pair_cutoff is not None
+            else None
         )
-        if timing is not None:
-            _add_timing(timing, "geometry", time.monotonic() - t0)
 
         need_frame_cache = bool(request.get("need_frame_cache", False))
-        if return_observables or need_frame_cache:
+        # Current cache semantics are per real trajectory frame, not per noisy
+        # same-frame sample. Noisy FM/REM therefore keep cache requests off.
+        if is_batch and (return_observables or need_frame_cache):
+            raise ValueError("batched compute does not support frame-cache requests.")
+
+        weights = _normalize_sample_weights(frame_weights, n_samples)
+        chunk_size = n_samples if batch_size is None else min(int(batch_size), n_samples)
+        cdfm_stats: Optional[Dict[str, Any]] = None
+        cache_geom: Optional[FrameGeometry] = None
+
+        # Single frames and batches share this loop. batch_size limits per-chunk
+        # memory; neighbor_mode decides whether this chunk rebuilds pair_cache.
+        for start in range(0, n_samples, chunk_size):
+
+            stop = min(start + chunk_size, n_samples)
+            chunk_weights = weights[start:stop]
+            if float(np.sum(chunk_weights)) <= 0.0:
+                continue
+            chunk_abs_weights = chunk_weights * float(frame_weight)
+            chunk_reference = (
+                reference_flat[start:stop]
+                if reference_is_batched and reference_flat is not None
+                else reference_flat
+            )
+            chunk_positions = flat_positions[start:stop] if is_batch else flat_positions[0]
+            chunk_boxes = flat_boxes[start:stop] if is_batch else flat_boxes[0]
+            chunk_pair_cache = pair_cache
+
+            # Step 1: Build pair list if needed.
+            rebuild_neighbor = (
+                build_pairs
+                and pair_cache_override is None
+                and (neighbor_mode == "chunk" or pair_cache is None)
+            )
+            if rebuild_neighbor:
+                if neighbor_mode == "skin" and neighbor_reference_positions is not None:
+                    ref_positions_arr = np.asarray(
+                        neighbor_reference_positions,
+                        dtype=np.float64,
+                    )
+                    if ref_positions_arr.ndim == 2 and ref_positions_arr.shape == (n_atoms, 3):
+                        ref_positions = ref_positions_arr
+                    elif (
+                        ref_positions_arr.ndim >= 3
+                        and ref_positions_arr.shape[-2:] == (n_atoms, 3)
+                    ):
+                        ref_positions = ref_positions_arr.reshape(-1, n_atoms, 3)[0]
+                    else:
+                        raise ValueError(
+                            "neighbor_reference_positions must have shape "
+                            f"(n_atoms, 3) or (..., n_atoms, 3), got "
+                            f"{ref_positions_arr.shape}."
+                        )
+                elif neighbor_mode == "chunk":
+                    ref_positions = flat_positions[start]
+                else:
+                    ref_positions = flat_positions[0]
+
+                if neighbor_mode == "skin" and neighbor_reference_box is not None:
+                    ref_box_arr = np.asarray(neighbor_reference_box, dtype=np.float64)
+                    if ref_box_arr.shape[-1:] != (6,):
+                        raise ValueError(
+                            "neighbor_reference_box last dimension must be 6, "
+                            f"got {ref_box_arr.shape}."
+                        )
+                    ref_box = (
+                        ref_box_arr
+                        if ref_box_arr.ndim == 1
+                        else ref_box_arr.reshape(-1, ref_box_arr.shape[-1])[0]
+                    )
+                elif neighbor_mode == "chunk":
+                    ref_box = flat_boxes[start]
+                else:
+                    ref_box = flat_boxes[0]
+
+                t_pair = time.monotonic()
+                # Actually calls the neighbor list builder.
+                chunk_pair_cache = compute_pairs_by_type(
+                    positions=ref_positions,
+                    box=ref_box,
+                    pair_type_list=pair_type_list,
+                    cutoff=float(pair_search_cutoff),
+                    topology_arrays=topology_arrays,
+                    sel_indices=sel_indices,
+                    exclude_option=exclude_option,
+                )
+                if timing is not None:
+                    _add_timing(timing, "pair_search", time.monotonic() - t_pair)
+                if neighbor_mode != "chunk":
+                    pair_cache = chunk_pair_cache
+            # End step 1: build neighbor list.
+
+            # Step 2: compute frame geometry. This has been batch-optimized.
+            t0 = time.monotonic()
+            geom = compute_frame_geometry(
+                chunk_positions,
+                chunk_boxes,
+                topology_arrays,
+                interaction_mask=active_interaction_mask,
+                pair_cache=chunk_pair_cache,
+            )
+            if timing is not None:
+                _add_timing(timing, "geometry", time.monotonic() - t0)
+            if start == 0 and not is_batch and (return_observables or need_frame_cache):
+                cache_geom = geom
+
+            # Step 3: Compute energy-related observables if requested.
+            energy_result: Dict[str, Any] = {}
+            if (
+                bool(request.get("need_energy_value", False))
+                or bool(request.get("need_energy_grad", False))
+                or bool(request.get("need_energy_hessian", False))
+                or bool(request.get("need_energy_grad_outer", False))
+                or bool(request.get("need_gauge_free_energy_grad", False))
+                or bool(request.get("need_gauge_free_energy_grad_outer", False))
+            ):
+                t0 = time.monotonic()
+                energy_result = energy(
+                    geom,
+                    forcefield_snapshot,
+                    return_value=bool(request.get("need_energy_value", False)),
+                    return_grad=bool(request.get("need_energy_grad", False)),
+                    return_hessian=bool(request.get("need_energy_hessian", False)),
+                    return_grad_outer=bool(request.get("need_energy_grad_outer", False)),
+                    return_gauge_free_energy_grad=bool(
+                        request.get("need_gauge_free_energy_grad", False)
+                    ),
+                    return_gauge_free_energy_grad_outer=bool(
+                        request.get("need_gauge_free_energy_grad_outer", False)
+                    ),
+                )
+                for key, value in energy_result.items():
+                    # Reducers consume single-frame-shaped payloads, so batch
+                    # observables are folded to weighted averages here.
+                    _weighted_accumulate(results, key, value, chunk_weights)
+                if timing is not None:
+                    _add_timing(timing, "energy_kernel", time.monotonic() - t0)
+
+            # Step 4: Compute force-related observables if requested.
+            force_result: Dict[str, Any] = {}
+            if (
+                bool(request.get("need_force_value", False))
+                or bool(request.get("need_force_grad", False))
+                or bool(request.get("need_fm_stats", False))
+            ):
+                t0 = time.monotonic()
+                force_result = force(
+                    geom,
+                    forcefield_snapshot,
+                    return_value=bool(request.get("need_force_value", False)),
+                    return_grad=bool(request.get("need_force_grad", False)),
+                    reference_force=chunk_reference,
+                    frame_weights=chunk_abs_weights
+                    if bool(request.get("need_fm_stats", False))
+                    else None,
+                    return_fm_stats=bool(request.get("need_fm_stats", False)),
+                    timing=timing,
+                    )
+                for key in ("force", "force_grad", "force_hessian"):
+                    if key in force_result:
+                        # Force values/Jacobians follow the same reducer-facing
+                        # average convention as energy observables.
+                        _weighted_accumulate(results, key, force_result[key], chunk_weights)
+                if "fm_stats_sum" in force_result:
+                    _merge_fm_stats(results, force_result["fm_stats_sum"])
+                elif "fm_stats" in force_result:
+                    _merge_fm_stats(results, force_result["fm_stats"])
+                if timing is not None:
+                    _add_timing(timing, "force_kernel", time.monotonic() - t0)
+            # Special treatment for CDFM batch stats. Restrained CDFM normally
+            # avoids same-frame noisy batches, but this keeps batched sufficient
+            # statistics correct for callers that request them.
+            if (
+                is_batch
+                and "energy_grad" in energy_result
+                and "force" in force_result
+                and "force_grad" in force_result
+            ):
+                # CDFM reinforce needs sum_w outer(energy_grad, force), which
+                # cannot be reconstructed from averaged gradients and forces.
+                cdfm_stats = accumulate_cdfm_zbx_stats(
+                    cdfm_stats,
+                    force_value=force_result["force"],
+                    force_grad=force_result["force_grad"],
+                    energy_grad=energy_result["energy_grad"],
+                    weights=chunk_abs_weights,
+                )
+
+        if cdfm_stats is not None:
+            results["cdfm_stats"] = cdfm_stats
+        if "energy" in results and np.asarray(results["energy"]).ndim == 0:
+            results["energy"] = float(results["energy"])
+        if cache_geom is not None:
             frame_cache = geometry_to_observables(
                 frame_idx=frame_idx,
-                geom=geom,
+                geom=cache_geom,
                 include_pair=build_pairs,
                 include_bond=build_bonds,
                 include_angle=build_angles,
@@ -563,52 +1084,128 @@ class MPIComputeEngine:
             if return_observables:
                 results["frame_observables"] = frame_cache
 
-        # Add energy-based observable requests.
-        if (
-            request["need_energy_value"]
-            or request["need_energy_grad"]
-            or request["need_energy_hessian"]
-            or request["need_energy_grad_outer"]
-        ):
-            t0 = time.monotonic()
-            results.update(
-                energy(
-                    geom,
-                    forcefield_snapshot,
-                    return_value=request["need_energy_value"],
-                    return_grad=request["need_energy_grad"],
-                    return_hessian=request["need_energy_hessian"],
-                    return_grad_outer=request["need_energy_grad_outer"],
-                )
-            )
-            if timing is not None:
-                _add_timing(timing, "energy_kernel", time.monotonic() - t0)
-
-        # Add force-based observable requests.
-        if (
-            request["need_force_value"]
-            or request["need_force_grad"]
-            or request["need_fm_stats"]
-        ):
-            t0 = time.monotonic()
-            results.update(
-                force(
-                    geom,
-                    forcefield_snapshot,
-                    return_value=request["need_force_value"],
-                    return_grad=request["need_force_grad"],
-                    reference_force=reference_forces,
-                    frame_weight=frame_weight,
-                    return_fm_stats=request["need_fm_stats"],
-                )
-            )
-            if timing is not None:
-                _add_timing(timing, "force_kernel", time.monotonic() - t0)
-
         # Add other observable requests from registered functions.
-        # A placeholder for future extensions. DO NOT DELETE THIS COMMENT.
+        # Placeholder for future registered observable requests.
 
         return results
+
+    def add_noise(
+        self,
+        frame: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]],
+        noise: Mapping[str, Any],
+        topology_arrays: TopologyArrays,
+    ) -> Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]], np.ndarray]:
+        """Return a noisy same-frame coordinate batch and normalized sample weights.
+
+        ``noise`` is an epoch-local runtime spec, passed from workflow to engine via post_spec dict.
+        """
+        frame_id, positions, box, reference_forces = frame
+        pos = np.asarray(positions, dtype=np.float64)
+        if pos.ndim != 2 or pos.shape[-1] != 3:
+            raise ValueError(f"frame positions must have shape (n_atoms, 3), got {pos.shape}")
+
+        n_atoms = int(pos.shape[0])
+        n_noisy = int(noise.get("samples_per_frame", 1))
+        if n_noisy < 0:
+            raise ValueError("noise samples_per_frame must be non-negative.")
+        include_original = bool(noise.get("include_original", False))
+        total_samples = n_noisy + (1 if include_original else 0)
+        if total_samples <= 0:
+            raise ValueError(
+                "noise requires samples_per_frame > 0 unless include_original is true."
+            )
+
+        frame_ids = np.full(total_samples, int(frame_id), dtype=np.int64)
+        positions_batch = np.empty((total_samples, n_atoms, 3), dtype=np.float64)
+        displacement_batch = np.zeros((total_samples, n_atoms, 3), dtype=np.float64)
+        next_slot = 0
+        if include_original:
+            positions_batch[0] = pos
+            next_slot = 1
+
+        sigma = float(noise.get("sigma", 0.0))
+        if sigma < 0.0:
+            raise ValueError("noise sigma must be non-negative.")
+        selection = _noise_selection_indices(
+            noise.get("selection", "all"), topology_arrays, n_atoms,
+        )
+        distribution = str(noise.get("distribution", "gaussian")).strip().lower()
+        if distribution not in {"gaussian", "normal"}:
+            raise ValueError("noise distribution must be 'gaussian' or 'normal'.")
+
+        if n_noisy:
+            noisy = np.broadcast_to(pos, (n_noisy, n_atoms, 3)).copy()
+            if sigma > 0.0 and selection.size:
+                seed = int(noise.get("seed", 0))
+                entropy = [seed & 0xFFFFFFFF, int(frame_id) & 0xFFFFFFFF]
+                rng = np.random.default_rng(np.random.SeedSequence(entropy))
+                shape = (n_noisy, int(selection.size), 3)
+                delta = rng.normal(loc=0.0, scale=sigma, size=shape)
+                noisy[:, selection, :] += delta
+                displacement_batch[next_slot: next_slot + n_noisy, selection, :] = delta
+            positions_batch[next_slot: next_slot + n_noisy] = noisy
+
+        box_batch = _normalize_box_batch(box, total_samples)
+        if bool(noise.get("wrap", False)):
+            positions_batch = _wrap_positions_in_box(positions_batch, box_batch)
+
+        force_mix_ratio = float(noise.get("force_mix_ratio", 0.0))
+        if not 0.0 <= force_mix_ratio <= 1.0:
+            raise ValueError("noise force_mix_ratio must be between 0 and 1.")
+
+        noise_target = str(noise.get("target", "")).strip().lower()
+        if noise_target == "dsm":
+            if force_mix_ratio > 0.0:
+                raise ValueError("noise force_mix_ratio is not compatible with DSM target.")
+            if sigma <= 0.0:
+                raise ValueError("DSM noise target requires sigma > 0.")
+            beta = float(noise.get("beta", 0.0))
+            if beta <= 0.0:
+                raise ValueError("DSM noise target requires beta > 0.")
+            reference_force_batch = (
+                -displacement_batch / (beta * sigma * sigma)
+            ).astype(np.float32, copy=False)
+        elif reference_forces is None:
+            if force_mix_ratio > 0.0:
+                raise ValueError("noise force_mix_ratio requires reference forces.")
+            reference_force_batch = None
+        else:
+            reference_force_batch = np.broadcast_to(
+                np.asarray(reference_forces),
+                (total_samples,) + np.asarray(reference_forces).shape,
+            ).copy()
+            if force_mix_ratio > 0.0 and n_noisy > 0:
+                if sigma <= 0.0:
+                    raise ValueError("noise force_mix_ratio requires sigma > 0.")
+                beta = float(noise.get("beta", 0.0))
+                if beta <= 0.0:
+                    raise ValueError("noise force_mix_ratio requires beta > 0.")
+                score_batch = -displacement_batch / (beta * sigma * sigma)
+                score_like_ref = _batch_atom_values_like_reference(
+                    score_batch,
+                    reference_force_batch,
+                    topology_arrays,
+                    n_atoms=n_atoms,
+                )
+                mix_mask = np.zeros_like(displacement_batch, dtype=bool)
+                noisy_start = 1 if include_original else 0
+                if selection.size:
+                    mix_mask[noisy_start : noisy_start + n_noisy, selection, :] = True
+                mask_like_ref = _batch_atom_values_like_reference(
+                    mix_mask,
+                    reference_force_batch,
+                    topology_arrays,
+                    n_atoms=n_atoms,
+                ).astype(bool, copy=False)
+                mixed = reference_force_batch.astype(np.float32, copy=True)
+                score_like_ref = score_like_ref.astype(np.float32, copy=False)
+                mixed[mask_like_ref] = (
+                    (1.0 - force_mix_ratio) * mixed[mask_like_ref]
+                    + force_mix_ratio * score_like_ref[mask_like_ref]
+                )
+                reference_force_batch = mixed
+        weights = np.full(total_samples, 1.0 / float(total_samples), dtype=np.float64)
+        return (frame_ids, positions_batch, box_batch, reference_force_batch), weights
 
     def _shared_step_requests(self, steps: Sequence[dict]) -> Dict[str, bool]:
         request = {flag: False for flag in _REQUEST_FLAGS}
@@ -744,7 +1341,6 @@ class MPIComputeEngine:
         # every rank. The forcefield mask is temporarily flipped to CG-only
         # during the baseline force call and fully restored before the main
         # frame loop, so downstream reducers see the original training mask.
-        # TODO: HUMAN COMMENT: Consider moving this preprocessing to a separate function for clarity
         for step in one_pass_steps:
             mode = str(step["step_mode"]).strip().lower()
             if mode != "cdfm_zbx":
@@ -811,9 +1407,13 @@ class MPIComputeEngine:
                     f_model_full = np.asarray(
                         baseline_result["force"], dtype=np.float64
                     ).ravel()
-                    f_model_real = f_model_full if f_model_full.size == y_ref_flat.size else slice_observed_rows(
-                        f_model_full, topology_arrays.real_site_indices
-                    )
+                    if f_model_full.size == y_ref_flat.size:
+                        f_model_real = f_model_full
+                    else:
+                        f_model_real = slice_observed_rows(
+                            f_model_full,
+                            topology_arrays.real_site_indices,
+                        )
                 finally:
                     forcefield_snapshot.param_mask = original_param_mask
 
@@ -824,7 +1424,6 @@ class MPIComputeEngine:
                 y_eff_single = self.comm.bcast(y_eff_single, root=0)
             step["y_eff"] = y_eff_single
             step.pop("init_force_path", None)
-        # END TODO - HUMAN COMMENT.
 
     def run_post(
         self,
@@ -877,6 +1476,18 @@ class MPIComputeEngine:
         rank = 0 if comm is None else comm.Get_rank()
         size = 1 if comm is None else comm.Get_size()
         shared_spec = {key: value for key, value in spec.items() if key != "steps"}
+        expected_mpi_size = shared_spec.get("expected_mpi_size")
+        if expected_mpi_size is not None and int(expected_mpi_size) != int(size):
+            raise RuntimeError(
+                f"MPI size mismatch: launcher expected {int(expected_mpi_size)} rank(s), "
+                f"but mpi4py COMM_WORLD has size {int(size)}."
+            )
+        noise_spec = shared_spec.get("noise")
+        if noise_spec is not None:
+            if not isinstance(noise_spec, Mapping):
+                raise ValueError("spec['noise'] must be a mapping when provided.")
+            if not bool(noise_spec.get("enabled", True)):
+                noise_spec = None
         all_steps = [dict(step) for step in spec.get("steps", [])]
         one_pass_steps = [step for step in all_steps if canonical_step_mode(step) != "rdf"]
         rdf_steps = [step for step in all_steps if canonical_step_mode(step) == "rdf"]
@@ -893,6 +1504,8 @@ class MPIComputeEngine:
         )
 
         work_dir = Path(shared_spec["work_dir"])
+        heartbeat_interval = _int_spec_value(shared_spec, "heartbeat_interval", 0)
+        heartbeat_start = time.monotonic()
         _trace(perf_trace, rank, f"run_post start, MPI size={size}", all_ranks=trace_all_ranks)
         t0 = time.monotonic()
         with open(shared_spec["forcefield_path"], "rb") as handle:
@@ -957,16 +1570,22 @@ class MPIComputeEngine:
         # an arbitrary non-contiguous subset of frames, e.g. a K-frame
         # subsample out of a longer trajectory.
         discrete_ids = shared_spec.get("frame_ids")
-        if discrete_ids is not None:
-            all_ids = [int(fid) for fid in discrete_ids]
+        noise_subsample_per_epoch = _noise_subsample_per_epoch_from_spec(shared_spec)
+        use_discrete_frame_ids = discrete_ids is not None or noise_subsample_per_epoch > 0
+        if use_discrete_frame_ids:
+            all_selected_frame_ids = _selected_frame_ids_from_spec(
+                shared_spec,
+                int(total_frames),
+            )
+            all_ids = all_selected_frame_ids
             n_selected = len(all_ids)
             base_count, remainder = divmod(n_selected, size)
             local_count = base_count + (1 if rank < remainder else 0)
             local_offset = rank * base_count + min(rank, remainder)
             local_ids = all_ids[local_offset : local_offset + local_count]
-            selected_frame_ids = list(local_ids)
             # Contiguous-range variables are unused on this path.
             local_start = local_end = every = None
+            selected_frame_ids = list(local_ids)
         else:
             local_ids = None
             frame_start = (
@@ -986,6 +1605,18 @@ class MPIComputeEngine:
             local_start = frame_start + local_offset * every
             local_end = frame_start + (local_offset + local_count) * every
             selected_frame_ids = list(range(local_start, local_end, every))
+
+        if heartbeat_interval > 0:
+            _write_rank_heartbeat(
+                work_dir,
+                rank=rank,
+                size=size,
+                processed=0,
+                local_total=local_count,
+                global_total=n_selected,
+                frame_id=None,
+                start_time=heartbeat_start,
+            )
 
         if shared_spec.get("frame_weight") is not None and shared_spec.get("frame_weight_file") is not None:
             raise ValueError("Specify only one of spec['frame_weight'] or spec['frame_weight_file'].")
@@ -1055,6 +1686,10 @@ class MPIComputeEngine:
             init_step_state(step, forcefield_snapshot, topology_arrays) for step in one_pass_steps
         ]
         request = self._shared_step_requests(one_pass_steps)
+        if noise_spec is not None and (collect_observables or request.get("need_frame_cache", False)):
+            raise ValueError(
+                "spec['noise'] batch processing does not support frame-cache or observables requests."
+            )
         need_reference_forces = bool(request["need_reference_force"])
 
         if local_ids is not None:
@@ -1084,28 +1719,78 @@ class MPIComputeEngine:
                 include_forces=need_reference_forces,
             )
 
-        for i, frame in enumerate(frame_iter):
-            frame_id, positions, box, reference_forces = frame
+        frame_iter_obj = iter(frame_iter)
+        i = 0
+        while True:
             t0 = time.monotonic()
+            try:
+                frame = next(frame_iter_obj)
+            except StopIteration:
+                break
             _add_timing(local_timing, "frame_fetch", time.monotonic() - t0)
+            frame_total_start = time.monotonic()
+            frame_fetch_sec = frame_total_start - t0
+            frame_id, positions, box, reference_forces = frame
             local_timing["local_frame_count"] = int(local_timing.get("local_frame_count", 0)) + 1
             wi = 1.0 if frame_weight_local is None else float(frame_weight_local[i])
 
-            frame_result = self.compute(
-                request=request,
-                frame=frame,
-                topology_arrays=topology_arrays,
-                forcefield_snapshot=forcefield_snapshot,
-                frame_weight=wi,
-                interaction_mask=interaction_mask,
-                pair_type_list=pair_type_list,
-                pair_cutoff=pair_cutoff,
-                sel_indices=sel_indices,
-                exclude_option=exclude_option,
-                timing=local_timing,
-                return_observables=collect_observables,
-                frame_idx=frame_id,
-            )
+            if noise_spec is None:
+                t_compute = time.monotonic()
+                frame_result = self.compute(
+                    request=request,
+                    frame=frame,
+                    topology_arrays=topology_arrays,
+                    forcefield_snapshot=forcefield_snapshot,
+                    frame_weight=wi,
+                    interaction_mask=interaction_mask,
+                    pair_type_list=pair_type_list,
+                    pair_cutoff=pair_cutoff,
+                    sel_indices=sel_indices,
+                    exclude_option=exclude_option,
+                    timing=local_timing,
+                    return_observables=collect_observables,
+                    frame_idx=frame_id,
+                )
+                compute_sec = time.monotonic() - t_compute
+                noise_sec = 0.0
+            else:
+                t_noise = time.monotonic()
+                frame_batch, sample_weights = self.add_noise(
+                    frame, noise_spec, topology_arrays,
+                )
+                noise_sec = time.monotonic() - t_noise
+                _add_timing(local_timing, "noise_generation", noise_sec)
+                t_compute = time.monotonic()
+                neighbor_mode = str(noise_spec.get("neighbor_mode", "shared")).strip().lower()
+                use_reference_neighbor_frame = neighbor_mode == "skin"
+                # Noisy replicas are same-frame samples: compute() handles
+                # chunking, neighbor-cache policy, and reducer folding.
+                frame_result = self.compute(
+                    request=request,
+                    frame=frame_batch,
+                    topology_arrays=topology_arrays,
+                    forcefield_snapshot=forcefield_snapshot,
+                    frame_weight=wi,
+                    frame_weights=sample_weights,
+                    interaction_mask=interaction_mask,
+                    pair_type_list=pair_type_list,
+                    pair_cutoff=pair_cutoff,
+                    sel_indices=sel_indices,
+                    exclude_option=exclude_option,
+                    timing=local_timing,
+                    frame_idx=frame_id,
+                    batch_size=noise_spec.get("batch_size"),
+                    neighbor_mode=neighbor_mode,
+                    neighbor_skin=float(noise_spec.get("neighbor_skin", 0.0) or 0.0),
+                    neighbor_reference_positions=positions
+                    if use_reference_neighbor_frame
+                    else None,
+                    neighbor_reference_box=box
+                    if use_reference_neighbor_frame
+                    else None,
+                )
+                compute_sec = time.monotonic() - t_compute
+                _add_timing(local_timing, "compute_noisy_total", compute_sec)
 
             if local_observables is not None:
                 frame_cache = frame_result.get("frame_observables", frame_result.get("frame_cache"))
@@ -1117,7 +1802,9 @@ class MPIComputeEngine:
 
             t0 = time.monotonic()
             for step, state in zip(one_pass_steps, step_states):
-                consume_step_frame(
+                # Reducers see the same payload shape for ordinary frames and
+                # noisy batches; compute() has already folded sample axes away.
+                consume_step_payload(
                     step,
                     state,
                     payload=frame_result,
@@ -1125,6 +1812,35 @@ class MPIComputeEngine:
                     reference_force=reference_forces,
                 )
             _add_timing(local_timing, "step_consume", time.monotonic() - t0)
+            consume_sec = time.monotonic() - t0
+            processed = i + 1
+            frame_total_sec = time.monotonic() - frame_total_start
+            _add_timing(local_timing, "frame_total", frame_total_sec)
+            if perf_trace:
+                local_timing.setdefault("frame_timings", []).append(
+                    {
+                        "frame_id": int(frame_id),
+                        "fetch_sec": float(frame_fetch_sec),
+                        "noise_sec": float(noise_sec),
+                        "compute_sec": float(compute_sec),
+                        "consume_sec": float(consume_sec),
+                        "total_sec": float(frame_total_sec),
+                    }
+                )
+            if heartbeat_interval > 0 and (
+                processed == local_count or processed % heartbeat_interval == 0
+            ):
+                _write_rank_heartbeat(
+                    work_dir,
+                    rank=rank,
+                    size=size,
+                    processed=processed,
+                    local_total=local_count,
+                    global_total=n_selected,
+                    frame_id=frame_id,
+                    start_time=heartbeat_start,
+                )
+            i += 1
 
         _trace(perf_trace, rank, "frame loop finished", all_ranks=trace_all_ranks)
 
@@ -1134,7 +1850,7 @@ class MPIComputeEngine:
             reduced = self._reduce_step_partials(
                 step,
                 local_result,
-                discrete_frame_ids=discrete_ids is not None,
+                discrete_frame_ids=use_discrete_frame_ids,
             )
             _add_timing(local_timing, "reduce", time.monotonic() - t0)
             if rank != 0 or reduced is None:

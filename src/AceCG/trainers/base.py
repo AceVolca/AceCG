@@ -198,7 +198,41 @@ class BaseTrainer(ABC):
                 f"Linear scan mismatch: consumed {offset} params from a {n_params}-parameter container"
             )
         return True
-    
+
+    def is_gauge_free_energy_grad_cacheable(self) -> bool:
+        """Report whether active gauge-free energy gradients are AA-cacheable."""
+        n_params = self.forcefield.n_params()
+
+        mask = getattr(self.optimizer, "mask", None)
+        active_mask = np.asarray(mask, dtype=bool) if mask is not None else np.ones(n_params, dtype=bool)
+        if active_mask.shape != (n_params,):
+            raise ValueError(
+                f"Active parameter mask shape mismatch: expected {(n_params,)}, got {active_mask.shape}"
+            )
+
+        offset = 0
+        for _, pot in IteratePotentials(self.forcefield):
+            cacheable_mask = np.asarray(
+                pot.is_gauge_free_energy_grad_cacheable(),
+                dtype=bool,
+            )
+            n_local = pot.n_params()
+            if cacheable_mask.shape != (n_local,):
+                raise ValueError(
+                    f"Gauge-free cacheable mask shape mismatch for {type(pot).__name__}: "
+                    f"expected {(n_local,)}, got {cacheable_mask.shape}"
+                )
+            submask = active_mask[offset:offset + n_local]
+            if np.any(submask & ~cacheable_mask):
+                return False
+            offset += n_local
+
+        if offset != n_params:
+            raise ValueError(
+                f"Gauge-free cacheability scan mismatch: consumed {offset} params from a {n_params}-parameter container"
+            )
+        return True
+
     def optimizer_accepts_hessian(self) -> bool:
         """Return whether the configured optimizer can consume a Hessian.
 

@@ -47,6 +47,7 @@ class LennardJonesPotential(BasePotential):
         :return: The value of the Lennard-Jones potential at distance r.
         """
 
+        r = np.asarray(r, dtype=float)
         epsilon, sigma = self._params
         
         sigma_over_r = sigma / r
@@ -60,6 +61,7 @@ class LennardJonesPotential(BasePotential):
         :return: The force at distance r.
         """
 
+        r = np.asarray(r, dtype=float)
         epsilon, sigma = self._params
 
         sigma_over_r = sigma / r
@@ -73,6 +75,7 @@ class LennardJonesPotential(BasePotential):
         :return: The derivative of the potential with respect to epsilon at distance r.
         """
         
+        r = np.asarray(r, dtype=float)
         _, sigma = self._params
 
         sigma_over_r = sigma / r
@@ -86,6 +89,7 @@ class LennardJonesPotential(BasePotential):
         :return: The derivative of the potential with respect to sigma at distance r.
         """
 
+        r = np.asarray(r, dtype=float)
         epsilon, sigma = self._params
 
         sigma_over_r = sigma / r
@@ -98,7 +102,7 @@ class LennardJonesPotential(BasePotential):
         :param r: Distance between two particles.
         :return: The second derivative of the potential with respect to epsilon at distance r (which is 0).
         """
-        return 0.0
+        return np.zeros_like(np.asarray(r, dtype=float), dtype=float)
 
     def depsilondsigma(self, r: float) -> float:
         """
@@ -108,6 +112,7 @@ class LennardJonesPotential(BasePotential):
         :return: The mixed derivative of the potential at distance r.
         """
 
+        r = np.asarray(r, dtype=float)
         epsilon, sigma = self._params
 
         sigma_over_r = sigma / r
@@ -121,6 +126,7 @@ class LennardJonesPotential(BasePotential):
         :return: The second derivative of the potential with respect to sigma at distance r.
         """
         
+        r = np.asarray(r, dtype=float)
         epsilon, sigma = self._params
 
         sigma_over_r = sigma / r

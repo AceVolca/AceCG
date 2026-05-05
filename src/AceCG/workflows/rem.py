@@ -84,7 +84,7 @@ class REMWorkflow(SamplingWorkflow):
             aa_stats = (
                 constant_aa_stats
                 if constant_aa_stats is not None
-                else aa_data_strategy(self.forcefield)
+                else aa_data_strategy(self.forcefield, epoch=epoch)
             )
 
             # ── Phase 1: write FF ────────────────────────────────
@@ -133,6 +133,7 @@ class REMWorkflow(SamplingWorkflow):
                 post_spec["atom_type_name_aliases"] = cfg.system.type_names
             if cfg.vp is not None:
                 post_spec["vp_names"] = list(cfg.vp.vp_names)
+            self._apply_post_runtime_options(post_spec)
             xz_task = TaskSpec(
                 task_class="xz",
                 frame_id=None,

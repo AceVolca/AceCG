@@ -7,6 +7,20 @@ from .force import force
 from .mpi_engine import MPIComputeEngine
 
 
+_FM_STAT_REGISTRATIONS = (
+    ("fm_JtJ", "JtJ", "Weighted force-Jacobian normal matrix J^T J"),
+    ("fm_Jty", "Jty", "Weighted force-target right-hand side J^T y"),
+    ("fm_y_sumsq", "yty", "Weighted target-force sum of squares y^T y"),
+    ("fm_Jtf", "Jtf", "Weighted model-force right-hand side J^T f"),
+    ("fm_f_sumsq", "ftf", "Weighted model-force sum of squares f^T f"),
+    ("fm_fty", "fTy", "Weighted model/target force dot product f^T y"),
+)
+
+
+def _fm_stat(raw_key: str):
+    return lambda geom, ff, **kw: force(geom, ff, return_fm_stats=True, **kw)["fm_stats"][raw_key]
+
+
 def build_default_engine(*, comm=None) -> MPIComputeEngine:
     """Create the default MPI compute engine.
 
@@ -76,5 +90,13 @@ def build_default_engine(*, comm=None) -> MPIComputeEngine:
         reduce="dict_sum",
         description="Per-frame force-matching sufficient statistics",
     )
+
+    for name, raw_key, description in _FM_STAT_REGISTRATIONS:
+        engine.register(
+            name=name,
+            fn=_fm_stat(raw_key),
+            reduce="sum",
+            description=description,
+        )
 
     return engine

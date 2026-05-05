@@ -1,6 +1,6 @@
 # 04 AceCG MPI Runtime and Task Call Chain
 
-*Updated: 2026-04-23. Merged and expanded from draw_mpi.md (2026-04-03).*
+*Updated: 2026-05-05. Merged and expanded from draw_mpi.md (2026-04-03).*
 
 ---
 
@@ -11,6 +11,7 @@ This document describes:
 - how a scheduled task moves from workflow to compute runtime
 - what `MPIComputeEngine.run_post()` actually does
 - the semantics of `step_mode="multi"`
+- how noisy same-frame batches are generated and folded before reducers
 - where MPI logic lives, and where it does not live
 - the reducer pipeline design: init / consume / finalize
 
@@ -139,6 +140,7 @@ spec = {
     "vp_names":        list[str],
     "collect_observables": bool,
     "gather_observables":  bool,
+    "noise":            dict,      # optional epoch-local AA-reference noise spec
     "steps": [
         {
             "step_mode":   str,
@@ -156,6 +158,7 @@ spec = {
 | `rem` | REM / AA-side energy statistics | `energy_grad_avg`, `n_frames`, `weight_sum`, optional `d2U_avg` |
 | `cdrem` | CDREM xz or zbx post-processing; uses the same reducer as REM | Same as `rem` |
 | `fm` | Force-matching statistics | `JtJ`, `Jty`, `y_sumsq`, `Jtf`, `f_sumsq`, `fty`, `nframe` |
+| `dsm` | DSM score-matching statistics; uses the FM reducer state with synthetic noise targets | Same as `fm` |
 | `cdfm_zbx` | CDFM conditioned sampling replica; rank 0 first computes `y_eff` from `(init_config, init_force)` | `grad_direct`, `grad_reinforce`, `sse`, `obs_rows`, `n_samples` |
 | `rdf` | RDF / PDF distributions; does not enter the one-pass pipeline | `{InteractionKey: distribution_array}` |
 
@@ -181,7 +184,11 @@ run_post(spec):
 
   one-pass pipeline:
     for each local frame:
-      result = engine.compute(request)
+      if spec has noise:
+        frame_batch, sample_weights = engine.add_noise(...)
+        result = engine.compute(request, frame_batch, frame_weights=sample_weights, ...)
+      else:
+        result = engine.compute(request, frame)
       for step in one_pass_steps:
         consume_*_frame(state, result)
 
@@ -217,6 +224,11 @@ Discrete frame selection:
 - works for any post task requiring an explicit frame-id subset
 - frame ids are split evenly across ranks
 
+`aa_ref.noise_subsample_per_epoch` uses the same discrete-frame path. The
+workflow resolves the epoch/stage seed, and `run_post()` draws a sorted,
+no-replacement subset after `frame_start`, `frame_end`, and `every` have
+selected the AA-reference frame universe.
+
 ---
 
 ## Reducer Pipeline API
@@ -237,6 +249,7 @@ Current reducers:
 | Prefix | `step_mode` |
 |---|---|
 | `init_fm_state` / ... | `fm` |
+| `init_fm_state` + `request_dsm` | `dsm` |
 | `init_rem_state` / ... | `rem`, `cdrem` |
 | `init_cdfm_zbx_state` / ... | `cdfm_zbx` |
 | direct `analysis.rdf` path | `rdf` |
@@ -248,6 +261,8 @@ Benefits of this design:
 - each step accumulates local state independently
 - MPI reduce behavior is declared by `reduce_plan_*` and executed uniformly by the engine
 - reducer functions are pure local math and perform no MPI or I/O
+- same-frame noisy batches are already folded by `engine.compute()` into
+  ordinary reducer payload keys before `consume_*_frame()` is called
 
 ---
 
@@ -268,6 +283,10 @@ spec["observables_output_file"] = "traj_cache.pkl"
 | `geometry_to_observables()` | `compute/mpi_engine.py` | Extracts `FrameCache` from `FrameGeometry` |
 
 The old names `FrameObservables` and `TrajectoryObservablesCache` remain as compatibility aliases. New code and docs should prefer `FrameCache` and `TrajectoryCache`.
+
+Observable cache requests are valid for ordinary frames. They are rejected for
+noisy same-frame batches because current cache semantics are per real
+trajectory frame, not per noisy sample.
 
 ---
 
@@ -340,3 +359,7 @@ Strongly discouraged:
 | `FrameGeometry` | Immutable per-frame geometry object passed to energy / force kernels |
 
 Once these six objects are understood, most runtime behavior becomes predictable.
+
+`FrameGeometry` also covers same-frame coordinate batches. Interaction index
+arrays remain shared per key while distances, vectors, angles, and dihedrals
+preserve arbitrary leading sample dimensions.

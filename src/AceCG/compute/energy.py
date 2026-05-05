@@ -21,6 +21,74 @@ from ..topology.forcefield import Forcefield
 from .frame_geometry import FrameGeometry
 
 
+def _interaction_values(frame_geometry: FrameGeometry, key):
+    if key.style == "pair":
+        return frame_geometry.pair_distances.get(key)
+    if key.style == "bond":
+        return frame_geometry.bond_distances.get(key)
+    if key.style == "angle":
+        return frame_geometry.angle_values.get(key)
+    if key.style == "dihedral":
+        return frame_geometry.dihedral_values.get(key)
+    return None
+
+
+def _geometry_sample_shape(frame_geometry: FrameGeometry) -> tuple[int, ...]:
+    positions = np.asarray(frame_geometry.positions)
+    if positions.ndim < 2:
+        return ()
+    return tuple(positions.shape[:-2])
+
+
+def _sum_last_axis(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values)
+    if arr.ndim == 0:
+        return arr
+    return arr.sum(axis=-1)
+
+
+def _coerce_term_shape(values: Any, shape: tuple[int, ...], label: str) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.shape != shape:
+        try:
+            arr = np.broadcast_to(arr, shape)
+        except ValueError as exc:
+            raise ValueError(f"{label} returned shape {arr.shape}, expected {shape}") from exc
+    return np.asarray(arr, dtype=np.float64)
+
+
+def _coerce_channel_shape(
+    values: Any,
+    term_shape: tuple[int, ...],
+    n_channels: int,
+    label: str,
+) -> np.ndarray:
+    expected = term_shape + (int(n_channels),)
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.shape != expected:
+        try:
+            arr = np.broadcast_to(arr, expected)
+        except ValueError as exc:
+            raise ValueError(f"{label} returned shape {arr.shape}, expected {expected}") from exc
+    return np.asarray(arr, dtype=np.float64)
+
+
+def _coerce_reduced_channel_shape(
+    values: Any,
+    sample_shape: tuple[int, ...],
+    n_channels: int,
+    label: str,
+) -> np.ndarray:
+    expected = sample_shape + (int(n_channels),)
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.shape != expected:
+        try:
+            arr = np.broadcast_to(arr, expected)
+        except ValueError as exc:
+            raise ValueError(f"{label} returned shape {arr.shape}, expected {expected}") from exc
+    return np.asarray(arr, dtype=np.float64)
+
+
 def energy(
     frame_geometry: FrameGeometry,
     forcefield: Forcefield,
@@ -29,25 +97,41 @@ def energy(
     return_grad: bool = False,
     return_hessian: bool = False,
     return_grad_outer: bool = False,
+    return_gauge_free_energy_grad: bool = False,
+    return_gauge_free_energy_grad_outer: bool = False,
 ) -> Dict[str, Any]:
-    """Per-frame energy-side observables.
+    """Energy-side observables for a frame or same-frame coordinate batch.
 
     Masks are read from ``forcefield.key_mask`` (L1) and
     ``forcefield.param_mask`` (L2).
 
     Parameters
     ----------
-    frame_geometry : FrameGeometry from ``compute_frame_geometry()``.
+    frame_geometry : FrameGeometry.
     forcefield : Forcefield container.
-    return_value, return_grad, return_hessian, return_grad_outer :
+    return_value, return_grad, return_hessian, return_grad_outer,
+    return_gauge_free_energy_grad, return_gauge_free_energy_grad_outer :
         which derivative levels to compute.
 
     Returns
     -------
     dict with keys ``'energy'``, ``'energy_grad'``, ``'energy_hessian'``,
-    ``'energy_grad_outer'`` as requested.  Unrequested keys are absent.
+    ``'energy_grad_outer'``, ``'gauge_free_energy_grad'``, and
+    ``'gauge_free_energy_grad_outer'`` as requested. For batched
+    ``FrameGeometry`` inputs, output arrays preserve the geometry leading
+    batch dimensions.
     """
-    if not (return_value or return_grad or return_hessian or return_grad_outer):
+    need_gauge_free_buffer = bool(
+        return_gauge_free_energy_grad
+        or return_gauge_free_energy_grad_outer
+    )
+    if not (
+        return_value
+        or return_grad
+        or return_hessian
+        or return_grad_outer
+        or need_gauge_free_buffer
+    ):
         return {}
 
     result: Dict[str, Any] = {}
@@ -59,46 +143,81 @@ def energy(
 
     param_blocks = forcefield.param_blocks()
     n_params = forcefield.n_params()
+    sample_shape = _geometry_sample_shape(frame_geometry)
 
     if return_value:
-        result["energy"] = 0.0
+        result["energy"] = np.zeros(sample_shape, dtype=np.float64)
     if return_grad or return_grad_outer:
-        result["energy_grad"] = np.zeros(n_params, dtype=np.float64)
+        result["energy_grad"] = np.zeros(sample_shape + (n_params,), dtype=np.float64)
+    gauge_free_energy_grad = (
+        np.zeros(sample_shape + (n_params,), dtype=np.float64)
+        if need_gauge_free_buffer
+        else None
+    )
     if return_hessian:
-        result["energy_hessian"] = np.zeros((n_params, n_params), dtype=np.float64)
+        result["energy_hessian"] = np.zeros(
+            sample_shape + (n_params, n_params),
+            dtype=np.float64,
+        )
 
     for key, pot, sl in param_blocks:
         if interaction_mask is not None and not interaction_mask.get(key, True):
             continue
 
-        # Get distances/values for this interaction
-        if key.style == "pair":
-            r = frame_geometry.pair_distances.get(key)
-        elif key.style == "bond":
-            r = frame_geometry.bond_distances.get(key)
-        elif key.style == "angle":
-            r = frame_geometry.angle_values.get(key)
-        elif key.style == "dihedral":
-            r = frame_geometry.dihedral_values.get(key)
-        else:
-            continue
+        r = _interaction_values(frame_geometry, key)
 
         if r is None or r.size == 0:
             continue
 
-        # Filter out NaN (e.g. degenerate dihedrals)
-        valid = np.isfinite(r)
-        if not np.any(valid): continue
-        rv = r[valid]
-        # Apply cutoff here if the potential has a cutoff attribute
-        if hasattr(pot, "cutoff") and pot.cutoff is not None: rv = rv[rv <= pot.cutoff]
-        if rv.size == 0: continue
+        r_arr = np.asarray(r, dtype=np.float64)
+        active = np.isfinite(r_arr)
+        if hasattr(pot, "cutoff") and pot.cutoff is not None:
+            active &= r_arr <= pot.cutoff
+        if not np.any(active):
+            continue
+        eval_r = np.where(np.isfinite(r_arr), r_arr, 0.0)
         
         if return_value:
-            result["energy"] += float(np.sum(pot.value(rv)))
+            values = _coerce_term_shape(
+                pot.value(eval_r),
+                r_arr.shape,
+                f"{type(pot).__name__}.value",
+            )
+            result["energy"] += _sum_last_axis(np.where(active, values, 0.0))
 
         if return_grad or return_grad_outer:
-            result["energy_grad"][sl] += pot.energy_grad_sum(rv)
+            n_pot = pot.n_params()
+            if sample_shape == () and r_arr.ndim == 1:
+                rv = r_arr[active]
+                result["energy_grad"][sl] += np.asarray(
+                    pot.energy_grad_sum(rv),
+                    dtype=np.float64,
+                ).reshape(n_pot)
+            else:
+                grad_sum = _coerce_reduced_channel_shape(
+                    pot.energy_grad_sum_by_sample(r_arr, active=active),
+                    sample_shape,
+                    n_pot,
+                    f"{type(pot).__name__}.energy_grad_sum_by_sample",
+                )
+                result["energy_grad"][..., sl] += grad_sum
+
+        if gauge_free_energy_grad is not None:
+            n_pot = pot.n_params()
+            if sample_shape == () and r_arr.ndim == 1:
+                rv = r_arr[active]
+                gauge_free_energy_grad[sl] += np.asarray(
+                    pot.gauge_free_energy_grad_sum(rv),
+                    dtype=np.float64,
+                ).reshape(n_pot)
+            else:
+                grad_sum = _coerce_reduced_channel_shape(
+                    pot.gauge_free_energy_grad_sum_by_sample(r_arr, active=active),
+                    sample_shape,
+                    n_pot,
+                    f"{type(pot).__name__}.gauge_free_energy_grad_sum_by_sample",
+                )
+                gauge_free_energy_grad[..., sl] += grad_sum
 
         if return_hessian:
             n_pot = pot.n_params()
@@ -109,30 +228,49 @@ def energy(
             for j in range(n_pot):
                 for k in range(j, n_pot):
                     method_name = d2names[j][k]
-                    val = float(np.sum(getattr(pot, method_name)(rv)))
-                    result["energy_hessian"][sl.start + j, sl.start + k] += val
+                    values = _coerce_term_shape(
+                        getattr(pot, method_name)(eval_r),
+                        r_arr.shape,
+                        f"{type(pot).__name__}.{method_name}",
+                    )
+                    val = _sum_last_axis(np.where(active, values, 0.0))
+                    result["energy_hessian"][..., sl.start + j, sl.start + k] += val
                     if j != k:
-                        result["energy_hessian"][sl.start + k, sl.start + j] = \
-                            result["energy_hessian"][sl.start + j, sl.start + k]
+                        result["energy_hessian"][..., sl.start + k, sl.start + j] += val
 
     # Apply param mask (before computing outer product so mask propagates)
     if param_mask is not None:
         mask = np.asarray(param_mask, dtype=bool)
         if (return_grad or return_grad_outer) and not np.all(mask):
-            result["energy_grad"][~mask] = 0.0
+            result["energy_grad"][..., ~mask] = 0.0
+        if gauge_free_energy_grad is not None and not np.all(mask):
+            gauge_free_energy_grad[..., ~mask] = 0.0
         if return_hessian and not np.all(mask):
-            result["energy_hessian"][~mask, :] = 0.0
-            result["energy_hessian"][:, ~mask] = 0.0
+            result["energy_hessian"][..., ~mask, :] = 0.0
+            result["energy_hessian"][..., :, ~mask] = 0.0
 
     # Compute outer product from the FULL accumulated gradient vector.
     # Must be outer(g, g) — NOT block-diagonal — to capture cross-interaction
     # terms needed by CDREM covariance: Cov = <g g^T> - <g><g>^T.
     if return_grad_outer:
         g = result["energy_grad"]
-        result["energy_grad_outer"] = np.outer(g, g)
+        result["energy_grad_outer"] = np.einsum("...i,...j->...ij", g, g)
+
+    if gauge_free_energy_grad is not None:
+        if return_gauge_free_energy_grad:
+            result["gauge_free_energy_grad"] = gauge_free_energy_grad
+        if return_gauge_free_energy_grad_outer:
+            result["gauge_free_energy_grad_outer"] = np.einsum(
+                "...i,...j->...ij",
+                gauge_free_energy_grad,
+                gauge_free_energy_grad,
+            )
 
     # If grad was only accumulated for grad_outer, remove from result
     if return_grad_outer and not return_grad:
         del result["energy_grad"]
+
+    if sample_shape == () and return_value:
+        result["energy"] = float(result["energy"])
 
     return result
