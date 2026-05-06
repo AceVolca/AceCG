@@ -1,32 +1,28 @@
-# DOPC step1 Force Matching production config.
+# DOPC noisy denoising score matching production template.
 #
-# Trainable FM forcefield built from authored B-spline interaction specs.
-# Output is a bundle of .table files under training.output_dir.
+# DSM reuses FM trainable interaction specs, but reads only AA coordinates.
+# No AA reference force file is required: noisy replicas receive the synthetic
+# target force y = -delta / (beta * sigma^2) inside the compute engine.
 #
 # Atom-type-pair convention: bond and angle specs use atom-type tuples,
 # NOT topology type_id integers.
-#   bond type 1 (HG-MG)  → types: ["1", "2"]
-#   bond type 2 (MG-T1)  → types: ["2", "3"]
-#   bond type 3 (T1-T2)  → types: ["3", "4"]
-#   angle type 1 (HG-MG-T1) → types: ["1", "2", "3"]
-#   angle type 2 (T1-MG-T1) → types: ["3", "2", "3"]
-#   angle type 3 (MG-T1-T2) → types: ["2", "3", "4"]
 
 [system]
-topology_file = ../../data/reference/topo/cg6.data
+topology_file = ../../data/dopc_ld_Pak2019/topo/cg6.data
 pair_style = table
 cutoff = 25.0
 exclude = 100
 
 [training]
-method = fm
+method = dsm
 fm_method = iterator
-optimizer = newton
-lr = 1.0
-seed = 20260402
-n_epochs = 1
+optimizer = adamw weight_decay=1e-5
+lr = 1.0e-3
+seed = 20260502
+n_epochs = 100
 convergence_tol = 0.0
-output_dir = ../results/force-matching/dopc_step1
+temperature = 300.0
+output_dir = ../results/dsm/dopc_noisy_dsm
 
 [training.fm_specs]
 pair_specs = [
@@ -52,25 +48,49 @@ angle_specs = [
     {"types": ["2", "3", "4"], "n_coeffs": 128, "domain": [10.0, 180.0], "degree": 3, "resolution": 0.5}
     ]
 
+[scheduler]
+python_exe = python
+mpirun_path = /software/intel/oneapi_hpc_2023.1/mpi/2021.9.0/bin/mpirun
+
 [aa_ref]
 trajectory_files = [
-    "../../data/reference/traj/cg6_1.lammpstrj",
-    "../../data/reference/traj/cg6_2.lammpstrj",
-    "../../data/reference/traj/cg6_3.lammpstrj",
-    "../../data/reference/traj/cg6_4.lammpstrj",
-    "../../data/reference/traj/cg6_5.lammpstrj",
-    "../../data/reference/traj/cg6_6.lammpstrj",
-    "../../data/reference/traj/cg6_7.lammpstrj",
-    "../../data/reference/traj/cg6_8.lammpstrj",
-    "../../data/reference/traj/cg6_9.lammpstrj",
-    "../../data/reference/traj/cg6_10.lammpstrj",
-    "../../data/reference/traj/cg6_11.lammpstrj",
-    "../../data/reference/traj/cg6_12.lammpstrj",
-    "../../data/reference/traj/cg6_13.lammpstrj",
-    "../../data/reference/traj/cg6_14.lammpstrj",
-    "../../data/reference/traj/cg6_15.lammpstrj"
+    "../../data/dopc_ld_Pak2019/traj/cg6_1.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_2.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_3.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_4.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_5.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_6.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_7.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_8.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_9.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_10.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_11.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_12.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_13.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_14.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_15.lammpstrj"
     ]
 trajectory_format = LAMMPSDUMP
 skip_frames = 0
 every = 1
 n_frames = 7500
+
+noise_enabled = true
+noise_samples_per_frame = 8
+noise_sigma = 0.20
+noise_sigma_final = 0.02
+noise_schedule = cosine
+noise_update_interval = 1
+noise_seed = 20260502
+noise_distribution = gaussian
+noise_selection = all
+noise_include_original = false
+noise_wrap = false
+noise_batch_size = 8
+# Neighbor policy: shared is fastest; skin uses cutoff + skin from the
+# unnoised frame; chunk rebuilds once per noise_batch_size chunk.
+noise_neighbor_mode = shared
+noise_neighbor_skin = 0.0
+# Optional: sample after skip_frames/n_frames/every have defined the AA dataset.
+# noise_subsample_per_epoch = 640
+noise_cache_policy = none

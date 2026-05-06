@@ -44,6 +44,8 @@ class Forcefield(MutableMapping):
     __slots__ = (
         "_data", "_param",
         "_param_mask", "_key_mask", "_param_bounds_lb", "_param_bounds_ub",
+        "_param_mask_signature", "_param_bounds_signature",
+        "_param_mask_dirty", "_param_bounds_dirty",
         "_vp_types", "_virtual_mask", "_real_mask", "_real_virtual_mask",
         "_param_slices_cache", "_param_blocks_cache",
     )
@@ -51,6 +53,8 @@ class Forcefield(MutableMapping):
     _CACHE_FIELDS = (
         "_param", "_param_mask", "_key_mask",
         "_param_bounds_lb", "_param_bounds_ub",
+        "_param_mask_signature", "_param_bounds_signature",
+        "_param_mask_dirty", "_param_bounds_dirty",
         "_vp_types", "_virtual_mask", "_real_mask", "_real_virtual_mask",
     )
 
@@ -77,6 +81,8 @@ class Forcefield(MutableMapping):
             for f in self._CACHE_FIELDS:
                 setattr(self, f, self._copy_val(getattr(data, f)))
             self._rebuild_structure_cache()
+            self._sync_mask_cache_from_potentials()
+            self._sync_bounds_cache_from_potentials()
             return
         elif isinstance(data, dict):
             self._data = copy.deepcopy(data)
@@ -86,6 +92,7 @@ class Forcefield(MutableMapping):
             setattr(self, f, None)
         self._rebuild_param_cache()
         self._rebuild_structure_cache()
+        self._sync_mask_cache_from_potentials()
         self._auto_detect_bounds()
 
     def __getitem__(self, key: InteractionKey) -> List[BasePotential]:
@@ -146,6 +153,8 @@ class Forcefield(MutableMapping):
         for f in self._CACHE_FIELDS:
             setattr(new, f, self._copy_val(getattr(self, f)))
         new._rebuild_structure_cache()
+        new._sync_mask_cache_from_potentials()
+        new._sync_bounds_cache_from_potentials()
         return new
 
     # ------------------------------------------------------------------
@@ -237,24 +246,32 @@ class Forcefield(MutableMapping):
 
     @property
     def param_mask(self) -> np.ndarray:
-        """L2 bool mask ``(n_params,)``.  ``True`` = trainable.  Defaults all-True.
+        """L2 bool mask ``(n_params,)`` assembled from potential-local masks.
 
         >>> ff.param_mask = np.array([True, True, False])
         """
-        n = self.n_params()
-        if self._param_mask is not None and self._param_mask.shape == (n,):
-            return self._param_mask
-        return np.ones(n, dtype=bool)
+        signature = self._metadata_signature("mask")
+        if (
+            self._param_mask is None
+            or self._param_mask_dirty
+            or signature is None
+            or signature != self._param_mask_signature
+        ):
+            self._sync_mask_cache_from_potentials(signature=signature)
+        return self._param_mask
 
     @param_mask.setter
     def param_mask(self, mask: np.ndarray) -> None:
-        """Set the parameter-level trainability mask."""
+        """Set the parameter-level trainability mask on each potential."""
         mask = np.asarray(mask, dtype=bool)
         n = self.n_params()
         if mask.shape != (n,):
             raise ValueError(f"param_mask shape must be ({n},), got {mask.shape}")
-        self._param_mask = mask.copy()
-        self._key_mask = self._derive_key_mask_from_l2(mask)
+        signature, key_mask = self._assign_potential_masks(mask)
+        self._param_mask = self._readonly_array(mask.copy())
+        self._param_mask_signature = signature
+        self._param_mask_dirty = False
+        self._key_mask = key_mask
 
     @property
     def key_mask(self) -> Dict[InteractionKey, bool]:
@@ -262,9 +279,7 @@ class Forcefield(MutableMapping):
 
         >>> ff.key_mask = {bond_key: True, angle_key: False}
         """
-        if self._key_mask is not None and set(self._key_mask) == set(self._data):
-            return self._key_mask
-        self._key_mask = self._derive_key_mask_from_l2(self.param_mask)
+        _ = self.param_mask
         return self._key_mask
 
     @key_mask.setter
@@ -272,8 +287,7 @@ class Forcefield(MutableMapping):
         """Set the interaction-level mask and propagate it to parameters."""
         self._validate_interaction_keyed_mapping("key_mask", km)
         n = self.n_params()
-        mask = self._param_mask if self._param_mask is not None else np.ones(n, dtype=bool)
-        mask = mask.copy()
+        mask = self.param_mask.copy() if n else np.ones(n, dtype=bool)
         offset = 0
         for key, val in self._data.items():
             pots = val if isinstance(val, list) else [val]
@@ -482,22 +496,35 @@ class Forcefield(MutableMapping):
 
         >>> lb, ub = ff.param_bounds
         """
-        n = self.n_params()
-        lb = self._param_bounds_lb if self._param_bounds_lb is not None and self._param_bounds_lb.shape == (n,) else np.full(n, -np.inf)
-        ub = self._param_bounds_ub if self._param_bounds_ub is not None and self._param_bounds_ub.shape == (n,) else np.full(n, np.inf)
+        signature = self._metadata_signature("bounds")
+        if (
+            self._param_bounds_lb is None
+            or self._param_bounds_ub is None
+            or self._param_bounds_dirty
+            or signature is None
+            or signature != self._param_bounds_signature
+        ):
+            self._sync_bounds_cache_from_potentials(signature=signature)
+        lb = self._param_bounds_lb
+        ub = self._param_bounds_ub
         return lb, ub
 
     @param_bounds.setter
     def param_bounds(self, bounds: Tuple[np.ndarray, np.ndarray]) -> None:
-        """Set lower and upper bound arrays for the full parameter vector."""
+        """Set lower and upper bound arrays on each potential."""
         lb, ub = bounds
-        lb = np.asarray(lb, dtype=float)
-        ub = np.asarray(ub, dtype=float)
+        lb = np.asarray(lb, dtype=float).reshape(-1)
+        ub = np.asarray(ub, dtype=float).reshape(-1)
         n = self.n_params()
         if lb.shape != (n,) or ub.shape != (n,):
             raise ValueError(f"param_bounds shape must be ({n},), got lb={lb.shape}, ub={ub.shape}")
-        self._param_bounds_lb = lb.copy()
-        self._param_bounds_ub = ub.copy()
+        if np.any(lb > ub):
+            raise ValueError("param_bounds lower entries cannot exceed upper entries.")
+        signature = self._assign_potential_bounds(lb, ub)
+        self._param_bounds_lb = self._readonly_array(lb.copy())
+        self._param_bounds_ub = self._readonly_array(ub.copy())
+        self._param_bounds_signature = signature
+        self._param_bounds_dirty = False
 
     def apply_bounds(self, L: np.ndarray) -> np.ndarray:
         """Clamp a parameter vector into stored bounds.
@@ -514,13 +541,10 @@ class Forcefield(MutableMapping):
 
         >>> L_clamped = ff.apply_bounds(L)
         """
-        if self._param_bounds_lb is None and self._param_bounds_ub is None:
-            return L
         Lc = L.copy()
-        if self._param_bounds_lb is not None:
-            Lc = np.maximum(Lc, self._param_bounds_lb)
-        if self._param_bounds_ub is not None:
-            Lc = np.minimum(Lc, self._param_bounds_ub)
+        lb, ub = self.param_bounds
+        Lc = np.maximum(Lc, lb)
+        Lc = np.minimum(Lc, ub)
         return Lc
 
     def build_bounds(
@@ -559,8 +583,9 @@ class Forcefield(MutableMapping):
         if pair_bounds is not None:
             self._validate_interaction_keyed_mapping("pair_bounds", pair_bounds)
 
-        lb = np.full(total, -np.inf, dtype=float)
-        ub = np.full(total, np.inf, dtype=float)
+        lb, ub = self.param_bounds
+        lb = lb.copy()
+        ub = ub.copy()
 
         def norm(value: str) -> str:
             return value if case_sensitive else value.lower()
@@ -652,6 +677,8 @@ class Forcefield(MutableMapping):
         for f in self._CACHE_FIELDS:
             setattr(out, f, self._copy_val(getattr(self, f)))
         out._rebuild_structure_cache()
+        out._sync_mask_cache_from_potentials()
+        out._sync_bounds_cache_from_potentials()
         return out
 
     # ==================================================================
@@ -668,6 +695,217 @@ class Forcefield(MutableMapping):
         if isinstance(v, dict):
             return dict(v)
         return v
+
+    @staticmethod
+    def _readonly_array(arr: np.ndarray) -> np.ndarray:
+        arr.setflags(write=False)
+        return arr
+
+    def _potential_metadata_version(self, pot: BasePotential) -> Optional[int]:
+        version = getattr(pot, "metadata_version", None)
+        if callable(version):
+            version = version()
+        if version is None:
+            version = getattr(pot, "_metadata_version", None)
+        if version is None:
+            return None
+        return int(version)
+
+    def _metadata_signature_entry(
+        self,
+        kind: str,
+        pot: BasePotential,
+    ) -> Optional[Tuple[int, int, int, int]]:
+        version = self._potential_metadata_version(pot)
+        if version is None:
+            return None
+        if kind == "bounds":
+            extra = id(getattr(pot, "__dict__", {}).get("param_bounds", None))
+        elif kind == "mask":
+            extra = id(getattr(pot, "__dict__", {}).get("param_mask", None))
+        else:
+            extra = 0
+        return (id(pot), int(pot.n_params()), version, extra)
+
+    def _metadata_signature(self, kind: str) -> Optional[Tuple[Tuple[int, int, int, int], ...]]:
+        """Return a lightweight signature for potential-local metadata state.
+
+        ``None`` means at least one potential has no metadata version, so the
+        forcefield must conservatively re-read potential metadata each time.
+        """
+        parts: List[Tuple[int, int, int, int]] = []
+        for _, pot in self.iter_potentials():
+            entry = self._metadata_signature_entry(kind, pot)
+            if entry is None:
+                return None
+            parts.append(entry)
+        return tuple(parts)
+
+    def _mark_metadata_dirty(self, *, mask: bool = True, bounds: bool = True) -> None:
+        if mask:
+            self._param_mask_dirty = True
+            self._param_mask_signature = None
+            self._key_mask = None
+        if bounds:
+            self._param_bounds_dirty = True
+            self._param_bounds_signature = None
+
+    def _bump_potential_metadata_version(self, pot: BasePotential) -> None:
+        bump = getattr(pot, "_bump_metadata_version", None)
+        if callable(bump):
+            bump()
+
+    def _bump_potential_metadata_version_if_unchanged(
+        self,
+        pot: BasePotential,
+        before: Optional[int],
+    ) -> None:
+        if before is None:
+            return
+        after = self._potential_metadata_version(pot)
+        if after == before:
+            self._bump_potential_metadata_version(pot)
+
+    def _collect_potential_masks(self) -> np.ndarray:
+        """Concatenate potential-local trainability masks."""
+        parts: List[np.ndarray] = []
+        for _, pot in self.iter_potentials():
+            mask = getattr(pot, "param_mask", None)
+            if mask is None:
+                mask = np.ones(pot.n_params(), dtype=bool)
+            elif callable(mask):
+                mask = mask()
+            mask = np.asarray(mask, dtype=bool).reshape(-1)
+            n = pot.n_params()
+            if mask.shape != (n,):
+                raise ValueError(
+                    f"param_mask shape mismatch for {type(pot).__name__}: "
+                    f"expected {(n,)}, got {mask.shape}"
+                )
+            parts.append(mask)
+        return np.concatenate(parts) if parts else np.empty(0, dtype=bool)
+
+    def _assign_potential_masks(
+        self,
+        mask: np.ndarray,
+    ) -> Tuple[Optional[Tuple[Tuple[int, int, int, int], ...]], Dict[InteractionKey, bool]]:
+        """Split a global trainability mask back onto potentials."""
+        offset = 0
+        signature_parts: List[Tuple[int, int, int, int]] = []
+        signature_valid = True
+        key_mask: Dict[InteractionKey, bool] = {key: False for key in self._data}
+        for key, pot in self.iter_potentials():
+            n = pot.n_params()
+            local = np.asarray(mask[offset:offset + n], dtype=bool).reshape(-1)
+            before_version = self._potential_metadata_version(pot)
+            try:
+                pot.param_mask = local
+            except AttributeError:
+                pot._param_mask = local.copy()
+            self._bump_potential_metadata_version_if_unchanged(pot, before_version)
+            entry = self._metadata_signature_entry("mask", pot)
+            if entry is None:
+                signature_valid = False
+            else:
+                signature_parts.append(entry)
+            key_mask[key] = key_mask[key] or bool(np.any(local))
+            offset += n
+        signature = tuple(signature_parts) if signature_valid else None
+        return signature, key_mask
+
+    @staticmethod
+    def _potential_bounds(pot: BasePotential) -> Tuple[np.ndarray, np.ndarray]:
+        """Return local bounds from either property-style or method-style APIs."""
+        bounds = getattr(pot, "param_bounds", None)
+        if bounds is None:
+            n = pot.n_params()
+            return np.full(n, -np.inf, dtype=float), np.full(n, np.inf, dtype=float)
+        if callable(bounds):
+            bounds = bounds()
+        lb, ub = bounds
+        lb = np.asarray(lb, dtype=float).reshape(-1)
+        ub = np.asarray(ub, dtype=float).reshape(-1)
+        n = pot.n_params()
+        if lb.shape != (n,) or ub.shape != (n,):
+            raise ValueError(
+                f"param_bounds shape mismatch for {type(pot).__name__}: "
+                f"expected {(n,)}, got lb={lb.shape}, ub={ub.shape}"
+            )
+        if np.any(lb > ub):
+            raise ValueError(
+                f"param_bounds lower entries cannot exceed upper entries for {type(pot).__name__}."
+            )
+        return lb, ub
+
+    def _collect_potential_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Concatenate potential-local lower/upper bounds."""
+        lb_parts: List[np.ndarray] = []
+        ub_parts: List[np.ndarray] = []
+        for _, pot in self.iter_potentials():
+            pot_lb, pot_ub = self._potential_bounds(pot)
+            lb_parts.append(pot_lb)
+            ub_parts.append(pot_ub)
+        if not lb_parts:
+            empty = np.empty(0, dtype=float)
+            return empty, empty.copy()
+        return np.concatenate(lb_parts), np.concatenate(ub_parts)
+
+    def _assign_potential_bounds(
+        self,
+        lb: np.ndarray,
+        ub: np.ndarray,
+    ) -> Optional[Tuple[Tuple[int, int, int, int], ...]]:
+        """Split global bounds back onto each potential."""
+        offset = 0
+        signature_parts: List[Tuple[int, int, int, int]] = []
+        signature_valid = True
+        for _, pot in self.iter_potentials():
+            n = pot.n_params()
+            local_bounds = (
+                np.asarray(lb[offset:offset + n], dtype=float).reshape(-1),
+                np.asarray(ub[offset:offset + n], dtype=float).reshape(-1),
+            )
+            before_version = self._potential_metadata_version(pot)
+            try:
+                pot.param_bounds = local_bounds
+            except AttributeError:
+                pot._param_bounds_lb = local_bounds[0].copy()
+                pot._param_bounds_ub = local_bounds[1].copy()
+            self._bump_potential_metadata_version_if_unchanged(pot, before_version)
+            entry = self._metadata_signature_entry("bounds", pot)
+            if entry is None:
+                signature_valid = False
+            else:
+                signature_parts.append(entry)
+            offset += n
+        return tuple(signature_parts) if signature_valid else None
+
+    def _sync_mask_cache_from_potentials(
+        self,
+        *,
+        signature: Optional[Tuple[Tuple[int, int, int, int], ...]] = None,
+    ) -> None:
+        """Refresh cached global masks from potential-local masks."""
+        self._param_mask = self._readonly_array(self._collect_potential_masks())
+        if signature is None:
+            signature = self._metadata_signature("mask")
+        self._param_mask_signature = signature
+        self._param_mask_dirty = False
+        self._key_mask = self._derive_key_mask_from_l2(self._param_mask)
+
+    def _sync_bounds_cache_from_potentials(
+        self,
+        *,
+        signature: Optional[Tuple[Tuple[int, int, int, int], ...]] = None,
+    ) -> None:
+        """Refresh cached global bounds from potential-local bounds."""
+        lb, ub = self._collect_potential_bounds()
+        self._param_bounds_lb = self._readonly_array(lb)
+        self._param_bounds_ub = self._readonly_array(ub)
+        if signature is None:
+            signature = self._metadata_signature("bounds")
+        self._param_bounds_signature = signature
+        self._param_bounds_dirty = False
 
     @staticmethod
     def _validate_interaction_keyed_mapping(name: str, mapping: Mapping[object, object]) -> None:
@@ -716,45 +954,6 @@ class Forcefield(MutableMapping):
             return arr
 
         self._param = _splice(self._param, new_params)
-        self._param_mask = _splice(self._param_mask, np.ones(new_n, dtype=bool))
-        self._param_bounds_lb = _splice(self._param_bounds_lb, np.full(new_n, -np.inf))
-        self._param_bounds_ub = _splice(self._param_bounds_ub, np.full(new_n, np.inf))
-
-        if key is not None and new_n > 0:
-            val = self._data[key]
-            pots = val if isinstance(val, list) else [val]
-            offset = 0
-            intrinsic_bounds: List[Tuple[int, int, np.ndarray, np.ndarray]] = []
-            has_finite_intrinsic = False
-            for pot in pots:
-                pn = pot.n_params()
-                if hasattr(pot, "param_bounds"):
-                    pot_lb, pot_ub = pot.param_bounds()
-                    pot_lb = np.asarray(pot_lb, dtype=float)
-                    pot_ub = np.asarray(pot_ub, dtype=float)
-                    if pot_lb.shape != (pn,) or pot_ub.shape != (pn,):
-                        raise ValueError(
-                            f"param_bounds shape mismatch for {type(pot).__name__}: "
-                            f"expected {(pn,)}, got lb={pot_lb.shape}, ub={pot_ub.shape}"
-                        )
-                    intrinsic_bounds.append((offset, pn, pot_lb, pot_ub))
-                    if np.any(np.isfinite(pot_lb)) or np.any(np.isfinite(pot_ub)):
-                        has_finite_intrinsic = True
-                offset += pn
-
-            if has_finite_intrinsic and (self._param_bounds_lb is None or self._param_bounds_ub is None):
-                n_total = self.n_params()
-                if self._param_bounds_lb is None:
-                    self._param_bounds_lb = np.full(n_total, -np.inf, dtype=float)
-                if self._param_bounds_ub is None:
-                    self._param_bounds_ub = np.full(n_total, np.inf, dtype=float)
-
-            for offset, pn, pot_lb, pot_ub in intrinsic_bounds:
-                if self._param_bounds_lb is not None:
-                    self._param_bounds_lb[old_start + offset:old_start + offset + pn] = pot_lb
-                if self._param_bounds_ub is not None:
-                    self._param_bounds_ub[old_start + offset:old_start + offset + pn] = pot_ub
-
         if self._vp_types is not None and key is not None and new_n > 0:
             vp_set = self._vp_types
             n_vp = sum(1 for t in key.types if t in vp_set)
@@ -768,9 +967,8 @@ class Forcefield(MutableMapping):
         self._virtual_mask = _splice(self._virtual_mask, virt_fill)
         self._real_mask = _splice(self._real_mask, real_fill)
         self._real_virtual_mask = _splice(self._real_virtual_mask, mixed_fill)
-        if self._param_mask is not None or self._key_mask is not None:
-            self._key_mask = self._derive_key_mask_from_l2(self.param_mask)
         self._rebuild_structure_cache()
+        self._mark_metadata_dirty(mask=True, bounds=True)
 
     def _rebuild_param_cache(self) -> None:
         """Rebuild ``_param`` from scratch (used on init)."""
@@ -814,23 +1012,5 @@ class Forcefield(MutableMapping):
         return km
 
     def _auto_detect_bounds(self) -> None:
-        """Scan potentials for intrinsic ``param_bounds()`` and store them."""
-        lb_parts: List[np.ndarray] = []
-        ub_parts: List[np.ndarray] = []
-        has_finite = False
-        for _, pot in self.iter_potentials():
-            n = pot.n_params()
-            if hasattr(pot, "param_bounds"):
-                pot_lb, pot_ub = pot.param_bounds()
-                pot_lb = np.asarray(pot_lb, dtype=float)
-                pot_ub = np.asarray(pot_ub, dtype=float)
-                lb_parts.append(pot_lb)
-                ub_parts.append(pot_ub)
-                if np.any(np.isfinite(pot_lb)) or np.any(np.isfinite(pot_ub)):
-                    has_finite = True
-            else:
-                lb_parts.append(np.full(n, -np.inf))
-                ub_parts.append(np.full(n, np.inf))
-        if has_finite:
-            self._param_bounds_lb = np.concatenate(lb_parts)
-            self._param_bounds_ub = np.concatenate(ub_parts)
+        """Sync cached global bounds from potential-local bounds."""
+        self._sync_bounds_cache_from_potentials()

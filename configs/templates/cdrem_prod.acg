@@ -58,22 +58,22 @@ ref_topo = ../../data/reference/topo/cg6.data
 ref_type_names = ../../data/reference/topo/cg6_aliases.json
 ref_has_vp = no
 trajectory_files = [
-  "../../data/reference/traj/cg6_1.lammpstrj",
-  "../../data/reference/traj/cg6_2.lammpstrj",
-  "../../data/reference/traj/cg6_3.lammpstrj",
-  "../../data/reference/traj/cg6_4.lammpstrj",
-  "../../data/reference/traj/cg6_5.lammpstrj",
-  "../../data/reference/traj/cg6_6.lammpstrj",
-  "../../data/reference/traj/cg6_7.lammpstrj",
-  "../../data/reference/traj/cg6_8.lammpstrj",
-  "../../data/reference/traj/cg6_9.lammpstrj",
-  "../../data/reference/traj/cg6_10.lammpstrj",
-  "../../data/reference/traj/cg6_11.lammpstrj",
-  "../../data/reference/traj/cg6_12.lammpstrj",
-  "../../data/reference/traj/cg6_13.lammpstrj",
-  "../../data/reference/traj/cg6_14.lammpstrj",
-  "../../data/reference/traj/cg6_15.lammpstrj"
-]
+    "../../data/reference/traj/cg6_1.lammpstrj",
+    "../../data/reference/traj/cg6_2.lammpstrj",
+    "../../data/reference/traj/cg6_3.lammpstrj",
+    "../../data/reference/traj/cg6_4.lammpstrj",
+    "../../data/reference/traj/cg6_5.lammpstrj",
+    "../../data/reference/traj/cg6_6.lammpstrj",
+    "../../data/reference/traj/cg6_7.lammpstrj",
+    "../../data/reference/traj/cg6_8.lammpstrj",
+    "../../data/reference/traj/cg6_9.lammpstrj",
+    "../../data/reference/traj/cg6_10.lammpstrj",
+    "../../data/reference/traj/cg6_11.lammpstrj",
+    "../../data/reference/traj/cg6_12.lammpstrj",
+    "../../data/reference/traj/cg6_13.lammpstrj",
+    "../../data/reference/traj/cg6_14.lammpstrj",
+    "../../data/reference/traj/cg6_15.lammpstrj"
+    ]
 trajectory_format = LAMMPSDUMP
 skip_frames = 0
 every = 1

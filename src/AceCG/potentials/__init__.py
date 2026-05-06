@@ -1,6 +1,13 @@
 # AceCG/potentials/__init__.py
 from .base import BasePotential, IteratePotentials
 from .bspline import BSplinePotential
+from .gated import (
+    GatedPotential,
+    iter_gated_potentials,
+    sample_L0_gates,
+    set_L0_gates_deterministic,
+    wrap_forcefield_with_L0_gates,
+)
 from .gaussian import GaussianPotential
 from .harmonic import HarmonicPotential
 from .lennardjones import LennardJonesPotential

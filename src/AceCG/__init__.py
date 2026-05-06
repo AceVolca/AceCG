@@ -11,6 +11,7 @@ from .trainers.analytic import CDREMTrainerAnalytic
 from .trainers.analytic import MultiTrainerAnalytic
 from .trainers.analytic import FMTrainerAnalytic
 from .trainers.analytic import CDFMTrainerAnalytic
+from .trainers.analytic import L0InteractionTrainerAnalytic
 
 # Optimizers
 from .optimizers.base import BaseOptimizer
@@ -44,6 +45,13 @@ from .potentials.srlrgaussian import SRLRGaussianPotential
 from .potentials.unnormalized_multi_gaussian import UnnormalizedMultiGaussianPotential
 from .potentials.base import BasePotential, IteratePotentials
 from .potentials.harmonic import HarmonicPotential
+from .potentials.gated import (
+    GatedPotential,
+    iter_gated_potentials,
+    sample_L0_gates,
+    set_L0_gates_deterministic,
+    wrap_forcefield_with_L0_gates,
+)
 
 # Topology (new — PR0)
 from .topology import InteractionKey, Forcefield
@@ -67,6 +75,7 @@ __all__ = [
     "MultiTrainerAnalytic",
     "FMTrainerAnalytic",
     "CDFMTrainerAnalytic",
+    "L0InteractionTrainerAnalytic",
     # Optimizers
     "BaseOptimizer",
     "NewtonRaphsonOptimizer",
@@ -95,6 +104,11 @@ __all__ = [
     "BasePotential",
     "IteratePotentials",
     "HarmonicPotential",
+    "GatedPotential",
+    "iter_gated_potentials",
+    "sample_L0_gates",
+    "set_L0_gates_deterministic",
+    "wrap_forcefield_with_L0_gates",
     # Topology
     "InteractionKey",
     "Forcefield",

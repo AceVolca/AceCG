@@ -48,6 +48,10 @@ class BasePotential(ABC):
         self._params_to_scale = None
         self._df_dparam_names = None
         self._d2param_dr_names = None
+        self._param_mask = None
+        self._param_bounds_lb = None
+        self._param_bounds_ub = None
+        self._metadata_version = 0
 
     @abstractmethod
     def value(self, r: np.ndarray) -> np.ndarray:
@@ -155,7 +159,69 @@ class BasePotential(ABC):
         """
         # if self._params is not None:
         #     assert len(new_params) == len(self._params)
+        new_params = np.asarray(new_params, dtype=float).reshape(-1)
         self._params = new_params.copy()
+
+    @property
+    def metadata_version(self) -> int:
+        """Monotonic metadata version for potential-local masks and bounds."""
+        return int(self._metadata_version)
+
+    def _bump_metadata_version(self) -> None:
+        self._metadata_version = int(getattr(self, "_metadata_version", 0)) + 1
+
+    @property
+    def param_mask(self) -> np.ndarray:
+        """Potential-local trainability mask.
+
+        ``True`` entries are optimizer-active. ``Forcefield`` concatenates
+        these local masks when constructing the global optimizer mask.
+        """
+        n = self.n_params()
+        if self._param_mask is not None and self._param_mask.shape == (n,):
+            return self._param_mask.copy()
+        return np.ones(n, dtype=bool)
+
+    @param_mask.setter
+    def param_mask(self, mask: np.ndarray) -> None:
+        mask = np.asarray(mask, dtype=bool).reshape(-1)
+        n = self.n_params()
+        if mask.shape != (n,):
+            raise ValueError(f"param_mask shape must be ({n},), got {mask.shape}")
+        self._param_mask = mask.copy()
+        self._bump_metadata_version()
+
+    @property
+    def param_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Potential-local lower/upper bounds for optimizable parameters."""
+        n = self.n_params()
+        lb = (
+            self._param_bounds_lb.copy()
+            if self._param_bounds_lb is not None and self._param_bounds_lb.shape == (n,)
+            else np.full(n, -np.inf, dtype=float)
+        )
+        ub = (
+            self._param_bounds_ub.copy()
+            if self._param_bounds_ub is not None and self._param_bounds_ub.shape == (n,)
+            else np.full(n, np.inf, dtype=float)
+        )
+        return lb, ub
+
+    @param_bounds.setter
+    def param_bounds(self, bounds: Tuple[np.ndarray, np.ndarray]) -> None:
+        lb, ub = bounds
+        lb = np.asarray(lb, dtype=float).reshape(-1)
+        ub = np.asarray(ub, dtype=float).reshape(-1)
+        n = self.n_params()
+        if lb.shape != (n,) or ub.shape != (n,):
+            raise ValueError(
+                f"param_bounds shape must be ({n},), got lb={lb.shape}, ub={ub.shape}"
+            )
+        if np.any(lb > ub):
+            raise ValueError("param_bounds lower entries cannot exceed upper entries.")
+        self._param_bounds_lb = lb.copy()
+        self._param_bounds_ub = ub.copy()
+        self._bump_metadata_version()
 
     def basis_values(self, r: np.ndarray) -> np.ndarray:
         """Return energy-side per-parameter basis values at r.

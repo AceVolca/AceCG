@@ -1,6 +1,6 @@
 # 07 Trainer Module Developer Reference
 
-*Updated: 2026-05-05.*
+*Updated: 2026-05-06.*
 
 The trainer layer sits above `compute/` and next to `solvers/`. It consumes workflow-built batch statistics and produces gradients, Hessians, update steps, and diagnostics. It does not own MPI execution, trajectory extraction, or reducer runtime state.
 
@@ -16,6 +16,7 @@ The trainer layer sits above `compute/` and next to `solvers/`. It consumes work
 | `trainers/analytic/fm.py` | Iterative FM/DSM trainer consuming the standard FM reducer payload |
 | `trainers/analytic/cdrem.py` | Latent-variable CDREM trainer |
 | `trainers/analytic/cdfm.py` | CDFM gradient consumer with EM guardrail handling |
+| `trainers/analytic/l0.py` | First-order L0 gate trainer for `GatedPotential` forcefields |
 | `trainers/analytic/multi.py` | Meta-trainer that combines multiple child trainers |
 | `trainers/autodiff/` | Placeholder package for future autodiff trainers |
 
@@ -99,6 +100,7 @@ The workflow owns batch construction. Trainers should not rebuild trajectory sta
 | `FMTrainerAnalytic`, `FMBatch` | Iterative FM trainer |
 | `CDREMTrainerAnalytic`, `CDREMBatch`, `CDREMOut` | Latent-variable REM trainer |
 | `CDFMTrainerAnalytic`, `CDFMBatch` | Latent-variable FM trainer |
+| `L0InteractionTrainerAnalytic`, `L0Out` | Hard-concrete gate trainer for interaction sparsity |
 | `MultiTrainerAnalytic`, `MultiOut` | Composite meta-trainer |
 
 Recommended usage:
@@ -167,6 +169,14 @@ statistics by `beta^2`, making the reused FM objective equivalent to:
 
 DSM therefore follows the iterative FM trainer path and rejects
 `training.fm_method = solver`.
+
+### `L0InteractionTrainerAnalytic`
+
+`L0InteractionTrainerAnalytic` operates on forcefields whose potentials have
+been wrapped with `GatedPotential`. It computes a first-order gate update from
+per-interaction force Jacobian statistics and adds the hard-concrete expected
+L0 penalty. This is a library-level trainer; workflow/config integration is
+not currently installed in the public CLI paths.
 
 ### `MSETrainerAnalytic`
 

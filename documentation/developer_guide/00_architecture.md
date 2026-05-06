@@ -1,6 +1,6 @@
 # 00 AceCG Software Architecture
 
-*Updated: 2026-05-05. Merged and expanded from draw.md (2026-04-03).*
+*Updated: 2026-05-06. Merged and expanded from draw.md (2026-04-03).*
 
 > This is the top-level architecture document for AceCG and is the recommended first document to read before diving into the code.
 
@@ -26,7 +26,7 @@ L5  Scheduler / Task Runner
     resource_pool.py, mpi_backend.py, profiler.py
 
 L4  Trainers / Solvers / Optimizers
-    trainers/analytic/{rem,mse,fm,cdrem,cdfm,multi}.py
+    trainers/analytic/{rem,mse,fm,cdrem,cdfm,l0,multi}.py
     solvers/fm_matrix.py
     optimizers/{adam,adamW,rmsprop,newton_raphson}.py
 
@@ -46,7 +46,7 @@ L1  Topology / Forcefield
     topology/neighbor.py, mscg.py
 
 L0  Potentials / Fitters / Samplers
-    potentials/{harmonic,bspline,gaussian,lj,...}.py
+    potentials/{harmonic,bspline,gaussian,gated,lj,...}.py
     fitters/{fit_bspline,fit_harmonic,fit_multi_gaussian}.py
     samplers/base.py, conditioned.py
 ```
@@ -65,6 +65,7 @@ This layer does not depend on any other AceCG module. It is the leaf layer of th
 | `potentials/harmonic.py` | Harmonic bonded / angle potential |
 | `potentials/bspline.py` | Force-basis B-spline potential; all parameters are linear |
 | `potentials/gaussian.py` | Normalized Gaussian pair potential |
+| `potentials/gated.py` | Hard-concrete gate wrapper for interaction sparsification experiments |
 | `potentials/lj*.py` | LJ 12-6 / 9-6 / soft-core families |
 | `potentials/multi_gaussian.py` | Normalized multi-Gaussian family |
 | `fitters/fit_*.py` | Initial parameter fitting from RDF / distribution data |
@@ -104,7 +105,10 @@ The core objects are:
 `Forcefield` is the source of truth for parameters:
 
 - `param_array()` and `update_params(L)` control the complete flattened parameter vector.
-- `key_mask` and `param_mask` control which parameters participate in training.
+- potential-local `param_mask` and `param_bounds` values carry trainability
+  and bound metadata with each potential object.
+- `key_mask`, `param_mask`, and `param_bounds` expose global, read-only dirty
+  caches assembled from potential-local metadata.
 - `deepcopy()` and `copy.deepcopy()` are safe; trainers and solvers own independent copies.
 
 ### L2: I/O + Config

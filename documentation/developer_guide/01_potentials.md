@@ -1,6 +1,6 @@
 # 01 Potential Module Developer Reference
 
-*Updated: 2026-05-05.*
+*Updated: 2026-05-06.*
 
 Potentials are the lowest-level scalar interaction models in the modeling stack. Each potential evaluates one interaction coordinate and exposes parameter derivatives for `compute/`, trainers, and solvers. A potential does not know about MPI, `FrameGeometry`, atom ownership, or workflows.
 
@@ -13,6 +13,7 @@ Potentials are the lowest-level scalar interaction models in the modeling stack.
 | `potentials/base.py` | `BasePotential` and `IteratePotentials()` |
 | `potentials/harmonic.py` | Harmonic bonded / angle potential |
 | `potentials/gaussian.py` | Normalized Gaussian pair potential |
+| `potentials/gated.py` | Hard-concrete gate wrapper for interaction-level sparsity experiments |
 | `potentials/lennardjones.py` | Lennard-Jones 12-6 pair potential |
 | `potentials/lennardjones96.py` | Lennard-Jones 9-6 pair potential |
 | `potentials/lennardjones_soft.py` | Soft-core LJ variant |
@@ -67,6 +68,7 @@ A potential should not own:
 | `BSplinePotential` | Force-basis spline |
 | `GaussianPotential` | Normalized Gaussian |
 | `HarmonicPotential` | Harmonic potential |
+| `GatedPotential`, `wrap_forcefield_with_L0_gates` | Hard-concrete gated interaction wrappers |
 | `LennardJonesPotential` | LJ 12-6 |
 | `LennardJones96Potential` | LJ 9-6 |
 | `LennardJonesSoftPotential` | Soft-core LJ |
@@ -118,6 +120,9 @@ Subclasses should populate:
 | `_dparam_names` | First energy-derivative channel names |
 | `_d2param_names` | Second energy-derivative channel names |
 | `_df_dparam_names` | First force-derivative channel names |
+| `_param_mask` | Optional potential-local trainability mask |
+| `_param_bounds_lb`, `_param_bounds_ub` | Optional potential-local lower/upper bounds |
+| `_metadata_version` | Monotonic version used by `Forcefield` metadata caches |
 | `_param_linear_mask` | Per-parameter linearity mask |
 | `_params_to_scale` | Parameters affected by `get_scaled_potential(z)` |
 
@@ -128,6 +133,8 @@ Subclasses should populate:
 | `get_params()` / `set_params()` | Parameter access |
 | `n_params()` | Number of local scalar parameters |
 | `param_names()` | Parameter labels |
+| `param_mask` | Potential-local trainability mask, defaulting to all trainable |
+| `param_bounds` | Potential-local lower/upper bounds, defaulting to unbounded |
 | `energy_grad(r)` | Stacked `dU/dtheta` channels |
 | `force_grad(r)` | Stacked `dF/dtheta` channels |
 | `energy_grad_sum(r)` | `dU/dtheta` summed over the last coordinate axis |
@@ -218,6 +225,16 @@ These classes expose explicit analytic first and second derivatives.
 | Class | Notes |
 |---|---|
 | `MultiGaussianPotential` | Normalized Gaussian mixture; amplitudes are linear, centers and widths are nonlinear |
+
+### Gated Potential Wrapper
+
+| Class | Notes |
+|---|---|
+| `GatedPotential` | Wraps one inner potential and adds hard-concrete gate parameters for interaction-level L0 sparsity experiments |
+
+`GatedPotential` forwards force/energy channels through the current expected
+gate value and exposes `lammps_params()` so exported analytic coefficients are
+scaled consistently with the active gate.
 | `UnnormalizedMultiGaussianPotential` | Unnormalized LAMMPS-style mixture |
 | `SRLRGaussianPotential` | Gaussian family for short-range / long-range models |
 
@@ -264,20 +281,22 @@ Register a new potential family here when it should be serializable from externa
 
 ## Interaction With `Forcefield`
 
-Potentials do not manage global masks or bounds. That is the responsibility of `Forcefield`.
+Potentials own local masks and bounds; `Forcefield` owns the global ordering,
+metadata caches, and split/assemble operations.
 
 Potentials should provide:
 
 - local parameter vectors
 - local derivative channels
-- optional `param_bounds()` for local bounds
+- optional `param_bounds` for local bounds
+- optional `param_mask` for local trainability
 - linearity information via `_param_linear_mask`
 
 `Forcefield` builds:
 
 - the global parameter vector
-- per-parameter and per-key masks
-- global bounds arrays
+- per-parameter and per-key masks from local masks
+- global bounds arrays from local bounds
 - parameter slices and offsets
 
 ---
@@ -294,7 +313,7 @@ When adding a new potential:
 6. Preserve arbitrary leading batch dimensions and append parameter channels only at the end.
 7. Override `energy_grad_sum_by_sample()` when dense term-by-parameter materialization would be expensive.
 8. Override `gauge_free_energy_grad_sum*()` if the potential has a parameter-dependent additive gauge.
-9. Provide `param_bounds()` when natural bounds exist.
+9. Provide `param_bounds` when natural bounds exist.
 10. Register it in `POTENTIAL_REGISTRY` if it is part of the public style set.
 
 Avoid:

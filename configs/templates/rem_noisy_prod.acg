@@ -1,9 +1,11 @@
-# DOPC step2 REM production config with sim_var (seed randomization).
+# DOPC step2 noisy REM production config.
 #
-# Uses B-spline table fitting with n_coeffs=128 override.
+# This is the REM production template with coordinate-only AA-reference
+# positive-phase noise enabled. Synthetic aa_ref.noise_* is supported for REM
+# and FM only; CDREM/CDFM coordinate perturbations should be expressed through
+# their restrained sampling inputs.
+#
 # sim_var injects random SEED_VEL and SEED_LANG into each LAMMPS run.
-#
-# Reference data paths resolve under data/dopc_ld_Pak2019/.
 
 [system]
 topology_file = ../../data/dopc_ld_Pak2019/topo/cg6.data
@@ -24,7 +26,7 @@ n_epochs = 300
 convergence_tol = 0.0
 temperature = 300.0
 need_hessian = false
-output_dir = ../results/rem/dopc_step2_simvar
+output_dir = ../results/rem/dopc_step2_noisy
 
 [sampling]
 sim_backend = lammps
@@ -62,3 +64,23 @@ trajectory_format = LAMMPSDUMP
 skip_frames = 0
 every = 1
 n_frames = 7500
+
+noise_enabled = true
+noise_samples_per_frame = 4
+noise_sigma = 0.05
+noise_sigma_final = 0.01
+noise_schedule = cosine
+noise_update_interval = 25
+noise_seed = 20260430
+noise_distribution = gaussian
+noise_selection = all
+noise_include_original = true
+noise_wrap = true
+noise_batch_size = 32
+# Neighbor policy: shared is fastest; skin uses cutoff + skin from the
+# unnoised frame; chunk rebuilds once per noise_batch_size chunk.
+noise_neighbor_mode = shared
+noise_neighbor_skin = 0.0
+# Optional: sample after skip_frames/n_frames/every have defined the AA dataset.
+# noise_subsample_per_epoch = 640
+noise_cache_policy = stage

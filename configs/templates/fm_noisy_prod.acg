@@ -1,19 +1,14 @@
-# DOPC step1 Force Matching production config.
+# DOPC step1 noisy Force Matching production config.
 #
-# Trainable FM forcefield built from authored B-spline interaction specs.
-# Output is a bundle of .table files under training.output_dir.
+# This is the FM production template with coordinate-only AA-reference noise
+# enabled. Noisy replicas perturb coordinates; reference forces are broadcast
+# unchanged to all replicas unless noise_force_mix_ratio > 0.
 #
 # Atom-type-pair convention: bond and angle specs use atom-type tuples,
 # NOT topology type_id integers.
-#   bond type 1 (HG-MG)  → types: ["1", "2"]
-#   bond type 2 (MG-T1)  → types: ["2", "3"]
-#   bond type 3 (T1-T2)  → types: ["3", "4"]
-#   angle type 1 (HG-MG-T1) → types: ["1", "2", "3"]
-#   angle type 2 (T1-MG-T1) → types: ["3", "2", "3"]
-#   angle type 3 (MG-T1-T2) → types: ["2", "3", "4"]
 
 [system]
-topology_file = ../../data/reference/topo/cg6.data
+topology_file = ../../data/dopc_ld_Pak2019/topo/cg6.data
 pair_style = table
 cutoff = 25.0
 exclude = 100
@@ -26,7 +21,7 @@ lr = 1.0
 seed = 20260402
 n_epochs = 1
 convergence_tol = 0.0
-output_dir = ../results/force-matching/dopc_step1
+output_dir = ../results/force-matching/dopc_step1_noisy
 
 [training.fm_specs]
 pair_specs = [
@@ -52,25 +47,52 @@ angle_specs = [
     {"types": ["2", "3", "4"], "n_coeffs": 128, "domain": [10.0, 180.0], "degree": 3, "resolution": 0.5}
     ]
 
+[scheduler]
+python_exe = python
+mpirun_path = /software/intel/oneapi_hpc_2023.1/mpi/2021.9.0/bin/mpirun
+
 [aa_ref]
 trajectory_files = [
-    "../../data/reference/traj/cg6_1.lammpstrj",
-    "../../data/reference/traj/cg6_2.lammpstrj",
-    "../../data/reference/traj/cg6_3.lammpstrj",
-    "../../data/reference/traj/cg6_4.lammpstrj",
-    "../../data/reference/traj/cg6_5.lammpstrj",
-    "../../data/reference/traj/cg6_6.lammpstrj",
-    "../../data/reference/traj/cg6_7.lammpstrj",
-    "../../data/reference/traj/cg6_8.lammpstrj",
-    "../../data/reference/traj/cg6_9.lammpstrj",
-    "../../data/reference/traj/cg6_10.lammpstrj",
-    "../../data/reference/traj/cg6_11.lammpstrj",
-    "../../data/reference/traj/cg6_12.lammpstrj",
-    "../../data/reference/traj/cg6_13.lammpstrj",
-    "../../data/reference/traj/cg6_14.lammpstrj",
-    "../../data/reference/traj/cg6_15.lammpstrj"
+    "../../data/dopc_ld_Pak2019/traj/cg6_1.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_2.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_3.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_4.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_5.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_6.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_7.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_8.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_9.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_10.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_11.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_12.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_13.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_14.lammpstrj",
+    "../../data/dopc_ld_Pak2019/traj/cg6_15.lammpstrj"
     ]
 trajectory_format = LAMMPSDUMP
 skip_frames = 0
 every = 1
 n_frames = 7500
+noise_enabled = true
+noise_samples_per_frame = 8
+noise_sigma = 0.05
+noise_schedule = constant
+noise_update_interval = 1
+noise_seed = 20260430
+noise_distribution = gaussian
+noise_selection = all
+noise_include_original = true
+noise_wrap = true
+noise_batch_size = 32
+# Neighbor policy: shared is fastest; skin uses cutoff + skin from the
+# unnoised frame; chunk rebuilds once per noise_batch_size chunk.
+noise_neighbor_mode = shared
+noise_neighbor_skin = 0.0
+# Optional noisy-replica target blend:
+# y = (1 - ratio) * y_ref + ratio * (-delta / (beta * sigma^2)).
+# Requires training.temperature or training.beta when ratio > 0.
+# Keep the default 0.00 for coordinate-only noisy FM.
+noise_force_mix_ratio = 0.00
+# Optional: sample after skip_frames/n_frames/every have defined the AA dataset.
+# noise_subsample_per_epoch = 640
+noise_cache_policy = none

@@ -389,8 +389,9 @@ def WriteLmpFF(
                         if max_force is not None:
                             cap_table_forces(dest_table_file, max_force=max_force)
                     else:
-                        n_param = pot.n_params()
-                        tmp[param_offset : param_offset + n_param] = map(str, pot.get_params())
+                        params = pot.lammps_params() if hasattr(pot, "lammps_params") else pot.get_params()
+                        n_param = len(params)
+                        tmp[param_offset : param_offset + n_param] = map(str, params)
                         lines[i] = "   ".join(tmp) + "\n"
 
         else:
@@ -438,7 +439,7 @@ def WriteLmpFF(
                         fp=fp,
                     )
                 elif bonded_style == "harmonic":
-                    params = list(pot.get_params())
+                    params = list(pot.lammps_params() if hasattr(pot, "lammps_params") else pot.get_params())
                     tmp[3:] = [f"{p:.8g}" for p in params]
                     lines[i] = "   ".join(tmp) + "\n"
 
