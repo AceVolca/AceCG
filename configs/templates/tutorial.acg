@@ -68,7 +68,14 @@ forcefield_path = ../results/vp_growth/test2_all15_every5_forces_48811873/combin
 
 # Optional alternate file used only for parameter masking. If you set it, the
 # parser also needs pair_style so it can interpret the LAMMPS FF mask.
+# Overlay masks can target one potential style, e.g.
+# pair_coeff A B gauss/cut mask 0 1 2
 # forcefield_mask_path = ../path/to/mask.settings
+
+# Optional alternate file used only for parameter bounds. Bounds use lb/ub
+# sections and can also target one overlay potential style, e.g.
+# pair_coeff A B gauss/cut lb None 5 0.3 ub -0.1 15 None
+# forcefield_bounds_path = ../path/to/bounds.settings
 
 # Optional metadata; current workflow code expects LAMMPS-style settings.
 forcefield_format = lammps

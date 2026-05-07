@@ -1,7 +1,7 @@
 """Public I/O package API."""
 
 from .coordinates import build_CG_coords, load_mapping_yaml, write_gro, write_lammps_data, write_pdb
-from .forcefield import ReadLmpFF, ReadLmpFFMask, WriteLmpFF
+from .forcefield import ReadLmpFF, ReadLmpFFBounds, ReadLmpFFMask, WriteLmpFF
 from .logger import ScreenLogger, format_screen_message, get_screen_logger, user_timestamp
 from .tables import (
     cap_table_forces,
@@ -33,6 +33,7 @@ __all__ = [
     "FFParamArray",
     "FFParamIndexMap",
     "ReadLmpFF",
+    "ReadLmpFFBounds",
     "ReadLmpFFMask",
     "WriteLmpFF",
     "parse_lammps_table",

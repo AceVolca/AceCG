@@ -226,6 +226,10 @@ ff.build_mask(mode="freeze", global_patterns=["*k*"])
 ff.build_mask(mode="train", patterns={key: ["r0"]})
 ```
 
+LAMMPS-style mask files may target one potential in an overlay stack by adding
+the potential style before `mask` or `unmask`, for example
+`pair_coeff A B gauss/cut mask 0 1 2`.
+
 ### Bounds
 
 ```python
@@ -236,6 +240,9 @@ L_safe = ff.apply_bounds(L)
 ```
 
 Potentials that implement `param_bounds()` automatically contribute bounds during construction.
+LAMMPS-style bounds files may target one potential in an overlay stack with
+the same style qualifier used by mask files, for example
+`pair_coeff A B gauss/cut lb None 5 0.3 ub -0.1 15 None`.
 
 ### VP Masks
 

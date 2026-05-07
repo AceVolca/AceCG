@@ -85,8 +85,20 @@ class FMTrainingSpecs:
 
 @dataclass(frozen=True)
 class ForcefieldMaskSpec:
-    """Parsed forcefield mask entries keyed by interaction."""
-    entries: Tuple[Tuple["InteractionKey", Tuple[str, ...]], ...] = ()
+    """Parsed forcefield mask entries keyed by interaction and optional style."""
+    entries: Tuple[Tuple["InteractionKey", Optional[str], Tuple[str, ...]], ...] = ()
+
+    def __bool__(self) -> bool:
+        return bool(self.entries)
+
+
+@dataclass(frozen=True)
+class ForcefieldBoundsSpec:
+    """Parsed forcefield bounds entries keyed by interaction and optional style."""
+    entries: Tuple[
+        Tuple["InteractionKey", Optional[str], Tuple[str, ...], Tuple[str, ...]],
+        ...,
+    ] = ()
 
     def __bool__(self) -> bool:
         return bool(self.entries)
@@ -102,6 +114,8 @@ class SystemConfig:
     forcefield_path: Optional[str] = None
     forcefield_mask_path: Optional[str] = None
     forcefield_mask: Optional[ForcefieldMaskSpec] = None
+    forcefield_bounds_path: Optional[str] = None
+    forcefield_bounds: Optional[ForcefieldBoundsSpec] = None
     forcefield_format: Optional[str] = None
     pair_style: Optional[str] = None
     cutoff: Optional[float] = None

@@ -23,6 +23,7 @@ from .tables import (
 )
 _TRUE_MASK_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSE_MASK_TOKENS = frozenset({"0", "false", "no", "off"})
+_BOUND_SECTION_TOKENS = frozenset({"lb", "ub"})
 
 
 def _parse_bool_mask_tokens(tokens: Sequence[str]) -> Optional[np.ndarray]:
@@ -44,17 +45,20 @@ def _parse_pair_mask_spec(
     *,
     pair_style: str,
     pair_typ_sel: Optional[Sequence[str]],
-) -> Optional[tuple[InteractionKey, list[str]]]:
+) -> Optional[tuple[InteractionKey, Optional[str], list[str]]]:
     if len(tokens) < 3 or tokens[0] != "pair_coeff":
         return None
     style = str(pair_style).strip().lower()
+    potential_style: Optional[str] = None
     payload = [str(token) for token in tokens[3:]]
     if style == "hybrid":
         if len(tokens) < 4:
             return None
         style = str(tokens[3]).strip().lower()
+        potential_style = style
         payload = [str(token) for token in tokens[4:]]
     elif payload and payload[0].strip().lower() == style:
+        potential_style = style
         payload = payload[1:]
 
     if pair_typ_sel is not None:
@@ -62,16 +66,17 @@ def _parse_pair_mask_spec(
         if style not in allowed:
             return None
 
-    return InteractionKey.pair(tokens[1], tokens[2]), payload
+    return InteractionKey.pair(tokens[1], tokens[2]), potential_style, payload
 
 
 def _parse_bonded_mask_spec(
     tokens: Sequence[str],
-) -> Optional[tuple[InteractionKey, list[str]]]:
+) -> Optional[tuple[InteractionKey, Optional[str], list[str]]]:
     if len(tokens) < 3 or tokens[0] not in {"bond_coeff", "angle_coeff"}:
         return None
     kind = tokens[0].split("_", 1)[0]
-    return InteractionKey(style=kind, types=(str(tokens[1]),)), [str(token) for token in tokens[3:]]
+    potential_style = str(tokens[2]).strip().lower()
+    return InteractionKey(style=kind, types=(str(tokens[1]),)), potential_style, [str(token) for token in tokens[3:]]
 
 
 def _looks_like_mask_payload(payload_tokens: Sequence[str]) -> bool:
@@ -83,13 +88,40 @@ def _looks_like_mask_payload(payload_tokens: Sequence[str]) -> bool:
     return _parse_bool_mask_tokens(payload) is not None
 
 
+def _parse_bounds_payload(
+    payload_tokens: Sequence[str],
+) -> Optional[tuple[tuple[str, ...], tuple[str, ...]]]:
+    payload = [str(token) for token in payload_tokens]
+    if not payload:
+        return None
+
+    values: dict[str, list[str]] = {"lb": [], "ub": []}
+    seen: set[str] = set()
+    current: Optional[str] = None
+    for token in payload:
+        lowered = token.strip().lower()
+        if lowered in _BOUND_SECTION_TOKENS:
+            if lowered in seen:
+                raise ValueError(f"Duplicate bounds section {lowered!r}.")
+            seen.add(lowered)
+            current = lowered
+            continue
+        if current is None:
+            return None
+        values[current].append(token)
+
+    if not seen:
+        return None
+    return tuple(values["lb"]), tuple(values["ub"])
+
+
 def _read_lmpffmask_spec(
     file: str,
     pair_style: str,
     pair_typ_sel: Optional[Sequence[str]] = None,
-) -> tuple[tuple[InteractionKey, tuple[str, ...]], ...]:
-    entries: list[tuple[InteractionKey, tuple[str, ...]]] = []
-    seen: set[InteractionKey] = set()
+) -> tuple[tuple[InteractionKey, Optional[str], tuple[str, ...]], ...]:
+    entries: list[tuple[InteractionKey, Optional[str], tuple[str, ...]]] = []
+    seen: set[tuple[InteractionKey, Optional[str]]] = set()
 
     with open(file, "r", encoding="utf-8") as handle:
         for raw_line in handle:
@@ -110,13 +142,57 @@ def _read_lmpffmask_spec(
             if parsed is None:
                 continue
 
-            key, payload = parsed
+            key, potential_style, payload = parsed
             if not _looks_like_mask_payload(payload):
                 continue
-            if key in seen:
-                raise ValueError(f"Duplicate mask entry for {key.label()} in {file!r}.")
-            seen.add(key)
-            entries.append((key, tuple(payload)))
+            seen_key = (key, potential_style)
+            if seen_key in seen:
+                style_label = f" {potential_style}" if potential_style else ""
+                raise ValueError(f"Duplicate mask entry for {key.label()}{style_label} in {file!r}.")
+            seen.add(seen_key)
+            entries.append((key, potential_style, tuple(payload)))
+
+    return tuple(entries)
+
+
+def _read_lmpffbounds_spec(
+    file: str,
+    pair_style: str,
+    pair_typ_sel: Optional[Sequence[str]] = None,
+) -> tuple[tuple[InteractionKey, Optional[str], tuple[str, ...], tuple[str, ...]], ...]:
+    entries: list[tuple[InteractionKey, Optional[str], tuple[str, ...], tuple[str, ...]]] = []
+    seen: set[tuple[InteractionKey, Optional[str]]] = set()
+
+    with open(file, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            body = raw_line.split("#", 1)[0].strip()
+            if not body:
+                continue
+            tokens = body.split()
+            if not tokens:
+                continue
+
+            parsed = _parse_pair_mask_spec(
+                tokens,
+                pair_style=pair_style,
+                pair_typ_sel=pair_typ_sel,
+            )
+            if parsed is None:
+                parsed = _parse_bonded_mask_spec(tokens)
+            if parsed is None:
+                continue
+
+            key, potential_style, payload = parsed
+            bounds_payload = _parse_bounds_payload(payload)
+            if bounds_payload is None:
+                continue
+            seen_key = (key, potential_style)
+            if seen_key in seen:
+                style_label = f" {potential_style}" if potential_style else ""
+                raise ValueError(f"Duplicate bounds entry for {key.label()}{style_label} in {file!r}.")
+            seen.add(seen_key)
+            lb_tokens, ub_tokens = bounds_payload
+            entries.append((key, potential_style, lb_tokens, ub_tokens))
 
     return tuple(entries)
 
@@ -150,6 +226,107 @@ def ReadLmpFFMask(
         str(pair_style),
         pair_typ_sel=pair_typ_sel,
     ))
+
+
+def ReadLmpFFBounds(
+    file: str,
+    pair_style: str,
+    pair_typ_sel: Optional[List[str]] = None,
+) -> Any:
+    """Read an AceCG forcefield-bounds file.
+
+    Bounds entries use ``lb`` and/or ``ub`` sections after the optional
+    potential style, for example ``pair_coeff A B gauss/cut lb None 5 0.3 ub
+    -0.1 15 None``. ``None`` leaves that side unbounded for one parameter.
+    """
+    from ..configs.models import ForcefieldBoundsSpec
+
+    return ForcefieldBoundsSpec(entries=_read_lmpffbounds_spec(
+        file,
+        str(pair_style),
+        pair_typ_sel=pair_typ_sel,
+    ))
+
+
+def _set_lmpff_potential_style(pot: BasePotential, style: str) -> BasePotential:
+    """Attach the source LAMMPS style used by mask selectors."""
+    setattr(pot, "_acecg_lammps_style", str(style).strip().lower())
+    return pot
+
+
+def _append_lmpff_potential(
+    forcefield: Dict[InteractionKey, List[BasePotential]],
+    key: InteractionKey,
+    pot: BasePotential,
+    style: str,
+) -> None:
+    """Append a parsed potential, preserving overlay stacks for one key."""
+    forcefield.setdefault(key, []).append(_set_lmpff_potential_style(pot, style))
+
+
+def _lmpff_potential_style_labels(pot: BasePotential) -> set[str]:
+    """Return LAMMPS-style labels for selecting one potential from an overlay."""
+
+    def explicit_labels(obj: Any) -> set[str]:
+        labels: set[str] = set()
+        for attr in ("_acecg_lammps_style", "_acecg_style", "lammps_style"):
+            value = getattr(obj, attr, None)
+            if callable(value):
+                value = value()
+            if value is None:
+                continue
+            if isinstance(value, str):
+                labels.add(value.strip().lower())
+            elif isinstance(value, Sequence):
+                labels.update(str(item).strip().lower() for item in value)
+        return {label for label in labels if label}
+
+    labels = explicit_labels(pot)
+    wrapped = getattr(pot, "potential", None)
+    if wrapped is not None and wrapped is not pot:
+        labels.update(explicit_labels(wrapped))
+    if labels:
+        return labels
+
+    targets = [pot]
+    if wrapped is not None and wrapped is not pot:
+        targets.insert(0, wrapped)
+    inferred: set[str] = set()
+    for target in targets:
+        for candidate_style, cls in POTENTIAL_REGISTRY.items():
+            if isinstance(target, cls):
+                inferred.add(str(candidate_style).strip().lower())
+    return inferred
+
+
+def _select_lmpff_potential(
+    value: BasePotential | List[BasePotential],
+    style: str,
+    key: InteractionKey,
+) -> BasePotential:
+    pots = value if isinstance(value, list) else [value]
+    if len(pots) == 1:
+        return pots[0]
+    style_norm = str(style).strip().lower()
+    matches = [pot for pot in pots if style_norm in _lmpff_potential_style_labels(pot)]
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        available = sorted(
+            {
+                label
+                for pot in pots
+                for label in _lmpff_potential_style_labels(pot)
+            }
+        )
+        raise KeyError(
+            f"No potential with style {style!r} found for {key.label()}. "
+            f"Available styles: {available}"
+        )
+    raise KeyError(
+        f"Multiple potentials with style {style!r} found for {key.label()}; "
+        "style-qualified LAMMPS writing is ambiguous."
+    )
 
 
 def ReadLmpFF(
@@ -237,7 +414,7 @@ def ReadLmpFF(
                         fitter_overrides["bonded"] = False
                     fitter = TABLE_FITTERS.create(table_fit, **fitter_overrides)
                     pot = fitter.fit(table_file, typ1=pair.types[0], typ2=pair.types[1])
-                    forcefield[pair] = [pot]
+                    _append_lmpff_potential(forcefield, pair, pot, style)
                 elif style in POTENTIAL_REGISTRY:
                     constructor = POTENTIAL_REGISTRY[style]
                     params = list(map(float, tmp[param_offset:]))
@@ -246,9 +423,7 @@ def ReadLmpFF(
                             gauss_params, cutoff = params[:-1], params[-1]
                         else:
                             gauss_params = params[:]
-                        forcefield[pair] = [
-                            constructor(pair.types[0], pair.types[1], 2, cutoff, gauss_params)
-                        ]
+                        pot = constructor(pair.types[0], pair.types[1], 2, cutoff, gauss_params)
                     elif style == "lj/cut/soft":
                         if cutoff is not None:
                             params.append(cutoff)
@@ -256,11 +431,12 @@ def ReadLmpFF(
                             raise ValueError("global_var is required for lj/cut/soft force fields")
                         params.append(global_var["n"])
                         params.append(global_var["alpha"])
-                        forcefield[pair] = [constructor(pair.types[0], pair.types[1], *params)]
+                        pot = constructor(pair.types[0], pair.types[1], *params)
                     else:
                         if cutoff is not None:
                             params.append(cutoff)
-                        forcefield[pair] = [constructor(pair.types[0], pair.types[1], *params)]
+                        pot = constructor(pair.types[0], pair.types[1], *params)
+                    _append_lmpff_potential(forcefield, pair, pot, style)
 
         else:
             for coeff_kw, kind in (("bond_coeff", "bond"), ("angle_coeff", "angle")):
@@ -285,7 +461,7 @@ def ReadLmpFF(
                         fitter_overrides["bonded"] = True
                     fitter = TABLE_FITTERS.create(table_fit, **fitter_overrides)
                     pot = fitter.fit(table_file, typ1=key.types[0], typ2=key.types[-1])
-                    forcefield[key] = [pot]
+                    forcefield[key] = [_set_lmpff_potential_style(pot, bonded_style)]
 
                 elif bonded_style == "harmonic" and len(tmp) >= 5:
                     from ..potentials.harmonic import HarmonicPotential
@@ -297,7 +473,7 @@ def ReadLmpFF(
                     typ2 = key.types[-1]
                     typ3 = key.types[1] if kind == "angle" and len(key.types) == 3 else None
                     pot = HarmonicPotential(typ1, typ2, k_val, r0_val, typ3=typ3, scale=scale)
-                    forcefield[key] = [pot]
+                    forcefield[key] = [_set_lmpff_potential_style(pot, bonded_style)]
 
     return Forcefield(forcefield)
 
@@ -363,9 +539,7 @@ def WriteLmpFF(
 
             if pair_typ_sel is None or style in pair_typ_sel:
                 if lookup_key in forcefield:
-                    pot = forcefield[lookup_key]
-                    if isinstance(pot, list):
-                        pot = pot[0]
+                    pot = _select_lmpff_potential(forcefield[lookup_key], style, lookup_key)
                     if style == "table":
                         table_token = tmp[param_offset]
                         source_table_file = table_token
@@ -409,10 +583,8 @@ def WriteLmpFF(
                     lookup_key = bonded_type_id_to_key.get(int(type_num) - 1, lookup_key)
                 if lookup_key not in forcefield:
                     continue
-                pot = forcefield[lookup_key]
-                if isinstance(pot, list):
-                    pot = pot[0]
                 bonded_style = tmp[2] if len(tmp) > 2 else ""
+                pot = _select_lmpff_potential(forcefield[lookup_key], bonded_style, lookup_key)
                 if bonded_style == "table":
                     table_token = tmp[3]
                     source_table_file = table_token
@@ -526,6 +698,7 @@ __all__ = [
     "FFParamArray",
     "FFParamIndexMap",
     "ReadLmpFF",
+    "ReadLmpFFBounds",
     "ReadLmpFFMask",
     "WriteLmpFF",
     "resolve_source_table_entries",

@@ -33,6 +33,7 @@ from ..optimizers import (
     NewtonRaphsonOptimizer,
     RMSpropMaskedOptimizer,
 )
+from ..potentials import POTENTIAL_REGISTRY
 from ..schedulers.resource_pool import ResourcePool
 from ..topology.forcefield import Forcefield
 from ..topology.topology_array import TopologyArrays, collect_topology_arrays
@@ -214,34 +215,58 @@ class BaseWorkflow(ABC):
         query = str(raw if raw.is_absolute() else self._config_base_dir() / raw)
         return [Path(match).resolve(strict=False) for match in sorted(glob.glob(query))]
 
+    def _forcefield_style_blocks(self, forcefield: Forcefield) -> dict[Any, dict[str, Any]]:
+        blocks: dict[Any, dict[str, Any]] = {}
+        offset = 0
+        for key, val in forcefield.items():
+            pots = val if isinstance(val, list) else [val]
+            block_start = offset
+            segments = []
+            for pot_index, pot in enumerate(pots):
+                n_local = pot.n_params()
+                segments.append(
+                    {
+                        "slice": slice(offset, offset + n_local),
+                        "styles": self._potential_mask_style_labels(pot),
+                        "pot_index": pot_index,
+                    }
+                )
+                offset += n_local
+            blocks[key] = {"slice": slice(block_start, offset), "segments": segments}
+        return blocks
+
     def _build_forcefield_mask(self, forcefield: Forcefield) -> np.ndarray:
         mask_spec = self.config.system.forcefield_mask
         param_mask = np.ones(forcefield.n_params(), dtype=bool)
         if not mask_spec:
             return param_mask
 
-        blocks = {}
-        offset = 0
-        for key, val in forcefield.items():
-            pots = val if isinstance(val, list) else [val]
-            block_n = sum(p.n_params() for p in pots)
-            blocks[key] = slice(offset, offset + block_n)
-            offset += block_n
+        blocks = self._forcefield_style_blocks(forcefield)
 
         true_tokens = {"1", "true", "yes", "on"}
         false_tokens = {"0", "false", "no", "off"}
 
-        def parse_local_mask(payload: tuple[str, ...], size: int, key: Any) -> np.ndarray:
+        def entry_label(key: Any, potential_style: Optional[str]) -> str:
+            label = key.label() if hasattr(key, "label") else str(key)
+            return f"{label} {potential_style}" if potential_style else label
+
+        def parse_local_mask(
+            payload: tuple[str, ...],
+            size: int,
+            key: Any,
+            potential_style: Optional[str] = None,
+        ) -> np.ndarray:
             if not payload:
                 return np.ones(size, dtype=bool)
 
             mode = payload[0].strip().lower()
             if mode in {"mask", "unmask"}:
-                spec = "".join(payload[1:]).strip().lower()
-                if not spec:
+                index_tokens = tuple(str(token).strip().lower() for token in payload[1:])
+                if not index_tokens:
                     raise ValueError(
-                        f"{key.label()} uses '{mode}' but provides no index range."
+                        f"{entry_label(key, potential_style)} uses '{mode}' but provides no index range."
                     )
+                spec = ",".join(index_tokens).strip()
                 if spec == "all":
                     selected = np.ones(size, dtype=bool)
                 elif spec == "none":
@@ -249,10 +274,10 @@ class BaseWorkflow(ABC):
                 else:
                     selected = np.zeros(size, dtype=bool)
                     all_idx = np.arange(size, dtype=np.int64)
-                    for part in spec.split(","):
-                        field = part.strip()
-                        if not field:
-                            continue
+                    fields = []
+                    for token in index_tokens:
+                        fields.extend(part.strip() for part in token.split(",") if part.strip())
+                    for field in fields:
                         if ":" in field:
                             start_text, stop_text = field.split(":", 1)
                             start = int(start_text) if start_text else None
@@ -265,7 +290,7 @@ class BaseWorkflow(ABC):
                         if idx < 0 or idx >= size:
                             raise IndexError(
                                 f"Mask index {field!r} is out of range for "
-                                f"{key.label()} with {size} parameters."
+                                f"{entry_label(key, potential_style)} with {size} parameters."
                             )
                         selected[idx] = True
                 local_mask = np.ones(size, dtype=bool) if mode == "mask" else np.zeros(size, dtype=bool)
@@ -281,25 +306,226 @@ class BaseWorkflow(ABC):
                 if lowered in false_tokens:
                     values.append(False)
                     continue
-                raise ValueError(f"Invalid mask payload for {key.label()}: {payload!r}")
+                raise ValueError(f"Invalid mask payload for {entry_label(key, potential_style)}: {payload!r}")
             local_mask = np.asarray(values, dtype=bool)
             if local_mask.shape != (size,):
                 raise ValueError(
-                    f"{key.label()} mask length {local_mask.size} does not match "
+                    f"{entry_label(key, potential_style)} mask length {local_mask.size} does not match "
                     f"the current parameter block size {size}."
                 )
             return local_mask
 
-        for key, payload in mask_spec.entries:
-            block = blocks.get(key)
-            if block is None:
+        for entry in mask_spec.entries:
+            if len(entry) == 2:
+                key, payload = entry
+                potential_style = None
+            else:
+                key, potential_style, payload = entry
+            block_info = blocks.get(key)
+            if block_info is None:
                 raise KeyError(
                     f"Mask entry for {key.label()} does not match any interaction "
                     "in the current forcefield."
                 )
-            param_mask[block] = parse_local_mask(payload, block.stop - block.start, key)
+            if potential_style is None:
+                block = block_info["slice"]
+                param_mask[block] = parse_local_mask(payload, block.stop - block.start, key)
+                continue
+
+            style_norm = str(potential_style).strip().lower()
+            matches = [
+                segment
+                for segment in block_info["segments"]
+                if style_norm in segment["styles"]
+            ]
+            if not matches:
+                available = sorted(
+                    {
+                        style
+                        for segment in block_info["segments"]
+                        for style in segment["styles"]
+                    }
+                )
+                raise KeyError(
+                    f"Mask entry for {key.label()} style {potential_style!r} "
+                    f"does not match any potential in the current forcefield. "
+                    f"Available styles: {available}"
+                )
+            local_size = sum(segment["slice"].stop - segment["slice"].start for segment in matches)
+            local_mask = parse_local_mask(payload, local_size, key, potential_style)
+            local_offset = 0
+            for segment in matches:
+                sl = segment["slice"]
+                n_local = sl.stop - sl.start
+                param_mask[sl] = local_mask[local_offset:local_offset + n_local]
+                local_offset += n_local
 
         return param_mask
+
+    def _build_forcefield_bounds(self, forcefield: Forcefield) -> tuple[np.ndarray, np.ndarray]:
+        bounds_spec = self.config.system.forcefield_bounds
+        lb, ub = forcefield.param_bounds
+        lb = lb.copy()
+        ub = ub.copy()
+        if not bounds_spec:
+            return lb, ub
+
+        blocks = self._forcefield_style_blocks(forcefield)
+        none_tokens = {"none", "null", "na", "n/a", "*"}
+
+        def entry_label(key: Any, potential_style: Optional[str]) -> str:
+            label = key.label() if hasattr(key, "label") else str(key)
+            return f"{label} {potential_style}" if potential_style else label
+
+        def parse_bound_tokens(
+            tokens: tuple[str, ...],
+            size: int,
+            *,
+            lower: bool,
+            key: Any,
+            potential_style: Optional[str],
+        ) -> Optional[np.ndarray]:
+            if not tokens:
+                return None
+            if len(tokens) != size:
+                side = "lb" if lower else "ub"
+                raise ValueError(
+                    f"{entry_label(key, potential_style)} {side} length {len(tokens)} "
+                    f"does not match the current parameter block size {size}."
+                )
+            values = []
+            for token in tokens:
+                lowered = str(token).strip().lower()
+                if lowered in none_tokens:
+                    values.append(-np.inf if lower else np.inf)
+                    continue
+                try:
+                    values.append(float(token))
+                except ValueError as exc:
+                    side = "lb" if lower else "ub"
+                    raise ValueError(
+                        f"Invalid {side} token {token!r} for "
+                        f"{entry_label(key, potential_style)}."
+                    ) from exc
+            return np.asarray(values, dtype=float)
+
+        def apply_to_slices(
+            slices: list[slice],
+            key: Any,
+            potential_style: Optional[str],
+            lb_tokens: tuple[str, ...],
+            ub_tokens: tuple[str, ...],
+        ) -> None:
+            local_size = sum(sl.stop - sl.start for sl in slices)
+            local_lb = parse_bound_tokens(
+                lb_tokens,
+                local_size,
+                lower=True,
+                key=key,
+                potential_style=potential_style,
+            )
+            local_ub = parse_bound_tokens(
+                ub_tokens,
+                local_size,
+                lower=False,
+                key=key,
+                potential_style=potential_style,
+            )
+            local_offset = 0
+            for sl in slices:
+                n_local = sl.stop - sl.start
+                if local_lb is not None:
+                    lb[sl] = local_lb[local_offset:local_offset + n_local]
+                if local_ub is not None:
+                    ub[sl] = local_ub[local_offset:local_offset + n_local]
+                local_offset += n_local
+
+        for key, potential_style, lb_tokens, ub_tokens in bounds_spec.entries:
+            block_info = blocks.get(key)
+            if block_info is None:
+                raise KeyError(
+                    f"Bounds entry for {key.label()} does not match any interaction "
+                    "in the current forcefield."
+                )
+            if potential_style is None:
+                apply_to_slices([block_info["slice"]], key, None, lb_tokens, ub_tokens)
+                continue
+
+            style_norm = str(potential_style).strip().lower()
+            matches = [
+                segment
+                for segment in block_info["segments"]
+                if style_norm in segment["styles"]
+            ]
+            if not matches:
+                available = sorted(
+                    {
+                        style
+                        for segment in block_info["segments"]
+                        for style in segment["styles"]
+                    }
+                )
+                raise KeyError(
+                    f"Bounds entry for {key.label()} style {potential_style!r} "
+                    f"does not match any potential in the current forcefield. "
+                    f"Available styles: {available}"
+                )
+            apply_to_slices(
+                [segment["slice"] for segment in matches],
+                key,
+                potential_style,
+                lb_tokens,
+                ub_tokens,
+            )
+
+        if np.any(lb > ub):
+            bad = int(np.flatnonzero(lb > ub)[0])
+            raise ValueError(
+                f"Forcefield bounds lower entry exceeds upper entry at parameter index {bad}: "
+                f"lb={lb[bad]}, ub={ub[bad]}."
+            )
+        return lb, ub
+
+    def _apply_forcefield_bounds(self, forcefield: Forcefield) -> None:
+        if self.config.system.forcefield_bounds is None:
+            return
+        forcefield.param_bounds = self._build_forcefield_bounds(forcefield)
+        forcefield.update_params(forcefield.apply_bounds(forcefield.param_array()))
+
+    @staticmethod
+    def _potential_mask_style_labels(potential: Any) -> set[str]:
+        """Return LAMMPS-style labels usable by forcefield mask files."""
+
+        def explicit_labels(obj: Any) -> set[str]:
+            labels: set[str] = set()
+            for attr in ("_acecg_lammps_style", "_acecg_style", "lammps_style"):
+                value = getattr(obj, attr, None)
+                if callable(value):
+                    value = value()
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    labels.add(value.strip().lower())
+                elif isinstance(value, Sequence):
+                    labels.update(str(item).strip().lower() for item in value)
+            return {label for label in labels if label}
+
+        labels = explicit_labels(potential)
+        wrapped = getattr(potential, "potential", None)
+        if wrapped is not None and wrapped is not potential:
+            labels.update(explicit_labels(wrapped))
+        if labels:
+            return labels
+
+        targets = [potential]
+        if wrapped is not None and wrapped is not potential:
+            targets.insert(0, wrapped)
+        inferred: set[str] = set()
+        for target in targets:
+            for style, cls in POTENTIAL_REGISTRY.items():
+                if isinstance(target, cls):
+                    inferred.add(str(style).strip().lower())
+        return inferred
 
     def _build_optimizer(
         self,

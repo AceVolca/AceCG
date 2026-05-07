@@ -28,7 +28,7 @@ from .utils import (
     parse_exclude_setting,
     parse_pair_style_options,
 )
-from ..io.forcefield import ReadLmpFFMask
+from ..io.forcefield import ReadLmpFFBounds, ReadLmpFFMask
 from ..topology.types import InteractionKey
 
 
@@ -66,6 +66,7 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
             "topology_file",
             "forcefield_path",
             "forcefield_mask_path",
+            "forcefield_bounds_path",
             "forcefield_format",
             "pair_style",
             "cutoff",
@@ -344,6 +345,7 @@ def build_acg_config(
     topology_file = _pop_optional_str(system_raw, "topology_file")
     forcefield_path = _pop_optional_str(system_raw, "forcefield_path")
     forcefield_mask_path = _pop_optional_str(system_raw, "forcefield_mask_path")
+    forcefield_bounds_path = _pop_optional_str(system_raw, "forcefield_bounds_path")
     forcefield_format = _pop_optional_str(system_raw, "forcefield_format")
     pair_style = _pop_optional_str(system_raw, "pair_style")
 
@@ -369,11 +371,34 @@ def build_acg_config(
                 f"Failed to parse forcefield mask from {mask_path}: {exc}"
             ) from exc
 
+    forcefield_bounds = None
+    if forcefield_bounds_path is not None:
+        if pair_style is None:
+            raise ACGConfigError(
+                "system.pair_style is required to parse the forcefield bounds."
+            )
+        pair_kind, sel_styles = parse_pair_style_options(pair_style)
+        bounds_path = Path(forcefield_bounds_path)
+        if not bounds_path.is_absolute():
+            bounds_path = (path.parent / bounds_path).resolve()
+        try:
+            forcefield_bounds = ReadLmpFFBounds(
+                str(bounds_path),
+                pair_kind,
+                pair_typ_sel=sel_styles,
+            )
+        except Exception as exc:
+            raise ACGConfigError(
+                f"Failed to parse forcefield bounds from {bounds_path}: {exc}"
+            ) from exc
+
     system = SystemConfig(
         topology_file=topology_file,
         forcefield_path=forcefield_path,
         forcefield_mask_path=forcefield_mask_path,
         forcefield_mask=forcefield_mask,
+        forcefield_bounds_path=forcefield_bounds_path,
+        forcefield_bounds=forcefield_bounds,
         forcefield_format=forcefield_format,
         pair_style=pair_style,
         cutoff=_pop_optional_float(system_raw, "cutoff"),

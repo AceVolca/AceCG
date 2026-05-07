@@ -291,6 +291,7 @@ class FMMatrixSolver(BaseSolver):
                 )
                 meta.update(bayes_meta)
 
+        theta = self.forcefield.apply_bounds(theta)
         loss = _loss(JtJ, Jty, y_sumsq, theta)
         self.update_forcefield(theta)
         if self.logger is not None:

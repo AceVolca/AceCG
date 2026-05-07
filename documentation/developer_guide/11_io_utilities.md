@@ -54,9 +54,30 @@ Developer contract:
 | Function | Purpose |
 |---|---|
 | `ReadLmpFFMask()` | Parse authored forcefield mask files |
+| `ReadLmpFFBounds()` | Parse authored forcefield bounds files |
 | `ReadLmpFF()` | Read a `Forcefield` from LAMMPS-style settings |
 | `WriteLmpFF()` | Write the current `Forcefield` to new settings / table files |
 | `resolve_source_table_entries()` | Resolve original table tokens and table names for FM source-table paths |
+
+Mask files accept style-qualified entries so overlay stacks can be masked per potential:
+
+```text
+pair_coeff A B gauss/cut mask 0 1 2
+pair_coeff A B lj/cut unmask all
+```
+
+Without a style token, the mask entry applies to the full concatenated parameter block for that interaction key.
+
+Bounds files use the same interaction/style selector and then `lb` / `ub`
+sections. `None` means unbounded on that side for one parameter:
+
+```text
+pair_coeff A B gauss/cut lb None 5 0.3 ub -0.1 15 None
+pair_coeff A B lj/cut lb 0 None ub 2 2
+```
+
+After workflow construction applies `system.forcefield_bounds_path`, the
+current parameter vector is clamped into the configured bounds.
 
 `ReadLmpFF()` has two important conventions:
 

@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Optional, Tuple
 
+from ..potentials import POTENTIAL_REGISTRY
+
 
 _FRAME_DATA_FILE_RE = re.compile(r"^frame_(\d+)\.data$")
 
@@ -100,10 +102,11 @@ def parse_pair_style_options(
         return "table", None
     head = tokens[0].strip().lower()
     if head.startswith("hybrid"):
-        sel_styles: list[str] = []
-        if "table" in tokens[1:]:
-            sel_styles.append("table")
-        if not sel_styles and len(tokens) > 1:
-            sel_styles.append(tokens[1])
+        known_styles = {str(style).strip().lower() for style in POTENTIAL_REGISTRY}
+        sel_styles = [
+            token.strip().lower()
+            for token in tokens[1:]
+            if token.strip().lower() in known_styles
+        ]
         return "hybrid", sel_styles or None
     return head, None

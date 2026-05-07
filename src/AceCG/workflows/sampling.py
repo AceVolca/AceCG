@@ -149,6 +149,8 @@ class SamplingWorkflow(BaseWorkflow):
             self.forcefield.set_vp_masks(self.config.vp.vp_names)
         if self.config.system.forcefield_mask is not None:
             self.forcefield.build_mask(init_mask=self._build_forcefield_mask(self.forcefield))
+        if self.config.system.forcefield_bounds is not None:
+            self._apply_forcefield_bounds(self.forcefield)
         self.resource_pool = self._build_resource_pool()
         self.scheduler = self._build_scheduler()
         self.sampler = self._build_sampler()

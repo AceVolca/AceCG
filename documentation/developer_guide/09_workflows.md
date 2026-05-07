@@ -72,6 +72,7 @@ Important shared helpers:
 | `_build_optimizer()` | Selects optimizer from `training.optimizer` / `training.trainer` |
 | `_build_resource_pool()` | Discovers MPI backend and CPU resources from environment and scheduler config |
 | `_build_forcefield_mask()` | Compiles `[system] forcefield_mask` into runtime `param_mask` |
+| `_build_forcefield_bounds()` | Compiles `[system] forcefield_bounds` into runtime `param_bounds` |
 
 Important development rule: `BaseWorkflow.run()` remains abstract. Real training loops belong in concrete workflow classes.
 
@@ -82,7 +83,7 @@ Important development rule: `BaseWorkflow.run()` remains abstract. Real training
 `SamplingWorkflow` is the shared base for REM, CDREM, and CDFM. It adds:
 
 - `ReadLmpFF()` force-field loading
-- combination of VP mask and user `forcefield_mask`
+- combination of VP mask, user `forcefield_mask`, and user `forcefield_bounds`
 - `TaskScheduler` and `BaseSampler` / `ConditionedSampler` construction
 - unified `beta = 1 / (k_B T)` derivation
 - AA reference-data strategy and workflow checkpoint I/O
