@@ -1,7 +1,14 @@
 # AceCG: A Comprehensive Engine for Coarse-Graining
 
-AceCG is a versatile and MPI-enabled coarse-graining force-field training engine for workflows such as
-FM, REM, Reweighted REM, MSE, CDREM and VP growth.
+AceCG is a versatile and MPI-enabled coarse-graining force-field training engine.
+
+Currently, we support:
+- Force-Matching (FM)
+- Denoising Score Matching (DSM)
+- Relative Entropy Minimization (REM)
+- Virtual Particle workflows
+
+The software is now built on LAMMPS. We will be adding OpenMM and Neural Network Potential Interfaces soon.
 
 ## Quick Start
 
