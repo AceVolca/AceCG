@@ -153,6 +153,11 @@ def finalize_step_root(step: Dict[str, Any], state: Dict[str, Any]) -> Dict[str,
     if "y_eff" in step and "y_eff" not in state:
         state = dict(state)
         state["y_eff"] = step["y_eff"]
+    if canonical_step_mode(step) == "cdfm_zbx":
+        for key in ("mode", "beta"):
+            if key in step and key not in state:
+                state = dict(state)
+                state[key] = step[key]
     return _ops(step).finalize(state)
 
 
