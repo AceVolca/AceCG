@@ -1,5 +1,7 @@
 # AceCG: A Comprehensive Engine for Coarse-Graining
 
+<img width="752" height="591" alt="image" src="https://github.com/user-attachments/assets/5ea05560-34f4-438c-b332-58ba576080fa" />
+
 AceCG is a versatile and MPI-enabled coarse-graining force-field training engine.
 
 Currently, we support:
