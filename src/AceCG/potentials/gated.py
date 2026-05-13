@@ -124,7 +124,7 @@ class GatedPotential(BasePotential):
 
     def _refresh_metadata(self) -> None:
         self._param_names = list(self.potential.param_names()) + ["log_alpha"]
-        self._dparam_names = []
+        self._dparam_names = list(self.potential.dparam_names()) + ["dlog_alpha"]
         self._d2param_names = []
         if hasattr(self.potential, "cutoff"):
             self.cutoff = getattr(self.potential, "cutoff")

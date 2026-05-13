@@ -29,7 +29,13 @@ from .solvers.base import BaseSolver
 from .solvers.fm_matrix import FMMatrixSolver
 
 # I/O
-from .io.forcefield import ReadLmpFF, write_lammps_table, WriteLmpFF
+from .io.forcefield import (
+    ReadLmpFF,
+    ReadLmpFFBounds,
+    ReadLmpFFMask,
+    write_lammps_table,
+    WriteLmpFF,
+)
 
 # Compute
 from .compute.registry import build_default_engine
@@ -88,6 +94,8 @@ __all__ = [
     "FMMatrixSolver",
     # I/O
     "ReadLmpFF",
+    "ReadLmpFFBounds",
+    "ReadLmpFFMask",
     "write_lammps_table",
     "WriteLmpFF",
     # Compute
