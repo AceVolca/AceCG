@@ -150,6 +150,10 @@ def finalize_step_root(step: Dict[str, Any], state: Dict[str, Any]) -> Dict[str,
     # Re-inject per-step inputs that the reduce plan does not carry (e.g.
     # the rank-0 broadcast y_eff vector for cdfm_zbx). These are constant
     # across ranks and already live on the step dict.
+    for key in ("reduce_stack", "need_hessian"):
+        if key in step and key not in state:
+            state = dict(state)
+            state[key] = step[key]
     if "y_eff" in step and "y_eff" not in state:
         state = dict(state)
         state["y_eff"] = step["y_eff"]
