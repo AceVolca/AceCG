@@ -42,7 +42,7 @@ from .tables import (
 )
 
 
-# ─── Public API ─────────────────────────────────────────────────────
+# ── Public API ─────────────────────────────────────────────────────
 
 
 def build_vp_forcefield(vp_config: VPConfig, template: VPTopologyTemplate) -> Forcefield:
@@ -313,7 +313,7 @@ def write_latent_settings(
     return final_path
 
 
-# ─── Pair resolution ────────────────────────────────────────────────
+# ── Pair resolution ────────────────────────────────────────────────
 
 
 def _resolve_vp_pair_definitions(
@@ -356,7 +356,7 @@ def _is_table(pdef: VPInteractionDef) -> bool:
     return False
 
 
-# ─── Pair potential construction ────────────────────────────────────
+# ── Pair potential construction ────────────────────────────────────
 
 
 def _build_pair_potential(key: InteractionKey, interaction: VPInteractionDef) -> BasePotential:

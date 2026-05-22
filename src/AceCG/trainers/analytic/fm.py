@@ -1,4 +1,3 @@
-# AceCG/trainers/analytic/fm.py
 """Force-matching trainer."""
 
 from __future__ import annotations
@@ -17,9 +16,7 @@ except ImportError:
     from typing_extensions import TypedDict, NotRequired
 
 
-# -----------------------------------------------------------------------------
-# TypedDict schema
-# -----------------------------------------------------------------------------
+# ── TypedDict schema ───────────────────────────────────────────────
 
 class FMBatch(TypedDict, total=False):
     """Batch schema for FMTrainerAnalytic.step().
@@ -47,9 +44,7 @@ class FMOut(TypedDict, total=False):
     meta: Dict[str, Any]
 
 
-# -----------------------------------------------------------------------------
-# Trainer
-# -----------------------------------------------------------------------------
+# ── Trainer ───────────────────────────────────────────────
 
 class FMTrainerAnalytic(BaseTrainer):
     """Pure gradient-provider FM trainer using pre-accumulated normal equations."""

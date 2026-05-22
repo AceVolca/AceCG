@@ -1,4 +1,5 @@
-# AceCG/potentials/unnormalized_multi_gaussian.py
+"""AceCG potentials unnormalized multi gaussian implementation."""
+
 import re
 import numpy as np
 from typing import Optional, Tuple
@@ -85,9 +86,12 @@ class UnnormalizedMultiGaussianPotential(BasePotential):
 
         if init_params is None:
             params = np.empty(3 * self.n_gauss, dtype=float)
-            params[0::3] = 0.0  # A
-            params[1::3] = 0.0  # r0
-            params[2::3] = 1.0  # sigma
+            # A
+            params[0::3] = 0.0
+            # r0
+            params[1::3] = 0.0
+            # sigma
+            params[2::3] = 1.0
             self._params = params
         else:
             init_params = np.asarray(init_params, dtype=float)
@@ -132,7 +136,8 @@ class UnnormalizedMultiGaussianPotential(BasePotential):
 
         self._validate_sigmas()
 
-    # -------- params as views --------
+    # ── params as views ───────────────────────────────────────────────
+
     @property
     def A(self) -> np.ndarray:
         """Return a view of Gaussian amplitudes ``A_k``."""
@@ -156,7 +161,8 @@ class UnnormalizedMultiGaussianPotential(BasePotential):
         """Return per-parameter linearity flags for ``[A, r0, sigma]`` blocks."""
         return np.tile(np.array([True, False, False], dtype=bool), self.n_gauss)
 
-    # -------- core helpers --------
+    # ── core helpers ───────────────────────────────────────────────
+
     def _xr_phi(self, r: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """Return x and phi for vectorized evaluation.
 
@@ -170,7 +176,8 @@ class UnnormalizedMultiGaussianPotential(BasePotential):
         phi = np.exp(- (x * inv_sigma) ** 2)
         return x, phi
 
-    # -------- BasePotential API --------
+    # ── BasePotential API ───────────────────────────────────────────────
+
     def value(self, r: np.ndarray) -> np.ndarray:
         """Evaluate the summed unnormalized Gaussian energy at ``r``."""
         x, phi = self._xr_phi(r)
@@ -189,12 +196,14 @@ class UnnormalizedMultiGaussianPotential(BasePotential):
             out = np.where(np.asarray(r, dtype=float) <= self.cutoff, out, 0.0)
         return out
 
-    # -------- zeros for cross-terms --------
+    # ── zeros for cross-terms ───────────────────────────────────────────────
+
     def zero(self, r: np.ndarray) -> np.ndarray:
         """Return zeros shaped like ``r`` for cross-component second terms."""
         return np.zeros_like(np.asarray(r, dtype=float))
 
-    # -------- dynamic derivative dispatch (mirrors multi_gaussian.py) --------
+    # ── dynamic derivative dispatch (mirrors multi_gaussian.py) ───────────────────────────────────────────────
+
     def __getattr__(self, name: str):
         if name == "zero":
             return self.zero

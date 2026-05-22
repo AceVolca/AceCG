@@ -65,9 +65,7 @@ warnings.filterwarnings("ignore", message="Reader has no dt information")
 warnings.filterwarnings("ignore", message="Guessed all Masses")
 
 
-# ---------------------------------------------------------------------------
-# Engine dispatch
-# ---------------------------------------------------------------------------
+# ── Engine dispatch ───────────────────────────────────────────────
 
 def _build_engine_args(
     sim_backend: str,
@@ -114,9 +112,7 @@ def _merge_engine_args(argv: list[str], engine_args: list[str]) -> list[str]:
     return out
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+# ── Entry point ───────────────────────────────────────────────
 
 def run(spec_path: str) -> None:
     """Execute one task defined by *spec_path*."""
@@ -126,9 +122,8 @@ def run(spec_path: str) -> None:
     timing: Dict[str, Any] = {}
     t_total_start = time.monotonic()
 
-    # ------------------------------------------------------------------ #
-    # Stage 1 — Simulation                                                #
-    # ------------------------------------------------------------------ #
+    # ── Phase 1: simulation ───────────────────────────────────────────────
+
     sim_backend: str = spec.get("sim_backend", "lammps")
     sim_input: str = spec["sim_input"]
     sim_log: str = spec.get("sim_log", "sim.log")
@@ -136,8 +131,7 @@ def run(spec_path: str) -> None:
 
     engine_args = _build_engine_args(sim_backend, sim_input, sim_log, sim_var)
 
-    # New path: full LaunchSpec in sim_launch.
-    # Legacy path: flat sim_cmd list (backward compat).
+    # Prefer full LaunchSpec payloads while preserving legacy flat sim_cmd specs.
     task_extra_env: Dict[str, str] = spec.get("extra_env", {}) or {}
     sim_launch = spec.get("sim_launch")
     if sim_launch is not None:
@@ -166,9 +160,8 @@ def run(spec_path: str) -> None:
         write_timing(run_dir, timing)
         sys.exit(result.returncode)
 
-    # ------------------------------------------------------------------ #
-    # Stage 2 — Post-processing                                           #
-    # ------------------------------------------------------------------ #
+    # ── Phase 2: post-processing ──────────────────────────────────────────
+
     post_spec: Optional[Dict[str, Any]] = spec.get("post_spec")
     post_launch = spec.get("post_launch")
     post_exec: Optional[Dict[str, Any]] = spec.get("post_exec")
@@ -200,9 +193,8 @@ def run(spec_path: str) -> None:
 
     timing["post_wall"] = time.monotonic() - t1
 
-    # ------------------------------------------------------------------ #
-    # Stage 3 — Cleanup                                                   #
-    # ------------------------------------------------------------------ #
+    # ── Phase 3: cleanup ──────────────────────────────────────────────────
+
     if not spec.get("archive_trajectory", False):
         run_dir_resolved = run_dir.resolve()
         for traj in spec.get("trajectory_files", []):
@@ -221,9 +213,7 @@ def run(spec_path: str) -> None:
     write_timing(run_dir, timing)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ── Helpers ───────────────────────────────────────────────
 
 def _make_launch_env(
     launch: Dict[str, Any],
@@ -321,6 +311,7 @@ def run_post(
         for h in resource_pool.hosts
     )
     placement = Placement(slices=slices, n_ranks=n_ranks)
+    post_spec.setdefault("expected_mpi_size", int(n_ranks))
 
     backend = resource_pool.backend
     py = python_exe or sys.executable
@@ -335,7 +326,13 @@ def run_post(
         "env_strip_prefixes": list(launch.env_strip_prefixes),
     }
     timing: Dict[str, Any] = {}
-    _run_post_via_launch(run_dir, post_spec, post_launch, timing)
+    _run_post_via_launch(
+        run_dir,
+        post_spec,
+        post_launch,
+        timing,
+        task_extra_env=getattr(resource_pool, "extra_env", None),
+    )
 
 
 def parse_loop_time(log_path: Path) -> Optional[float]:
@@ -361,9 +358,7 @@ def write_timing(run_dir: Path, timing: Dict[str, Any]) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# __main__ entry
-# ---------------------------------------------------------------------------
+# ── __main__ entry ───────────────────────────────────────────────
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:

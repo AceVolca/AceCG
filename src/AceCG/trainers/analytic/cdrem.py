@@ -1,4 +1,3 @@
-# AceCG/trainers/analytic/cdrem.py
 """Analytic CDREM (latent-variable) trainer."""
 
 from __future__ import annotations
@@ -9,15 +8,14 @@ import numpy as np
 
 try:
     from typing import TypedDict, NotRequired
-except ImportError:  # Python < 3.11
+# Python < 3.11
+except ImportError:
     from typing_extensions import TypedDict, NotRequired
 
 from ..base import BaseTrainer
 
 
-# -----------------------------------------------------------------------------
-# TypedDict schemas
-# -----------------------------------------------------------------------------
+# ── TypedDict schemas ───────────────────────────────────────────────
 
 class CDREMBatch(TypedDict, total=False):
     """
@@ -59,11 +57,16 @@ class CDREMBatch(TypedDict, total=False):
     """
     energy_grad_z_by_x: Any
     energy_grad_xz: Any
+    unmasked_energy_grad_z_by_x: NotRequired[Any]
+    unmasked_energy_grad_xz: NotRequired[Any]
     x_weight: NotRequired[Any]
     d2U_z_by_x: NotRequired[Any]
     d2U_xz: NotRequired[Any]
     energy_grad_outer_xz: NotRequired[Any]
     cov_z_by_x: NotRequired[Any]
+    optimizer_gradient_mode: NotRequired[str]
+    outside_aux_weight: NotRequired[float]
+    allow_unmasked_optimizer_gradient: NotRequired[bool]
     step_index: NotRequired[int]
 
 
@@ -96,6 +99,7 @@ class CDREMOut(TypedDict, total=False):
     """
     name: str
     grad: Any
+    optimizer_grad: NotRequired[Any]
     hessian: NotRequired[Any]
     update: Any
     energy_grad_pos: Any
@@ -107,9 +111,7 @@ class CDREMOut(TypedDict, total=False):
     meta: Dict[str, Any]
 
 
-# -----------------------------------------------------------------------------
-# Trainer
-# -----------------------------------------------------------------------------
+# ── Trainer ───────────────────────────────────────────────
 
 class CDREMTrainerAnalytic(BaseTrainer):
     """Analytic latent-variable / CDREM trainer.
@@ -212,10 +214,15 @@ class CDREMTrainerAnalytic(BaseTrainer):
         energy_grad_z_by_x,
         energy_grad_xz,
         x_weight=None,
+        unmasked_energy_grad_z_by_x=None,
+        unmasked_energy_grad_xz=None,
         d2U_z_by_x=None,
         d2U_xz=None,
         energy_grad_outer_xz=None,
         cov_z_by_x=None,
+        optimizer_gradient_mode: str = "masked",
+        outside_aux_weight: float = 1.0,
+        allow_unmasked_optimizer_gradient: bool = False,
         step_index: int = 0,
     ) -> CDREMBatch:
         """
@@ -250,10 +257,17 @@ class CDREMTrainerAnalytic(BaseTrainer):
         batch: CDREMBatch = {
             "energy_grad_z_by_x": energy_grad_z_by_x,
             "energy_grad_xz": energy_grad_xz,
+            "optimizer_gradient_mode": str(optimizer_gradient_mode),
+            "outside_aux_weight": float(outside_aux_weight),
+            "allow_unmasked_optimizer_gradient": bool(allow_unmasked_optimizer_gradient),
             "step_index": int(step_index),
         }
         if x_weight is not None:
             batch["x_weight"] = x_weight
+        if unmasked_energy_grad_z_by_x is not None:
+            batch["unmasked_energy_grad_z_by_x"] = unmasked_energy_grad_z_by_x
+        if unmasked_energy_grad_xz is not None:
+            batch["unmasked_energy_grad_xz"] = unmasked_energy_grad_xz
         if d2U_z_by_x is not None:
             batch["d2U_z_by_x"] = d2U_z_by_x
         if d2U_xz is not None:
@@ -334,6 +348,42 @@ class CDREMTrainerAnalytic(BaseTrainer):
         energy_grad_pos = w_x @ energy_grad_z_by_x
         energy_grad_neg = energy_grad_xz
         grad = self.beta * (energy_grad_pos - energy_grad_neg)
+        unmasked_grad = None
+        if (
+            "unmasked_energy_grad_z_by_x" in batch
+            or "unmasked_energy_grad_xz" in batch
+        ):
+            if (
+                "unmasked_energy_grad_z_by_x" not in batch
+                or "unmasked_energy_grad_xz" not in batch
+            ):
+                raise KeyError(
+                    "Both unmasked_energy_grad_z_by_x and unmasked_energy_grad_xz "
+                    "are required for auxiliary optimizer-gradient policies."
+                )
+            unmasked_z_by_x = np.asarray(
+                batch["unmasked_energy_grad_z_by_x"],
+                dtype=float,
+            )
+            unmasked_xz = np.asarray(batch["unmasked_energy_grad_xz"], dtype=float)
+            if unmasked_z_by_x.shape != energy_grad_z_by_x.shape:
+                raise ValueError(
+                    "unmasked_energy_grad_z_by_x shape must match energy_grad_z_by_x, "
+                    f"got {unmasked_z_by_x.shape} and {energy_grad_z_by_x.shape}."
+                )
+            if unmasked_xz.shape != energy_grad_xz.shape:
+                raise ValueError(
+                    "unmasked_energy_grad_xz shape must match energy_grad_xz, "
+                    f"got {unmasked_xz.shape} and {energy_grad_xz.shape}."
+                )
+            unmasked_grad = self.beta * ((w_x @ unmasked_z_by_x) - unmasked_xz)
+        optimizer_grad = self.select_optimizer_gradient(
+            grad,
+            unmasked_grad=unmasked_grad,
+            mode=str(batch.get("optimizer_gradient_mode", "masked")),
+            outside_aux_weight=float(batch.get("outside_aux_weight", 1.0)),
+            allow_unmasked=bool(batch.get("allow_unmasked_optimizer_gradient", False)),
+        )
 
         d2U_pos = None
         d2U_neg = None
@@ -389,9 +439,9 @@ class CDREMTrainerAnalytic(BaseTrainer):
 
         if apply_update:
             if need_hessian:
-                update = self.optimizer.step(grad, hessian=hessian)
+                update = self.optimizer.step(optimizer_grad, hessian=hessian)
             else:
-                update = self.optimizer.step(grad)
+                update = self.optimizer.step(optimizer_grad)
             self.clamp_and_update()
         else:
             update = np.zeros_like(grad)
@@ -401,12 +451,18 @@ class CDREMTrainerAnalytic(BaseTrainer):
             self.logger.add_scalar("CDREM/mask_ratio", mask_ratio, step_index)
             self.logger.add_scalar("CDREM/lr", float(getattr(self.optimizer, "lr", np.nan)), step_index)
             self.logger.add_scalar("CDREM/grad_norm", float(np.linalg.norm(grad)), step_index)
+            self.logger.add_scalar(
+                "CDREM/optimizer_grad_norm",
+                float(np.linalg.norm(optimizer_grad)),
+                step_index,
+            )
             self.logger.add_scalar("CDREM/update_norm", float(np.linalg.norm(update)), step_index)
             self.logger.add_scalar("CDREM/n_x", float(n_x), step_index)
 
         out: CDREMOut = {
             "name": "CDREM",
             "grad": grad,
+            "optimizer_grad": optimizer_grad,
             "hessian": hessian,
             "update": update,
             "energy_grad_pos": energy_grad_pos,
@@ -415,8 +471,10 @@ class CDREMTrainerAnalytic(BaseTrainer):
                 "step_index": step_index,
                 "n_x": int(n_x),
                 "grad_norm": float(np.linalg.norm(grad)),
+                "optimizer_grad_norm": float(np.linalg.norm(optimizer_grad)),
                 "update_norm": float(np.linalg.norm(update)),
                 "used_hessian": bool(need_hessian),
+                "optimizer_gradient_mode": str(batch.get("optimizer_gradient_mode", "masked")),
             },
         }
         if d2U_pos is not None:

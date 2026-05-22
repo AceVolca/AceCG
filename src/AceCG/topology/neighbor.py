@@ -34,9 +34,7 @@ from .types import InteractionKey
 
 VALID_EXCLUDE_OPTIONS = frozenset({"resid", "molid", "none"})
 
-# ---------------------------------------------------------------------------
-# Exclusion helpers
-# ---------------------------------------------------------------------------
+# ── Exclusion helpers ───────────────────────────────────────────────
 
 def parse_exclude_option(exclude_option: str) -> str:
     """Normalize nonbonded exclusion option to one of the canonical strings."""

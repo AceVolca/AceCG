@@ -1,4 +1,5 @@
-# AceCG/potentials/multi_gaussian.py
+"""AceCG potentials multi gaussian implementation."""
+
 import re
 import numpy as np
 from typing import Optional, Tuple
@@ -65,9 +66,12 @@ class MultiGaussianPotential(BasePotential):
 
         if init_params is None:
             params = np.empty(3 * self.n_gauss, dtype=float)
-            params[0::3] = 0.0  # A
-            params[1::3] = 0.0  # r0
-            params[2::3] = 1.0  # sigma
+            # A
+            params[0::3] = 0.0
+            # r0
+            params[1::3] = 0.0
+            # sigma
+            params[2::3] = 1.0
             self._params = params
         else:
             init_params = np.asarray(init_params, dtype=float)
@@ -104,7 +108,8 @@ class MultiGaussianPotential(BasePotential):
 
         self._validate_sigmas()
 
-    # -------- params as views --------
+    # ── params as views ───────────────────────────────────────────────
+
     @property
     def A(self) -> np.ndarray:
         """Return a view of Gaussian amplitudes ``A_k``."""
@@ -127,7 +132,8 @@ class MultiGaussianPotential(BasePotential):
         """Return per-parameter linearity flags for ``[A, r0, sigma]`` blocks."""
         return np.tile(np.array([True, False, False], dtype=bool), self.n_gauss)
 
-    # -------- core API (vectorized) --------
+    # ── core API (vectorized) ───────────────────────────────────────────────
+
     def _xr_phi(self, r: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Given r (...,), return:
@@ -161,7 +167,8 @@ class MultiGaussianPotential(BasePotential):
 
     def energy_grad(self, r: np.ndarray) -> np.ndarray:
         """Return ``dU/dtheta`` for all Gaussian components in one matrix pass."""
-        r_flat = np.asarray(r, dtype=float).reshape(-1)
+        r_arr = np.asarray(r, dtype=float)
+        r_flat = r_arr.reshape(-1)
         x, phi = self._xr_phi(r_flat)
         s = self.sigma
         pref = phi / SQRT2PI
@@ -177,11 +184,12 @@ class MultiGaussianPotential(BasePotential):
         )
         if np.isfinite(self.cutoff):
             grad[r_flat > self.cutoff, :] = 0.0
-        return grad
+        return grad.reshape(r_arr.shape + (3 * self.n_gauss,))
 
     def force_grad(self, r: np.ndarray) -> np.ndarray:
         """Return ``dF/dtheta`` for all Gaussian components in one matrix pass."""
-        r_flat = np.asarray(r, dtype=float).reshape(-1)
+        r_arr = np.asarray(r, dtype=float)
+        r_flat = r_arr.reshape(-1)
         x, phi = self._xr_phi(r_flat)
         s = self.sigma
         pref = phi / SQRT2PI
@@ -203,14 +211,16 @@ class MultiGaussianPotential(BasePotential):
         )
         if np.isfinite(self.cutoff):
             grad[r_flat > self.cutoff, :] = 0.0
-        return grad
+        return grad.reshape(r_arr.shape + (3 * self.n_gauss,))
 
-    # -------- zeros for cross-terms --------
+    # ── zeros for cross-terms ───────────────────────────────────────────────
+
     def zero(self, r: np.ndarray) -> np.ndarray:
         """Return zeros shaped like ``r`` for cross-component second terms."""
         return np.zeros_like(np.asarray(r, dtype=float))
 
-    # -------- dynamic derivative dispatch (simplified) --------
+    # ── dynamic derivative dispatch (simplified) ───────────────────────────────────────────────
+
     def __getattr__(self, name: str):
         if name == "zero":
             return self.zero

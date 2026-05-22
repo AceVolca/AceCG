@@ -1,5 +1,11 @@
+"""AdamW optimizer implementation with AceCG checkpoint validation."""
+
+from typing import Any
+
 import numpy as np
+
 from .base import BaseOptimizer
+
 
 class AdamWMaskedOptimizer(BaseOptimizer):
     """AdamW optimizer with masked parameter updates.
@@ -33,6 +39,28 @@ class AdamWMaskedOptimizer(BaseOptimizer):
     displacement applied to ``L`` (negative for a standard descent step).
     """
 
+    _CHECKPOINT_REQUIRED_KEYS = (
+        "t",
+        "m",
+        "v",
+        "vmax",
+        "beta1",
+        "beta2",
+        "eps",
+        "weight_decay",
+        "amsgrad",
+        "noise_sigma",
+    )
+    _CHECKPOINT_ARRAY_KEYS = ("m", "v")
+    _CHECKPOINT_SCALAR_KEYS = (
+        "beta1",
+        "beta2",
+        "eps",
+        "weight_decay",
+        "noise_sigma",
+    )
+    _CHECKPOINT_BOOL_KEYS = ("amsgrad",)
+
     def __init__(
         self,
         L,
@@ -46,6 +74,7 @@ class AdamWMaskedOptimizer(BaseOptimizer):
         noise_sigma=0.0,
         seed=None,
     ):
+        """Initialize AdamW moments, AMSGrad state, and noise state."""
         super().__init__(L, mask, lr)
         self.beta1 = float(beta1)
         self.beta2 = float(beta2)
@@ -64,8 +93,7 @@ class AdamWMaskedOptimizer(BaseOptimizer):
         self.last_update = None
 
     def step(self, grad: np.ndarray) -> np.ndarray:
-        """
-        Perform one AdamW update step using a masked gradient.
+        """Perform one AdamW update step using a masked gradient.
 
         Parameters
         ----------
@@ -80,16 +108,18 @@ class AdamWMaskedOptimizer(BaseOptimizer):
         """
         self.t += 1
 
-        # Moments
+        # ── Phase 1: Adam moment estimates ──────────────────────────────
+        # Moment buffers are full-size checkpoint state; masking is applied
+        # only when constructing the displacement.
         g = grad.copy()
         self.m = self.beta1 * self.m + (1.0 - self.beta1) * g
         self.v = self.beta2 * self.v + (1.0 - self.beta2) * (g ** 2)
 
-        # Bias correction
+        # ── Phase 2: bias-corrected denominator ────────────────────────
+        # AMSGrad replaces the current variance with a monotone maximum, which
+        # must be checkpointed separately as ``vmax``.
         m_hat = self.m / (1.0 - self.beta1 ** self.t)
         v_hat = self.v / (1.0 - self.beta2 ** self.t)
-
-        # AMSGrad (optional)
         if self.amsgrad:
             self.vmax = np.maximum(self.vmax, v_hat)
             v_denom = np.sqrt(self.vmax) + self.eps
@@ -98,32 +128,34 @@ class AdamWMaskedOptimizer(BaseOptimizer):
 
         precond = 1.0 / v_denom
 
-        # Allocate full-size update (zeros where mask=False)
+        # ── Phase 3: masked Adam displacement ───────────────────────────
+        # ``idx`` is the only write mask for parameters; inactive entries keep
+        # zero displacement even when their moments are nonzero.
         update = np.zeros_like(g)
-
-        # ----- Gradient step (Adam piece) -----
-        # Only update masked indices
         idx = self.mask
         update[idx] = self.lr * (m_hat[idx] / v_denom[idx])
 
-        # ----- Optional noise (preconditioned, masked) -----
+        # ── Phase 4: optional preconditioned noise ──────────────────────
+        # Noise is sampled only for trainable coordinates and uses Adam's
+        # denominator so its scale follows the same geometry as the step.
         if self.noise_sigma > 0.0:
             z = np.zeros_like(g)
             z[idx] = self.rng.standard_normal(np.count_nonzero(idx)).astype(self.L.dtype, copy=False)
             update[idx] += (self.noise_sigma * self.lr) * (z[idx] * precond[idx])
 
-        # ----- Decoupled weight decay (AdamW) -----
+        # ── Phase 5: decoupled weight decay ─────────────────────────────
         if self.weight_decay != 0.0:
-            # Decoupled: add lr * wd * param directly to the update (masked entries only)
+            # AdamW adds decay directly to the displacement, not the gradient.
             update[idx] += self.lr * self.weight_decay * self.L[idx]
 
-        # Apply update (descent)
+        # ── Phase 6: apply AceCG sign convention ────────────────────────
+        # The stored update is what gets subtracted from ``L``; callers receive
+        # the signed parameter displacement after the subtraction.
         self.L -= update
-
-        self.last_update = -update  # what the caller saw as "Adam update" previously
+        self.last_update = -update
         return self.last_update
 
-    def state_dict(self) -> dict:
+    def state_dict(self) -> dict[str, Any]:
         """Return optimizer state including AdamW moments and hyperparameters."""
         d = super().state_dict()
         d.update({
@@ -140,7 +172,7 @@ class AdamWMaskedOptimizer(BaseOptimizer):
         })
         return d
 
-    def load_state_dict(self, state: dict) -> None:
+    def load_state_dict(self, state: dict[str, Any]) -> None:
         """Restore AdamW state from a compatible state dictionary.
 
         Parameters
@@ -162,3 +194,46 @@ class AdamWMaskedOptimizer(BaseOptimizer):
         self.weight_decay = float(state["weight_decay"])
         self.amsgrad = bool(state["amsgrad"])
         self.noise_sigma = float(state["noise_sigma"])
+
+    def validate_checkpoint_state(
+        self,
+        state: Any,
+        forcefield: Any,
+        *,
+        require_completed_step: bool = False,
+    ) -> None:
+        """Validate AdamW moment buffers and hyperparameters in a checkpoint."""
+        super().validate_checkpoint_state(
+            state,
+            forcefield,
+            require_completed_step=require_completed_step,
+        )
+        self._require_checkpoint_keys(state, self._CHECKPOINT_REQUIRED_KEYS)
+        expected_shape = self._checkpoint_forcefield_params(forcefield).shape
+        for key in self._CHECKPOINT_SCALAR_KEYS:
+            self._validate_checkpoint_scalar_match(state, key)
+        for key in self._CHECKPOINT_BOOL_KEYS:
+            self._validate_checkpoint_bool_match(state, key)
+        for key in self._CHECKPOINT_ARRAY_KEYS:
+            self._checkpoint_array(state, key, expected_shape)
+
+        amsgrad = bool(state["amsgrad"])
+        vmax = self._checkpoint_array(
+            state,
+            "vmax",
+            expected_shape,
+            allow_none=not amsgrad,
+        )
+        if not amsgrad and vmax is not None:
+            raise ValueError(
+                "optimizer checkpoint field 'vmax' must be None when "
+                "'amsgrad' is false."
+            )
+
+        if require_completed_step:
+            step_count = int(state["t"])
+            if step_count <= 0:
+                raise ValueError(
+                    f"optimizer checkpoint field 't' is {step_count}; "
+                    "strict resume requires a completed optimizer step."
+                )

@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from ..topology.types import InteractionKey
 
 
-# ─── FM interaction spec ──────────────────────────────────────────────
+# ── FM interaction spec ──────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class FMInteractionSpec:
@@ -92,7 +92,7 @@ class ForcefieldMaskSpec:
         return bool(self.entries)
 
 
-# ─── Section configs ──────────────────────────────────────────────────
+# ── Section configs ──────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class SystemConfig:
@@ -164,6 +164,56 @@ class SchedulerConfig:
 
 
 @dataclass(frozen=True)
+class AARefNoiseConfig:
+    """Noisy AA-reference coordinate augmentation for FM, REM, and DSM."""
+
+    enabled: bool = False
+    samples_per_frame: int = 0
+    sigma: float = 0.0
+    sigma_final: Optional[float] = None
+    schedule: str = "constant"
+    update_interval: int = 1
+    seed: int = 0
+    distribution: str = "gaussian"
+    selection: Any = "all"
+    include_original: bool = False
+    wrap: bool = False
+    batch_size: Optional[int] = None
+    subsample_per_epoch: int = 0
+    cache_policy: str = "stage"
+    force_mix_ratio: float = 0.0
+    neighbor_mode: str = "shared"
+    neighbor_skin: float = 0.0
+
+    def to_runtime_dict(self) -> Dict[str, Any]:
+        """Return the epoch-local ``run_post`` noise spec.
+
+        Scheduling/cache-policy fields stay in the workflow layer; a post spec
+        is valid only for one epoch and carries the already resolved sigma.
+        """
+        payload: Dict[str, Any] = {
+            "samples_per_frame": self.samples_per_frame,
+            "sigma": self.sigma,
+            "seed": self.seed,
+            "distribution": self.distribution,
+            "selection": self.selection,
+            "include_original": self.include_original,
+            "wrap": self.wrap,
+        }
+        if self.batch_size is not None:
+            payload["batch_size"] = self.batch_size
+        if self.subsample_per_epoch > 0:
+            payload["subsample_per_epoch"] = int(self.subsample_per_epoch)
+        if self.force_mix_ratio > 0.0:
+            payload["force_mix_ratio"] = float(self.force_mix_ratio)
+        if self.neighbor_mode != "shared":
+            payload["neighbor_mode"] = self.neighbor_mode
+        if self.neighbor_skin > 0.0:
+            payload["neighbor_skin"] = float(self.neighbor_skin)
+        return payload
+
+
+@dataclass(frozen=True)
 class AARefConfig:
     """All-atom reference trajectory configuration."""
     trajectory_files: Tuple[str, ...] = ()
@@ -177,6 +227,7 @@ class AARefConfig:
     ref_type_names: Optional[Dict[str, str]] = None
     ref_type_map: Optional[Dict[str, str]] = None
     ref_resolved_aliases: Optional[Dict[int, str]] = None
+    noise: AARefNoiseConfig = field(default_factory=AARefNoiseConfig)
     extras: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -192,7 +243,7 @@ class ConditioningConfig:
     extras: Dict[str, Any] = field(default_factory=dict)
 
 
-# ─── Top-level config ─────────────────────────────────────────────────
+# ── Top-level config ─────────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class ACGConfig:

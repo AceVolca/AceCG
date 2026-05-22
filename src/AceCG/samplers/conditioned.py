@@ -81,13 +81,11 @@ class ConditionedSampler(BaseSampler):
         EpochState
             Staged run plans and metadata for the epoch.
         """
-        if n_runs > len(self._init_pool):
-            raise ValueError(f"n_runs={n_runs} exceeds pool size {len(self._init_pool)}")
+        chosen = self._sample_records(n_runs)
 
         epoch_path = Path(epoch_dir)
         epoch_path.mkdir(parents=True, exist_ok=True)
 
-        chosen = self._rng.sample(self._init_pool, k=n_runs)
         plans = []
         for run_id, rec in enumerate(chosen):
             run_dir = epoch_path / f"zbx_{run_id:04d}"
@@ -111,3 +109,21 @@ class ConditionedSampler(BaseSampler):
             script_info=self.script_info,
             replica_plans=plans,
         )
+
+    def advance_epochs(self, *, n_epochs: int, n_runs: int) -> None:
+        """Advance frame-selection RNG for skipped conditioned epochs.
+
+        Resume runs that start from a later global epoch need the same RNG
+        state they would have reached after staging earlier epochs, but without
+        recreating or mutating those historical replica directories.
+        """
+        if n_epochs < 0:
+            raise ValueError("n_epochs must be non-negative.")
+        for _ in range(n_epochs):
+            self._sample_records(n_runs)
+
+    def _sample_records(self, n_runs: int) -> list[InitConfigRecord]:
+        """Return one epoch's unique conditioned records from the init pool."""
+        if n_runs > len(self._init_pool):
+            raise ValueError(f"n_runs={n_runs} exceeds pool size {len(self._init_pool)}")
+        return self._rng.sample(self._init_pool, k=n_runs)

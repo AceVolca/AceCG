@@ -1,4 +1,3 @@
-# AceCG/trainers/analytic/mse.py
 """Analytic MSE (PMF-matching) trainer."""
 
 from __future__ import annotations
@@ -11,7 +10,8 @@ import numpy as np
 
 try:
     from typing import TypedDict, NotRequired
-except ImportError:  # Python < 3.11
+# Python < 3.11
+except ImportError:
     from typing_extensions import TypedDict, NotRequired
 
 from ..base import BaseTrainer
@@ -156,9 +156,7 @@ def load_reweighted_mse_stacks(
     )
 
 
-# -----------------------------------------------------------------------------
-# TypedDict schemas
-# -----------------------------------------------------------------------------
+# ── TypedDict schemas ───────────────────────────────────────────────
 
 class MSEBatch(TypedDict, total=False):
     """
@@ -216,9 +214,7 @@ class MSEOut(TypedDict, total=False):
     meta: Dict[str, Any]
 
 
-# -----------------------------------------------------------------------------
-# Trainer
-# -----------------------------------------------------------------------------
+# ── Trainer ───────────────────────────────────────────────
 
 class MSETrainerAnalytic(BaseTrainer):
     """Analytic PMF-matching trainer with a gauge-fixed mean-squared objective.
@@ -253,7 +249,8 @@ class MSETrainerAnalytic(BaseTrainer):
     Returns a dict with standardized keys (see module docstring).
     """
 
-    # ---- Public schema objects (for documentation / validation) ----
+    # ── Public schema objects (for documentation / validation) ───────────────────────────────────────────────
+
     BATCH_SCHEMA: Dict[str, Any] = {
         "pmf_AA": "required np.ndarray; shape (n_bins,); target/reference PMF",
         "pmf_CG": "required np.ndarray; shape (n_bins,); current CG PMF",
@@ -350,7 +347,8 @@ class MSETrainerAnalytic(BaseTrainer):
         CG_bin_idx_frame = batch["CG_bin_idx_frame"]
         step_index = int(batch.get("step_index", 0))
 
-        # --- CG-side energy gradients ---
+        # ── CG-side energy gradients ───────────────────────────────────────────────
+
         energy_grad_CG_frame = np.asarray(batch["energy_grad_frame"], dtype=np.float64)
         if energy_grad_CG_frame.ndim != 2:
             raise ValueError(
@@ -378,7 +376,8 @@ class MSETrainerAnalytic(BaseTrainer):
             if weight_sum <= 0.0 or not np.isfinite(weight_sum):
                 raise ValueError("frame_weight must have a positive finite sum.")
 
-        # --- Per-bin conditional averages (inlined) ---
+        # ── Per-bin conditional averages (inlined) ───────────────────────────────────────────────
+
         bin_idx = np.asarray(CG_bin_idx_frame).reshape(-1)
         if bin_idx.shape != (n_frames,):
             raise ValueError(
@@ -407,27 +406,32 @@ class MSETrainerAnalytic(BaseTrainer):
             w_bin = w_bin / w_sum
             energy_grad_CG_given_bin[int(sidx)] = energy_grad_CG_frame[mask].T @ w_bin
 
-        # --- Gauge shift for PMF_CG ---
+        # ── Gauge shift for PMF_CG ───────────────────────────────────────────────
+
         c = float(np.mean(pmf_CG - pmf_AA))
         pmf_CG_shifted = pmf_CG - c
 
-        # --- Loss ---
+        # ── Loss ───────────────────────────────────────────────
+
         delta = pmf_CG_shifted - pmf_AA
         loss = float(0.5 * np.sum(delta ** 2))
 
-        # --- Gradient of loss w.r.t parameters ---
+        # ── Gradient of loss w.r.t parameters ───────────────────────────────────────────────
+
         grad = np.zeros(n_params, dtype=float)
         for sidx in idx_set:
             grad += delta[int(sidx)] * energy_grad_CG_given_bin[int(sidx)]
 
-        # --- Optimization step (optional) ---
+        # ── Optimization step (optional) ───────────────────────────────────────────────
+
         if apply_update:
             update = self.optimizer.step(grad)
             self.clamp_and_update()
         else:
             update = np.zeros_like(grad)
 
-        # --- Logging ---
+        # ── Logging ───────────────────────────────────────────────
+
         if self.logger is not None:
             mask_ratio = float(np.mean(self.optimizer.mask.astype(float)))
             self.logger.add_scalar("MSE/mask_ratio", mask_ratio, step_index)
@@ -440,7 +444,8 @@ class MSETrainerAnalytic(BaseTrainer):
             "name": "MSE",
             "loss": loss,
             "grad": grad,
-            "hessian": None,  # keep key for uniformity
+            # keep key for uniformity
+            "hessian": None,
             "update": update,
             "meta": {
                 "step_index": step_index,

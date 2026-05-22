@@ -35,7 +35,10 @@ class REMWorkflow(SamplingWorkflow):
         super().__init__(config, **kwargs)
         self.optimizer = self._build_optimizer(self.forcefield)
         self.trainer = self._build_trainer()
-        self.aa_data_strategy = self._build_aa_data_strategy()
+        if int(self.config.training.start_epoch or 0) == 0:
+            self.aa_data_strategy = self._build_aa_data_strategy(
+                reuse_precomputed=False,
+            )
 
     # ── builders ────────────────────────────────────────────────
 
@@ -54,13 +57,6 @@ class REMWorkflow(SamplingWorkflow):
         n_epochs = cfg.training.n_epochs
         start_epoch = cfg.training.start_epoch
         results = []
-        need_hessian = bool(
-            self.trainer.optimizer_accepts_hessian() or cfg.training.need_hessian
-        )
-        aa_data_strategy = self.aa_data_strategy
-        if aa_data_strategy is None:
-            raise RuntimeError("AA data strategy was not constructed.")
-        constant_aa_stats = aa_data_strategy if isinstance(aa_data_strategy, AAStats) else None
 
         if start_epoch > 0:
             prev_ff_dir = (
@@ -77,6 +73,17 @@ class REMWorkflow(SamplingWorkflow):
             logger.info(
                 "Resuming from epoch %d (loaded %s)", start_epoch, prev_snapshot,
             )
+            self.aa_data_strategy = self._build_aa_data_strategy(
+                reuse_precomputed=True,
+            )
+
+        aa_data_strategy = self.aa_data_strategy
+        if aa_data_strategy is None:
+            raise RuntimeError("AA data strategy was not constructed.")
+        constant_aa_stats = aa_data_strategy if isinstance(aa_data_strategy, AAStats) else None
+        need_hessian = bool(
+            self.trainer.optimizer_accepts_hessian() or cfg.training.need_hessian
+        )
 
         for epoch in range(start_epoch, n_epochs):
             iter_dir = self.output_dir / f"iter_{epoch:04d}"
@@ -84,7 +91,7 @@ class REMWorkflow(SamplingWorkflow):
             aa_stats = (
                 constant_aa_stats
                 if constant_aa_stats is not None
-                else aa_data_strategy(self.forcefield)
+                else aa_data_strategy(self.forcefield, epoch=epoch)
             )
 
             # ── Phase 1: write FF ────────────────────────────────
@@ -129,10 +136,12 @@ class REMWorkflow(SamplingWorkflow):
                     }
                 ],
             }
+            self._apply_rem_statistics_options(post_spec["steps"][0])
             if cfg.system.type_names is not None:
                 post_spec["atom_type_name_aliases"] = cfg.system.type_names
             if cfg.vp is not None:
                 post_spec["vp_names"] = list(cfg.vp.vp_names)
+            self._apply_post_runtime_options(post_spec)
             xz_task = TaskSpec(
                 task_class="xz",
                 frame_id=None,
@@ -171,9 +180,14 @@ class REMWorkflow(SamplingWorkflow):
             batch = REMTrainerAnalytic.make_batch(
                 energy_grad_CG=np.asarray(cg_stats["energy_grad_avg"], dtype=np.float64),
                 energy_grad_AA=aa_stats.energy_grad,
+                unmasked_energy_grad_AA=aa_stats.unmasked_energy_grad,
+                unmasked_energy_grad_CG=cg_stats.get("unmasked_energy_grad_avg"),
                 d2U_AA=aa_stats.d2U,
                 d2U_CG=cg_stats.get("d2U_avg"),
                 grad_outer_CG=cg_stats.get("grad_outer_avg"),
+                optimizer_gradient_mode=self._optimizer_gradient_mode(),
+                outside_aux_weight=self._outside_aux_weight(),
+                allow_unmasked_optimizer_gradient=self._allow_unmasked_optimizer_gradient(),
                 step_index=epoch,
             )
             step_out = self.trainer.step(batch, apply_update=True)

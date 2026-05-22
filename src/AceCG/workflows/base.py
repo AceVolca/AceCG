@@ -389,6 +389,7 @@ class BaseWorkflow(ABC):
         return ResourcePool.discover(
             sim_cmd=sim_cmd,
             mpirun_path=mpirun_path,
+            mpi_family=cfg.scheduler.mpi_family,
             explicit_hosts=explicit_hosts,
             extra_env=extra_env,
             intel_launch_mode=intel_launch_mode,

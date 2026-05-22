@@ -1,4 +1,3 @@
-# AceCG/trainers/analytic/__init__.py
 """Analytic (NumPy-based) trainers package.
 
 Re-exports all public trainers and TypedDicts from submodules:

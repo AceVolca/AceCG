@@ -1,3 +1,5 @@
+"""AceCG optimizers multithreaded adam implementation."""
+
 from ..base import BaseOptimizer
 
 import math
@@ -7,8 +9,8 @@ from numba import njit, prange
 @njit(parallel=True, fastmath=True)
 def _adam_masked_step_kernel(L, m, v, grad, mask, lr, beta1, beta2, eps,
                              t, noise_sigma, z, out_update):
-    '''
-    Numba kernel for Adam optimizer with masked updates.
+    """Update masked Adam parameters in a Numba kernel.
+
     Parameters
     ----------
     L : np.ndarray
@@ -37,13 +39,12 @@ def _adam_masked_step_kernel(L, m, v, grad, mask, lr, beta1, beta2, eps,
         Random noise array.
     out_update : np.ndarray
         Array to store the computed updates.
-    '''
+    """
     n = L.size
     b1corr = 1.0 - beta1**t
     b2corr = 1.0 - beta2**t
     for i in prange(n):
         g = grad[i]
-        # moments
         m_i = beta1*m[i] + (1.0 - beta1)*g
         v_i = beta2*v[i] + (1.0 - beta2)*(g*g)
         m[i] = m_i
@@ -58,7 +59,8 @@ def _adam_masked_step_kernel(L, m, v, grad, mask, lr, beta1, beta2, eps,
             if noise_sigma > 0.0:
                 u += noise_sigma * lr * z[i] / denom
             L[i] -= u
-        out_update[i] = u  # store the applied update (pre-sign)
+        # Store the subtracted displacement before AceCG's return sign flip.
+        out_update[i] = u
 
 class MTAdamOptimizer(BaseOptimizer):
     """Numba-parallel Adam optimizer with masked parameter updates.
@@ -131,8 +133,7 @@ class MTAdamOptimizer(BaseOptimizer):
         )
 
     def step(self, grad: np.ndarray) -> np.ndarray:
-        """
-        Perform one Adam update step using masked gradient.
+        """Perform one Adam update step using masked gradient.
 
         Parameters
         ----------
@@ -151,7 +152,8 @@ class MTAdamOptimizer(BaseOptimizer):
         self.t += 1
         z = np.zeros_like(self.L)
         if self.noise_sigma > 0.0:
-            # only generate noise where needed
+            # Draw exactly the same masked noise shape as serial Adam so
+            # checkpointed stochastic runs do not depend on the backend.
             z[self.mask] = self.rng.standard_normal(np.count_nonzero(self.mask)).astype(
                 self.L.dtype,
                 copy=False,
@@ -160,7 +162,8 @@ class MTAdamOptimizer(BaseOptimizer):
         _adam_masked_step_kernel(self.L, self.m, self.v, grad, self.mask,
                                  self.lr, self.beta1, self.beta2, self.eps,
                                  self.t, self.noise_sigma, z, out_update)
-        # match your original sign convention: return -update
+        # The kernel stores the positive displacement subtracted from ``L``;
+        # trainers expect the signed parameter change returned by serial Adam.
         self.last_update = -out_update
         return self.last_update
 

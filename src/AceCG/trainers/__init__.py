@@ -1,3 +1,5 @@
+"""Public exports for AceCG trainers."""
+
 from .analytic import (
     CDFMBatch,
     CDFMTrainerAnalytic,

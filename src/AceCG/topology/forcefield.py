@@ -54,9 +54,7 @@ class Forcefield(MutableMapping):
         "_vp_types", "_virtual_mask", "_real_mask", "_real_virtual_mask",
     )
 
-    # ==================================================================
-    # Public interface
-    # ==================================================================
+    # ── Public interface ───────────────────────────────────────────────
 
     def __init__(self, data: Optional[Dict[InteractionKey, List[BasePotential]]] = None):
         """Create a forcefield container.
@@ -148,9 +146,7 @@ class Forcefield(MutableMapping):
         new._rebuild_structure_cache()
         return new
 
-    # ------------------------------------------------------------------
-    # Iteration
-    # ------------------------------------------------------------------
+    # ── Iteration ───────────────────────────────────────────────
 
     def iter_potentials(self) -> Generator[Tuple[InteractionKey, BasePotential], None, None]:
         """Yield ``(key, potential)`` pairs, flattening list values.
@@ -164,9 +160,7 @@ class Forcefield(MutableMapping):
             else:
                 yield key, val
 
-    # ------------------------------------------------------------------
-    # Parameter vector
-    # ------------------------------------------------------------------
+    # ── Parameter vector ───────────────────────────────────────────────
 
     def n_params(self) -> int:
         """Total scalar parameter count.  ``ff.n_params()`` → int."""
@@ -231,9 +225,7 @@ class Forcefield(MutableMapping):
             idx += n
         self._param = L.copy()
 
-    # ------------------------------------------------------------------
-    # Masks (L2 per-parameter & L1 per-key)
-    # ------------------------------------------------------------------
+    # ── Masks (L2 per-parameter & L1 per-key) ───────────────────────────────────────────────
 
     @property
     def param_mask(self) -> np.ndarray:
@@ -404,9 +396,7 @@ class Forcefield(MutableMapping):
             lines.append(f"{key_str:<10s} | {param_name:<12s} : {status}")
         return "\n".join(lines)
 
-    # ------------------------------------------------------------------
-    # VP masks
-    # ------------------------------------------------------------------
+    # ── VP masks ───────────────────────────────────────────────
 
     def set_vp_masks(self, vp_types: Iterable[str]) -> None:
         """Classify parameters as virtual, real, or mixed.
@@ -472,9 +462,7 @@ class Forcefield(MutableMapping):
         """``~virtual_mask``: True for directly observable params."""
         return ~self.virtual_mask
 
-    # ------------------------------------------------------------------
-    # Parameter bounds
-    # ------------------------------------------------------------------
+    # ── Parameter bounds ───────────────────────────────────────────────
 
     @property
     def param_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -642,9 +630,7 @@ class Forcefield(MutableMapping):
             lines.append("(no parameters to display)")
         return "\n".join(lines)
 
-    # ------------------------------------------------------------------
-    # Deep copy
-    # ------------------------------------------------------------------
+    # ── Deep copy ───────────────────────────────────────────────
 
     def deepcopy(self) -> Forcefield:
         """Deep-copy all potentials and caches.  ``ff2 = ff.deepcopy()``."""
@@ -654,9 +640,7 @@ class Forcefield(MutableMapping):
         out._rebuild_structure_cache()
         return out
 
-    # ==================================================================
-    # Private helpers
-    # ==================================================================
+    # ── Private helpers ───────────────────────────────────────────────
 
     @staticmethod
     def _copy_val(v):

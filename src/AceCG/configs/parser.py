@@ -14,6 +14,7 @@ from typing import Any, Dict, Iterable, Mapping, MutableMapping, Optional, Seque
 from .models import (
     ACGConfig,
     AARefConfig,
+    AARefNoiseConfig,
     ConditioningConfig,
     FMInteractionSpec,
     FMTrainingSpecs,
@@ -35,9 +36,9 @@ class ACGConfigError(ValueError):
     """Raised when a ``.acg`` file cannot be parsed or validated."""
 
 
-# ─── Parser constants ─────────────────────────────────────────────────
+# ── Parser constants ─────────────────────────────────────────────────
 
-_SUPPORTED_METHODS = frozenset({"fm", "rem", "cdrem", "cdfm"})
+_SUPPORTED_METHODS = frozenset({"fm", "rem", "cdrem", "cdfm", "dsm"})
 _SUPPORTED_FM_METHODS = frozenset({"auto", "solver", "iterator"})
 _SUPPORTED_OPTIMIZER_TOKENS = frozenset(
     {
@@ -93,6 +94,15 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
             "beta",
             "cdfm_mode",
             "need_hessian",
+            "energy_mask",
+            "optimizer_gradient_mode",
+            "outside_aux_weight",
+            "allow_unmasked_optimizer_gradient",
+            "boundary_prior",
+            "boundary_prior_path",
+            "boundary_prior_pair_decay",
+            "boundary_prior_pair_strength",
+            "boundary_prior_wall_k_min",
         }
     ),
     "sampling": frozenset(
@@ -104,6 +114,8 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
             "replay_mode",
             "ncores",
             "perf_trace",
+            "perf_trace_all_ranks",
+            "heartbeat_interval",
             "sim_var",
         }
     ),
@@ -115,6 +127,7 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
             "python_exe",
             "task_timeout",
             "min_success_zbx",
+            "extra_env",
         }
     ),
     "aa_ref": frozenset(
@@ -129,6 +142,23 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
             "ref_has_vp",
             "ref_type_names",
             "ref_type_map",
+            "noise_enabled",
+            "noise_samples_per_frame",
+            "noise_sigma",
+            "noise_sigma_final",
+            "noise_schedule",
+            "noise_update_interval",
+            "noise_seed",
+            "noise_distribution",
+            "noise_selection",
+            "noise_include_original",
+            "noise_wrap",
+            "noise_batch_size",
+            "noise_subsample_per_epoch",
+            "noise_cache_policy",
+            "noise_force_mix_ratio",
+            "noise_neighbor_mode",
+            "noise_neighbor_skin",
         }
     ),
     "conditioning": frozenset(
@@ -148,10 +178,22 @@ _AUTHORED_FM_EXPORT_RESOLUTION = {
     "angle": 0.5,
 }
 
-_BOLTZMANN_KCAL = 0.001987204  # kcal/(mol·K)
+# kcal/(mol·K)
+_BOLTZMANN_KCAL = 0.001987204
+_PLANCK_J_S = 6.62607015e-34
+_BOLTZMANN_J_K = 1.380649e-23
+_AMU_KG = 1.66053906660e-27
+_DEBROGLIE_SIGMA_TOKENS = frozenset(
+    {
+        "de_broglie_100amu",
+        "debroglie_100amu",
+        "thermal_de_broglie_100amu",
+        "thermal_debroglie_100amu",
+    }
+)
 
 
-# ─── Public API ───────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────
 
 def parse_acg_file(path: str | Path) -> ACGConfig:
     """Load one ``.acg`` file and build the validated config model."""
@@ -455,6 +497,7 @@ def build_acg_config(
     )
     ref_has_vp = _pop_optional_bool(aa_ref_raw, "ref_has_vp", default=True)
     ref_topo = _pop_optional_str(aa_ref_raw, "ref_topo")
+    noise = _pop_aa_ref_noise_config(aa_ref_raw, temperature=temperature)
 
     # Resolve atom_type_name_aliases for the AA-ref engine spec.
     #   Priority: (1) explicit ref_type_map  (2) dual type_names  (3) fallback
@@ -480,6 +523,7 @@ def build_acg_config(
         ref_type_names=ref_type_names,
         ref_type_map=ref_type_map,
         ref_resolved_aliases=ref_resolved_aliases,
+        noise=noise,
         extras=aa_ref_raw,
     )
 
@@ -517,13 +561,13 @@ def build_acg_config(
     return config
 
 
-# ─── Validation ───────────────────────────────────────────────────────
+# ── Validation ───────────────────────────────────────────────────────
 
 def _validate_config(config: ACGConfig) -> None:  # noqa: C901
     method = config.training.method
     interactions = config.training.fm_specs.flattened()
     source_free_fm = (
-        method == "fm"
+        method in {"fm", "dsm"}
         and len(interactions) > 0
         and all(spec.init_mode == "authored_zero" for spec in interactions)
     )
@@ -533,9 +577,7 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
         raise ACGConfigError("system.topology_file is required.")
     if config.system.cutoff is not None and config.system.cutoff <= 0:
         raise ACGConfigError("system.cutoff must be positive.")
-    if (
-        method != "fm" or not source_free_fm
-    ) and not (config.system.forcefield_path or config.training.para_path):
+    if (not source_free_fm) and not (config.system.forcefield_path or config.training.para_path):
         raise ACGConfigError(
             "Define either system.forcefield_path or training.para_path so "
             "AceCG can load real.settings, or use authored B-spline FM specs only."
@@ -551,8 +593,8 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
     if config.training.n_epochs <= 0:
         raise ACGConfigError("training.n_epochs must be positive.")
 
-    # temperature / beta for rem/cdrem/cdfm
-    if method in ("rem", "cdrem", "cdfm"):
+    # temperature / beta for statistical objectives
+    if method in ("rem", "cdrem", "cdfm", "dsm"):
         if config.training.temperature is None:
             raise ACGConfigError(
                 "training.temperature (or training.beta) is required for "
@@ -562,11 +604,13 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
             raise ACGConfigError("training.temperature must be positive.")
 
     # FM specs
-    if method == "fm" and not interactions:
+    if method in {"fm", "dsm"} and not interactions:
         raise ACGConfigError(
             "training.fm_specs must define at least one trainable interaction "
-            "for FM."
+            f"for {method.upper()}."
         )
+    if method == "dsm" and config.training.fm_method == "solver":
+        raise ACGConfigError("DSM is iterative and does not support training.fm_method='solver'.")
 
     # AA ref
     if config.aa_ref.skip_frames < 0:
@@ -575,7 +619,88 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
         raise ACGConfigError("aa_ref.every must be positive.")
     if config.aa_ref.n_frames < 0:
         raise ACGConfigError("aa_ref.n_frames must be non-negative.")
-
+    noise = config.aa_ref.noise
+    if noise.schedule not in {"constant", "cosine", "exponential"}:
+        raise ACGConfigError(
+            "aa_ref.noise_schedule must be one of 'constant', 'cosine', or 'exponential'."
+        )
+    if noise.distribution not in {"gaussian", "normal"}:
+        raise ACGConfigError(
+            "aa_ref.noise_distribution must be 'gaussian' or 'normal'."
+        )
+    if noise.cache_policy not in {"stage", "none"}:
+        raise ACGConfigError("aa_ref.noise_cache_policy must be 'stage' or 'none'.")
+    if noise.neighbor_mode not in {"shared", "skin", "chunk"}:
+        raise ACGConfigError(
+            "aa_ref.noise_neighbor_mode must be one of 'shared', 'skin', or 'chunk'."
+        )
+    if noise.neighbor_skin < 0.0:
+        raise ACGConfigError("aa_ref.noise_neighbor_skin must be non-negative.")
+    if noise.update_interval <= 0:
+        raise ACGConfigError("aa_ref.noise_update_interval must be positive.")
+    if noise.samples_per_frame < 0:
+        raise ACGConfigError("aa_ref.noise_samples_per_frame must be non-negative.")
+    if noise.sigma < 0.0:
+        raise ACGConfigError("aa_ref.noise_sigma must be non-negative.")
+    if noise.sigma_final is not None and noise.sigma_final < 0.0:
+        raise ACGConfigError("aa_ref.noise_sigma_final must be non-negative.")
+    if noise.batch_size is not None and noise.batch_size <= 0:
+        raise ACGConfigError("aa_ref.noise_batch_size must be positive when set.")
+    if noise.subsample_per_epoch < 0:
+        raise ACGConfigError("aa_ref.noise_subsample_per_epoch must be non-negative.")
+    if not 0.0 <= noise.force_mix_ratio <= 1.0:
+        raise ACGConfigError("aa_ref.noise_force_mix_ratio must be between 0 and 1.")
+    if noise.force_mix_ratio > 0.0:
+        if method != "fm":
+            raise ACGConfigError(
+                "aa_ref.noise_force_mix_ratio is supported only for method='fm'."
+            )
+        if not noise.enabled:
+            raise ACGConfigError(
+                "aa_ref.noise_force_mix_ratio requires aa_ref.noise_enabled=true."
+            )
+        if noise.samples_per_frame <= 0:
+            raise ACGConfigError(
+                "aa_ref.noise_force_mix_ratio requires noise_samples_per_frame > 0."
+            )
+        if noise.sigma <= 0.0:
+            raise ACGConfigError(
+                "aa_ref.noise_force_mix_ratio requires aa_ref.noise_sigma > 0."
+            )
+        if config.training.temperature is None or config.training.temperature <= 0.0:
+            raise ACGConfigError(
+                "aa_ref.noise_force_mix_ratio requires training.temperature "
+                "(or training.beta)."
+            )
+    if noise.enabled:
+        if method not in {"fm", "rem", "dsm"}:
+            raise ACGConfigError(
+                "aa_ref.noise_enabled is supported only for method='fm' or "
+                "method='rem' or method='dsm'. Use restrained sampling inputs "
+                "for CDREM/CDFM coordinate perturbations."
+            )
+        if noise.samples_per_frame == 0 and not noise.include_original:
+            raise ACGConfigError(
+                "aa_ref.noise_enabled requires noise_samples_per_frame > 0 "
+                "unless noise_include_original=true."
+            )
+        if method == "rem" and not config.aa_ref.trajectory_files:
+            raise ACGConfigError(
+                "aa_ref.noise_enabled requires aa_ref.trajectory_files so noisy "
+                "AA statistics can be computed from coordinates."
+            )
+    if method == "dsm":
+        if not noise.enabled:
+            raise ACGConfigError("DSM requires aa_ref.noise_enabled=true.")
+        if noise.sigma <= 0.0:
+            raise ACGConfigError("DSM requires aa_ref.noise_sigma > 0.")
+        if noise.sigma_final is not None and noise.sigma_final <= 0.0:
+            raise ACGConfigError("DSM requires aa_ref.noise_sigma_final > 0 when set.")
+        if not config.aa_ref.trajectory_files:
+            raise ACGConfigError(
+                "aa_ref.trajectory_files must contain at least one trajectory "
+                "path for DSM."
+            )
     if method == "fm" and not config.aa_ref.trajectory_files:
         raise ACGConfigError(
             "aa_ref.trajectory_files must contain at least one trajectory "
@@ -639,13 +764,13 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
         _validate_conditioning_init_config_pool(config)
 
     # Conditioning forbidden for pure REM/FM
-    if method in ("fm", "rem") and config.conditioning.input is not None:
+    if method in ("fm", "rem", "dsm") and config.conditioning.input is not None:
         raise ACGConfigError(
             f"[conditioning] section is not used by method={method!r}."
         )
 
 
-# ─── Text-level parser helpers ────────────────────────────────────────
+# ── Text-level parser helpers ────────────────────────────────────────
 
 def _parse_section_header(line: str) -> Optional[str]:
     if line.startswith("[") and line.endswith("]"):
@@ -734,7 +859,7 @@ def _parse_scalar_or_literal(value: str) -> Any:
         return text
 
 
-# ─── Section-level helpers ────────────────────────────────────────────
+# ── Section-level helpers ────────────────────────────────────────────
 
 def _warn_unknown_keys(section_name: str, mapping: Mapping[str, Any]) -> None:
     allowed_keys = _SECTION_ALLOWED_KEYS[section_name]
@@ -1081,6 +1206,81 @@ def _pop_sim_var(mapping: MutableMapping[str, Any]) -> Dict[str, str]:
     )
 
 
+def thermal_de_broglie_sigma_angstrom(temperature: float, *, mass_amu: float = 100.0) -> float:
+    """Return the thermal de Broglie wavelength in Angstrom."""
+    temp = float(temperature)
+    mass = float(mass_amu)
+    if temp <= 0.0:
+        raise ACGConfigError("thermal de Broglie noise requires positive temperature.")
+    if mass <= 0.0:
+        raise ACGConfigError("thermal de Broglie noise requires positive mass.")
+    mass_kg = mass * _AMU_KG
+    wavelength_m = _PLANCK_J_S / math.sqrt(
+        2.0 * math.pi * mass_kg * _BOLTZMANN_J_K * temp
+    )
+    return float(wavelength_m * 1.0e10)
+
+
+def _pop_noise_sigma(
+    mapping: MutableMapping[str, Any],
+    *,
+    temperature: Optional[float],
+) -> float:
+    raw = mapping.pop("noise_sigma", 0.0)
+    if isinstance(raw, str):
+        token = raw.strip().lower()
+        if token in _DEBROGLIE_SIGMA_TOKENS:
+            if temperature is None:
+                raise ACGConfigError(
+                    "aa_ref.noise_sigma de_broglie_100amu requires "
+                    "training.temperature or training.beta."
+                )
+            return thermal_de_broglie_sigma_angstrom(float(temperature))
+    if raw is None:
+        return 0.0
+    return float(raw)
+
+
+def _pop_aa_ref_noise_config(
+    mapping: MutableMapping[str, Any],
+    *,
+    temperature: Optional[float],
+) -> AARefNoiseConfig:
+    """Parse flat ``[aa_ref] noise_*`` keys into a stored noise config."""
+    enabled = _pop_optional_bool(mapping, "noise_enabled", default=False)
+    return AARefNoiseConfig(
+        enabled=enabled,
+        samples_per_frame=_pop_optional_int(
+            mapping, "noise_samples_per_frame", default=0,
+        ),
+        sigma=_pop_noise_sigma(mapping, temperature=temperature),
+        sigma_final=_pop_optional_float(mapping, "noise_sigma_final"),
+        schedule=str(mapping.pop("noise_schedule", "constant")).strip().lower(),
+        update_interval=_pop_optional_int(
+            mapping, "noise_update_interval", default=1,
+        ),
+        seed=_pop_optional_int(mapping, "noise_seed", default=0),
+        distribution=str(mapping.pop("noise_distribution", "gaussian")).strip().lower(),
+        selection=mapping.pop("noise_selection", "all"),
+        include_original=_pop_optional_bool(
+            mapping, "noise_include_original", default=False,
+        ),
+        wrap=_pop_optional_bool(mapping, "noise_wrap", default=False),
+        batch_size=_pop_optional_int(mapping, "noise_batch_size"),
+        subsample_per_epoch=_pop_optional_int(
+            mapping, "noise_subsample_per_epoch", default=0,
+        ),
+        cache_policy=str(mapping.pop("noise_cache_policy", "stage")).strip().lower(),
+        force_mix_ratio=_pop_optional_float(
+            mapping, "noise_force_mix_ratio", default=0.0,
+        ),
+        neighbor_mode=str(mapping.pop("noise_neighbor_mode", "shared")).strip().lower(),
+        neighbor_skin=_pop_optional_float(
+            mapping, "noise_neighbor_skin", default=0.0,
+        ),
+    )
+
+
 def _pop_optional_bool(
     mapping: MutableMapping[str, Any],
     key: str,
@@ -1095,7 +1295,7 @@ def _pop_optional_bool(
     return bool(value)
 
 
-# ─── FM spec parsing ─────────────────────────────────────────────────
+# ── FM spec parsing ─────────────────────────────────────────────────
 
 def _build_fm_training_specs(
     fm_specs_raw: MutableMapping[str, Any],
@@ -1112,9 +1312,9 @@ def _build_fm_training_specs(
     angle_specs = _parse_fm_spec_group(
         fm_specs_raw.pop("angle_specs", ()), expected_style="angle"
     )
-    if method != "fm" and (pair_specs or bond_specs or angle_specs):
+    if method not in {"fm", "dsm"} and (pair_specs or bond_specs or angle_specs):
         raise ACGConfigError(
-            "training.fm_specs is only supported when training.method = fm."
+            "training.fm_specs is only supported when training.method is 'fm' or 'dsm'."
         )
     return FMTrainingSpecs(
         pair_specs=pair_specs,

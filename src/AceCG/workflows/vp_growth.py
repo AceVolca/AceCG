@@ -407,7 +407,7 @@ def _topology_format_for_path(path: Path) -> Optional[str]:
     return None
 
 
-# ─── CLI ────────────────────────────────────────────────────────────
+# ── CLI ────────────────────────────────────────────────────────────
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

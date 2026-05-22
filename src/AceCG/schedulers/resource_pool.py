@@ -21,9 +21,7 @@ from dataclasses import dataclass
 from .mpi_backend import MpiBackend, pick_backend
 
 
-# ---------------------------------------------------------------------------
-# Data types
-# ---------------------------------------------------------------------------
+# ── Data types ───────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class HostInventory:
@@ -58,9 +56,7 @@ class CpuLease:
         return ",".join(str(i) for i in ids)
 
 
-# ---------------------------------------------------------------------------
-# LeasePool
-# ---------------------------------------------------------------------------
+# ── LeasePool ───────────────────────────────────────────────
 
 class LeasePool:
     """Dynamic CPU allocation pool across multiple hosts.
@@ -136,7 +132,8 @@ def _allocate_contiguous(free: list[int], n: int) -> list[int]:
     """
     s = sorted(free)
     if len(s) < n:
-        return s[:n]  # caller validated len; just in case.
+        # Keep the helper defensive when called outside the placement path.
+        return s[:n]
     best_window: list[int] | None = None
     best_span: int | None = None
     for i in range(len(s) - n + 1):
@@ -150,9 +147,7 @@ def _allocate_contiguous(free: list[int], n: int) -> list[int]:
     return best_window if best_window is not None else s[:n]
 
 
-# ---------------------------------------------------------------------------
-# Placer
-# ---------------------------------------------------------------------------
+# ── Placer ───────────────────────────────────────────────
 
 from .mpi_backend import HostSlice, Placement
 
@@ -197,7 +192,8 @@ class Placer:
         Multi-host path (opt-in): greedy pack across hosts when no single
         host can satisfy *min_cores* and the backend supports it.
         """
-        # --- single-host path (always tried first) ---
+        # ── single-host path (always tried first) ───────────────────────────────────────────────
+
         for n in range(preferred_cores, min_cores - 1, -1):
             if self.pool.max_free_on_any_host() >= n:
                 lease = self.pool.acquire(n)
@@ -208,7 +204,8 @@ class Placer:
         if single_host_only or not self.backend.supports_multi_host:
             return None
 
-        # --- multi-host fallback ---
+        # ── multi-host fallback ───────────────────────────────────────────────
+
         # Greedy: pack across hosts by descending free-cores until we
         # reach at least min_cores (up to preferred_cores).
         total_free = self.pool.free_total()
@@ -292,9 +289,7 @@ class Placer:
         return PlacementResult(placement, leases)
 
 
-# ---------------------------------------------------------------------------
-# ResourcePool
-# ---------------------------------------------------------------------------
+# ── ResourcePool ───────────────────────────────────────────────
 
 class ResourcePool:
     """Discover compute resources and select the MPI backend.
@@ -401,9 +396,7 @@ class ResourcePool:
         return f"ResourcePool([{hosts}], backend={self.backend.name!r})"
 
 
-# ---------------------------------------------------------------------------
-# Host discovery
-# ---------------------------------------------------------------------------
+# ── Host discovery ───────────────────────────────────────────────
 
 def _discover_hosts() -> list[HostInventory]:
     """Auto-discover hosts from SLURM env or localhost.
@@ -641,9 +634,7 @@ def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
 
-# ---------------------------------------------------------------------------
-# SLURM_NODELIST parser
-# ---------------------------------------------------------------------------
+# ── SLURM_NODELIST parser ───────────────────────────────────────────────
 
 def _parse_slurm_nodelist(nodelist: str) -> list[str]:
     """Expand ``SLURM_NODELIST`` into individual hostnames."""

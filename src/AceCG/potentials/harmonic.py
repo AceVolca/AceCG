@@ -1,4 +1,5 @@
-# AceCG/potentials/harmonic.py
+"""AceCG potentials harmonic implementation."""
+
 import numpy as np
 from .base import BasePotential
 
@@ -39,7 +40,7 @@ class HarmonicPotential(BasePotential):
             Multiplicative factor applied to the squared displacement. Angle
             terms use this to convert degree displacements into radians.
         """
-        super().__init__()
+        super().__init__(bonded=True)
         self.typ1 = typ1
         self.typ2 = typ2
         self.typ3 = typ3
@@ -55,7 +56,8 @@ class HarmonicPotential(BasePotential):
         ]
         self._df_dparam_names = ["dkdr", "dr0dr"]
 
-    # --- Potential and force ---
+    # ── Potential and force ───────────────────────────────────────────────
+
     # U(r) = k * scale * (r - r0)^2
     # F(r) = -dU/dr = -2 * k * scale * (r - r0)
 
@@ -73,7 +75,7 @@ class HarmonicPotential(BasePotential):
         k, r0 = self._params
         return -2.0 * k * self.scale * (np.asarray(r) - r0)
 
-    # --- Energy derivatives (for energy_grad in REM/CDREM) ---
+    # ── Energy derivatives (for energy_grad in REM/CDREM) ───────────────────────────────────────────────
 
     def dk(self, r):
         """dU/dk = scale * (r - r0)^2"""
@@ -99,7 +101,7 @@ class HarmonicPotential(BasePotential):
         k, _ = self._params
         return np.full_like(np.asarray(r, dtype=float), 2.0 * k * self.scale)
 
-    # --- Force derivatives (for iterative FM) ---
+    # ── Force derivatives (for iterative FM) ───────────────────────────────────────────────
 
     def dkdr(self, r):
         """dF/dk = -2 * scale * (r - r0)"""
@@ -111,7 +113,7 @@ class HarmonicPotential(BasePotential):
         k, _ = self._params
         return np.full_like(np.asarray(r, dtype=float), 2.0 * k * self.scale)
 
-    # --- Parameter bounds ---
+    # ── Parameter bounds ───────────────────────────────────────────────
 
     def param_bounds(self):
         """Return (lower_bounds, upper_bounds) arrays for [k, r0].
@@ -122,7 +124,7 @@ class HarmonicPotential(BasePotential):
         ub = np.array([np.inf, np.inf])
         return lb, ub
 
-    # --- Force basis (for FM/CDFM design matrix) ---
+    # ── Force basis (for FM/CDFM design matrix) ───────────────────────────────────────────────
 
     def basis_values(self, r):
         """Force Jacobian [dF/dk, dF/dr0] where F = -dU/dr.

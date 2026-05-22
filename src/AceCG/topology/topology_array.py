@@ -50,11 +50,16 @@ class TopologyArrays:
     """
 
     # ── atom-level ──────────────────────────────────────────────
-    n_atoms: int                        # total number of atoms (real + virtual)
-    names: np.ndarray                   # (n_atoms,) object/str — per-atom name
-    types: np.ndarray                   # (n_atoms,) object/str — per-atom type name
-    atom_type_names: np.ndarray         # (n_unique_types,) object/str — ordered unique type names
-    atom_type_codes: np.ndarray         # (n_atoms,) int32 — per-atom type code
+    # total number of atoms (real + virtual)
+    n_atoms: int
+    # (n_atoms,) object/str — per-atom name
+    names: np.ndarray
+    # (n_atoms,) object/str — per-atom type name
+    types: np.ndarray
+    # (n_unique_types,) object/str — ordered unique type names
+    atom_type_names: np.ndarray
+    # (n_atoms,) int32 — per-atom type code
+    atom_type_codes: np.ndarray
     
     # ── residue / molecule metadata ─────────────────────────────
     n_residues: int
@@ -83,16 +88,19 @@ class TopologyArrays:
     virtual_site_indices: np.ndarray
 
     # ── instance → canonical key index ──────────────────────────
-    bond_key_index: np.ndarray          # (n_bond,) int32
-    angle_key_index: np.ndarray         # (n_angle,) int32
-    dihedral_key_index: np.ndarray      # (n_dihedral,) int32
+    # (n_bond,) int32
+    bond_key_index: np.ndarray
+    # (n_angle,) int32
+    angle_key_index: np.ndarray
+    # (n_dihedral,) int32
+    dihedral_key_index: np.ndarray
 
     # ── canonical key tables ────────────────────────────────────
     keys_bondtypes: List[InteractionKey]
     keys_angletypes: List[InteractionKey]
     keys_dihedraltypes: List[InteractionKey]
     
-    # ── type translators
+    # ── type translators ───────────────────────────────────────
     atom_type_name_to_code: dict[str, int]
     atom_type_code_to_name: dict[int, str]
     bond_type_id_to_key: dict[int, InteractionKey]
@@ -177,11 +185,13 @@ def collect_topology_arrays(
 
     _from_LAMMPS = True
     _has_names = True
-    if hasattr(u.atoms, "names"): # case 1
+    # case 1
+    if hasattr(u.atoms, "names"):
         # PDB, PSF, GRO, etc.
         out["names"] = np.asarray(u.atoms.names)
         _from_LAMMPS = False
-    elif atom_type_name_aliases is not None: # case 2
+    # case 2
+    elif atom_type_name_aliases is not None:
         # LAMMPS data: use alias to map type code to name.
         # Notice that bonds types are defined by atom names in LAMMPS.
         # Will construct InteractionKeys based on type aliases.
@@ -192,7 +202,8 @@ def collect_topology_arrays(
         )
         u.add_TopologyAttr("names", out["names"])
         # In this path, the universe will still have names
-    else: # case 3
+    # case 3
+    else:
         # LAMMPS data: no names, no alias.
         # Use types as names.
         # Later, will construct InteractionKeys based on LAMMPS type codes.
@@ -214,7 +225,8 @@ def collect_topology_arrays(
     #   Keep raw LAMMPS atom-type ids as codes, and map alias names <-> raw ids.
     # Case 3: LAMMPS + no alias
     #   Keep raw LAMMPS atom-type ids as codes, and use their string form as names.
-    if _has_names and not _from_LAMMPS:  # case 1
+    # case 1
+    if _has_names and not _from_LAMMPS:
         type_names = np.asarray(out["types"], dtype=object).astype(str)
         atom_type_names, atom_type_codes = np.unique(type_names, return_inverse=True)
 
@@ -226,7 +238,8 @@ def collect_topology_arrays(
         out["atom_type_code_to_name"] = {
             int(code) + 1: str(name) for code, name in enumerate(atom_type_names)
         }
-    elif _has_names:  # case 2
+    # case 2
+    elif _has_names:
         raw_type_codes = np.asarray(u.atoms.types, dtype=np.int32)
         unique_raw_types = np.unique(raw_type_codes)
         atom_type_names = np.asarray(
@@ -242,7 +255,8 @@ def collect_topology_arrays(
         out["atom_type_code_to_name"] = {
             int(type_id): str(name) for type_id, name in zip(unique_raw_types, atom_type_names)
         }
-    else:  # case 3
+    # case 3
+    else:
         raw_type_codes = np.asarray(u.atoms.types, dtype=np.int32)
         unique_raw_types = np.unique(raw_type_codes)
         atom_type_names = np.asarray([str(int(type_id)) for type_id in unique_raw_types], dtype=object)
@@ -280,17 +294,22 @@ def collect_topology_arrays(
     # They have BOTH atom names AND types defined.
     # For PDB and GRO files, atom types are usually still NOT GUARANTEED to be the same as names.
 
-    for i in range(3): # Loop over bonds, angles, dihedrals
+    # Loop over bonds, angles, dihedrals
+    for i in range(3):
         attr = bonded_types[i]
         exclude_attr = exclude_attrs[i]
         attr1 = bonded_type_singles[i]
         width = i + 2
         
         if not hasattr(u, attr):
-            out[attr] = np.empty((0, width), dtype=np.int32) # bonded list
-            out[exclude_attr] = np.empty((0, 2), dtype=np.int32) # exclusion
-            out[f"{attr1}_key_index"] = np.empty(0, dtype=np.int32) # bonded key index
-            out[f"keys_{attr1}types"] = [] # interaction keys
+            # bonded list
+            out[attr] = np.empty((0, width), dtype=np.int32)
+            # exclusion
+            out[exclude_attr] = np.empty((0, 2), dtype=np.int32)
+            # bonded key index
+            out[f"{attr1}_key_index"] = np.empty(0, dtype=np.int32)
+            # interaction keys
+            out[f"keys_{attr1}types"] = []
             continue
             
         else: 

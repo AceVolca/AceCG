@@ -1,4 +1,3 @@
-# AceCG/trainers/analytic/cdfm.py
 """CDFM trainer with by-x batch aggregation inside ``step()``."""
 
 from __future__ import annotations

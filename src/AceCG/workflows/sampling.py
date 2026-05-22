@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
+from ..configs.energy_mask import normalize_energy_mask_spec
 from ..configs.models import ACGConfig
 from ..configs.utils import parse_pair_style_options
 from ..io.forcefield import ReadLmpFF, WriteLmpFF
@@ -27,7 +28,29 @@ from ..topology.forcefield import Forcefield
 from .base import BaseWorkflow
 
 
-_BOLTZMANN_KCAL = 0.001987204  # kcal/(mol·K)
+# kcal/(mol·K)
+_BOLTZMANN_KCAL = 0.001987204
+
+
+def resolve_aa_noise_sigma(noise: Any, *, n_epochs: int, stage: int) -> float:
+    """Run the resolve aa noise sigma operation."""
+    sigma0 = float(noise.sigma)
+    sigma1 = sigma0 if noise.sigma_final is None else float(noise.sigma_final)
+    if sigma0 == sigma1:
+        return sigma0
+    interval = max(int(noise.update_interval), 1)
+    n_stages = max((int(n_epochs) + interval - 1) // interval, 1)
+    progress = 0.0 if n_stages <= 1 else min(max(int(stage), 0), n_stages - 1) / float(n_stages - 1)
+    schedule = str(noise.schedule).strip().lower()
+    if schedule == "constant":
+        return sigma0
+    if schedule == "cosine":
+        return sigma1 + 0.5 * (sigma0 - sigma1) * (1.0 + np.cos(np.pi * progress))
+    if schedule == "exponential":
+        if sigma0 <= 0.0 or sigma1 <= 0.0:
+            return sigma1 if progress >= 1.0 else sigma0
+        return sigma0 * ((sigma1 / sigma0) ** progress)
+    raise ValueError(f"Unsupported aa_ref noise schedule {schedule!r}.")
 
 
 @dataclass(frozen=True)
@@ -36,6 +59,18 @@ class AAStats:
 
     energy_grad: np.ndarray
     d2U: Optional[np.ndarray] = None
+    gradient_convention: str = "physical"
+    unmasked_energy_grad: Optional[np.ndarray] = None
+
+    @staticmethod
+    def _normalize_gradient_convention(value: Any) -> Optional[str]:
+        """Normalize serialized gradient-convention labels."""
+        if value is None:
+            return None
+        convention = str(value).strip()
+        if not convention:
+            return None
+        return convention.lower()
 
     @classmethod
     def from_payload(
@@ -46,6 +81,7 @@ class AAStats:
         hess_key: str,
         need_hessian: bool,
         label: str,
+        expected_gradient_convention: Optional[str] = None,
     ) -> "AAStats":
         """Build AA statistics from a serialized payload.
 
@@ -61,6 +97,8 @@ class AAStats:
             Whether missing Hessian data should raise an error.
         label : str
             Human-readable label included in validation errors.
+        expected_gradient_convention : str, optional
+            Required gradient convention for the serialized payload.
         """
         if not isinstance(payload, dict):
             raise ValueError(f"{label} must be a dict, got {type(payload).__name__}.")
@@ -69,9 +107,33 @@ class AAStats:
         d2u_raw = payload.get(hess_key)
         if need_hessian and d2u_raw is None:
             raise KeyError(f"{label} must contain {hess_key!r} when Hessian data is required.")
+        gradient_convention = cls._normalize_gradient_convention(
+            payload.get("gradient_convention")
+        )
+        expected_gradient_convention = cls._normalize_gradient_convention(
+            expected_gradient_convention
+        )
+        if expected_gradient_convention == "gauge_free" and not gradient_convention:
+            raise KeyError(
+                f"{label} must contain 'gradient_convention' for cached REM statistics. "
+                "Accepted value is 'gauge_free'."
+            )
+        if (
+            expected_gradient_convention is not None
+            and gradient_convention is not None
+            and gradient_convention != expected_gradient_convention
+        ):
+            raise ValueError(
+                f"{label} uses gradient_convention={gradient_convention!r}, "
+                f"expected {expected_gradient_convention!r}."
+            )
         return cls(
             energy_grad=np.asarray(payload[grad_key], dtype=np.float64),
             d2U=None if d2u_raw is None else np.asarray(d2u_raw, dtype=np.float64),
+            gradient_convention=gradient_convention or expected_gradient_convention or "physical",
+            unmasked_energy_grad=None
+            if payload.get("unmasked_energy_grad_avg") is None
+            else np.asarray(payload["unmasked_energy_grad_avg"], dtype=np.float64),
         )
 
 
@@ -84,7 +146,7 @@ class SamplingWorkflow(BaseWorkflow):
         scheduler       – ``TaskScheduler`` for running sim + post tasks
         sampler         – ``BaseSampler`` for xz sampling
         beta            – inverse temperature (kcal/mol)^{-1}
-        aa_data_strategy – ``AAStats`` or ``Callable[[Forcefield], AAStats]``
+        aa_data_strategy – ``AAStats`` or an epoch-aware AAStats callable
     """
 
     def __init__(self, config: ACGConfig, **kwargs: Any) -> None:
@@ -98,7 +160,7 @@ class SamplingWorkflow(BaseWorkflow):
         self.scheduler = self._build_scheduler()
         self.sampler = self._build_sampler()
         self.beta = self._derive_beta()
-        self.aa_data_strategy: Optional[AAStats | Callable[[Forcefield], AAStats]] = None
+        self.aa_data_strategy: Optional[AAStats | Callable[..., AAStats]] = None
 
     # ── builders ────────────────────────────────────────────────
 
@@ -153,7 +215,35 @@ class SamplingWorkflow(BaseWorkflow):
             )
         return 1.0 / (_BOLTZMANN_KCAL * T)
 
-    def _build_aa_data_strategy(self) -> AAStats | Callable[[Forcefield], AAStats]:
+    def _load_aa_precompute(
+        self,
+        *,
+        need_hessian: bool,
+        expected_gradient_convention: str,
+    ) -> AAStats:
+        """Load existing cacheable AA statistics for a resumed workflow."""
+        output_file = self.output_dir / "aa_precompute" / "aa_stats.pkl"
+        if not output_file.exists():
+            raise FileNotFoundError(
+                "Cannot resume cacheable AA statistics because "
+                f"{output_file!s} does not exist."
+            )
+        with open(output_file, "rb") as fh:
+            payload = pickle.load(fh)
+        return AAStats.from_payload(
+            payload,
+            grad_key="energy_grad_avg",
+            hess_key="d2U_avg",
+            need_hessian=need_hessian,
+            label=f"AA precompute at {output_file!s}",
+            expected_gradient_convention=expected_gradient_convention,
+        )
+
+    def _build_aa_data_strategy(
+        self,
+        *,
+        reuse_precomputed: bool = False,
+    ) -> AAStats | Callable[..., AAStats]:
         """Build AA-reference data as a constant object or per-epoch callable."""
         if not hasattr(self, "trainer"):
             raise AttributeError("AA data strategy requires a constructed trainer.")
@@ -162,9 +252,52 @@ class SamplingWorkflow(BaseWorkflow):
             self.trainer.optimizer_accepts_hessian() or self.config.training.need_hessian
         )
         cache_path = self._resolve_config_path(self.config.aa_ref.all_atom_data_path)
-        is_linear = self.trainer.is_optimization_linear()
+        training_method = str(self.config.training.method).strip().lower()
+        expected_gradient_convention = "gauge_free" if training_method == "rem" else "physical"
+        is_cacheable = (
+            self.trainer.is_gauge_free_energy_grad_cacheable()
+            if expected_gradient_convention == "gauge_free"
+            else self.trainer.is_optimization_linear()
+        )
+        noise_enabled = bool(getattr(self.config.aa_ref.noise, "enabled", False))
 
-        if is_linear:
+        if noise_enabled:
+            if not self.config.aa_ref.trajectory_files:
+                raise ValueError(
+                    "aa_ref.trajectory_files is required when aa_ref noise is enabled."
+                )
+            aa_cache: Dict[int, AAStats] = {}
+            aa_counter = count()
+
+            def compute_noisy_aa_stats(
+                forcefield: Forcefield,
+                epoch: Optional[int] = None,
+            ) -> AAStats:
+                stage = self._aa_noise_stage(epoch)
+                use_stage_cache = is_cacheable and self.config.aa_ref.noise.cache_policy == "stage"
+                if use_stage_cache and stage in aa_cache:
+                    return aa_cache[stage]
+                if epoch is None:
+                    suffix = next(aa_counter)
+                    work_dir = self.output_dir / f"aa_noise_stage_{stage:04d}_{suffix:04d}"
+                elif is_cacheable:
+                    work_dir = self.output_dir / f"aa_noise_stage_{stage:04d}"
+                else:
+                    work_dir = self.output_dir / f"aa_recompute_{int(epoch):04d}"
+                stats = self._run_aa_post(
+                    work_dir=work_dir,
+                    forcefield=forcefield,
+                    need_hessian=need_hessian,
+                    noise_spec=self._aa_noise_runtime_spec(stage, epoch=epoch),
+                    gradient_convention=expected_gradient_convention,
+                )
+                if use_stage_cache:
+                    aa_cache[stage] = stats
+                return stats
+
+            return compute_noisy_aa_stats
+
+        if is_cacheable:
             if cache_path is not None:
                 if not cache_path.exists():
                     raise FileNotFoundError(f"all_atom_data_path {cache_path!s} does not exist.")
@@ -176,32 +309,110 @@ class SamplingWorkflow(BaseWorkflow):
                     hess_key="d2U_AA",
                     need_hessian=need_hessian,
                     label=f"AA data at {cache_path!s}",
+                    expected_gradient_convention=expected_gradient_convention,
+                )
+            if reuse_precomputed:
+                return self._load_aa_precompute(
+                    need_hessian=need_hessian,
+                    expected_gradient_convention=expected_gradient_convention,
                 )
             return self._run_aa_post(
                 work_dir=self.output_dir / "aa_precompute",
                 forcefield=self.forcefield,
                 need_hessian=need_hessian,
+                gradient_convention=expected_gradient_convention,
             )
 
         if not self.config.aa_ref.trajectory_files:
             raise ValueError(
-                "Nonlinear REM requires aa_ref.trajectory_files so AA statistics "
+                "Non-cacheable REM requires aa_ref.trajectory_files so AA statistics "
                 "can be recomputed for the current forcefield each epoch."
             )
 
         aa_counter = count()
 
-        def compute_aa_stats(forcefield: Forcefield) -> AAStats:
-            step_index = next(aa_counter)
+        def compute_aa_stats(
+            forcefield: Forcefield,
+            epoch: Optional[int] = None,
+        ) -> AAStats:
+            step_index = next(aa_counter) if epoch is None else int(epoch)
             return self._run_aa_post(
                 work_dir=self.output_dir / f"aa_recompute_{step_index:04d}",
                 forcefield=forcefield,
                 need_hessian=need_hessian,
+                gradient_convention=expected_gradient_convention,
             )
 
         return compute_aa_stats
 
     # ── FF write / snapshot helpers ─────────────────────────────
+
+    def _aa_noise_stage(self, epoch: Optional[int]) -> int:
+        noise = self.config.aa_ref.noise
+        if epoch is None:
+            return 0
+        return int(epoch) // int(noise.update_interval)
+
+    def _aa_noise_runtime_spec(
+        self,
+        stage: int,
+        *,
+        epoch: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        noise = self.config.aa_ref.noise
+        runtime = noise.to_runtime_dict()
+        runtime["sigma"] = self._aa_noise_sigma(stage)
+        runtime["seed"] = int(noise.seed) + int(stage)
+        if int(noise.subsample_per_epoch) > 0:
+            subsample_stage = int(stage) if epoch is None else int(epoch)
+            runtime["subsample_seed"] = int(noise.seed) + subsample_stage
+        return runtime
+
+    def _aa_noise_sigma(self, stage: int) -> float:
+        return resolve_aa_noise_sigma(
+            self.config.aa_ref.noise,
+            n_epochs=int(self.config.training.n_epochs),
+            stage=stage,
+        )
+
+    def _energy_mask_runtime_spec(self) -> Optional[Dict[str, Any]]:
+        """Return normalized ``training.energy_mask`` bounds for post specs."""
+        raw = self.config.training.extras.get("energy_mask")
+        normalized = normalize_energy_mask_spec(raw)
+        return normalized or None
+
+    def _optimizer_gradient_mode(self) -> str:
+        """Return the configured REM-style optimizer-gradient mode."""
+        mode = str(
+            self.config.training.extras.get("optimizer_gradient_mode", "masked")
+        ).strip().lower()
+        if mode not in {"masked", "hybrid_aux", "unmasked"}:
+            raise ValueError(
+                "training.optimizer_gradient_mode must be 'masked', "
+                f"'hybrid_aux', or 'unmasked', got {mode!r}."
+            )
+        return mode
+
+    def _outside_aux_weight(self) -> float:
+        """Return the configured hybrid auxiliary outside-mask weight."""
+        return float(self.config.training.extras.get("outside_aux_weight", 1.0))
+
+    def _allow_unmasked_optimizer_gradient(self) -> bool:
+        """Return whether unmasked optimizer gradients were acknowledged."""
+        return bool(
+            self.config.training.extras.get(
+                "allow_unmasked_optimizer_gradient",
+                False,
+            )
+        )
+
+    def _apply_rem_statistics_options(self, step: Dict[str, Any]) -> None:
+        """Attach coordinate mask and neutral observable requests to a step."""
+        energy_mask = self._energy_mask_runtime_spec()
+        if energy_mask is not None:
+            step["energy_mask"] = energy_mask
+            if self._optimizer_gradient_mode() in {"hybrid_aux", "unmasked"}:
+                step["need_aux_unmasked_energy_grad"] = True
 
     def _write_forcefield(self, ff_dir: Path) -> Path:
         """Write the current runtime forcefield bundle under *ff_dir*."""
@@ -249,17 +460,61 @@ class SamplingWorkflow(BaseWorkflow):
         snapshot_path = ff_dir / "optimizer_snapshot.pkl"
         ff_dir.mkdir(parents=True, exist_ok=True)
         with open(snapshot_path, "wb") as fh:
-            pickle.dump(self.optimizer.state_dict(), fh,
+            pickle.dump(self._active_optimizer_state(), fh,
                         protocol=pickle.HIGHEST_PROTOCOL)
         return snapshot_path
+
+    def _active_optimizer_state(self) -> Dict[str, Any]:
+        """Return the optimizer state that is actually driving training."""
+        trainer = getattr(self, "trainer", None)
+        optimizer = getattr(trainer, "optimizer", None)
+        if optimizer is None:
+            optimizer = getattr(self, "optimizer", None)
+        if optimizer is None:
+            raise RuntimeError("No optimizer is available for workflow checkpointing.")
+        if hasattr(optimizer, "checkpoint_state_dict"):
+            return dict(optimizer.checkpoint_state_dict())
+        state = dict(optimizer.state_dict())
+        state["optimizer_class"] = type(optimizer).__name__
+        return state
+
+    def _active_forcefield(self) -> Forcefield:
+        """Return the forcefield that currently owns trained parameters."""
+        trainer = getattr(self, "trainer", None)
+        forcefield = getattr(trainer, "forcefield", None)
+        if forcefield is not None:
+            return forcefield
+        return self.forcefield
+
+    def _configured_start_epoch(self) -> int:
+        """Return the configured resume start epoch for strict validation."""
+        training = getattr(getattr(self, "config", None), "training", None)
+        return int(getattr(training, "start_epoch", 0) or 0)
+
+    def _validate_optimizer_checkpoint_state(
+        self,
+        state: Any,
+        optimizer: Any,
+        forcefield: Forcefield,
+    ) -> None:
+        """Ask the optimizer to validate checkpoint state for strict resume."""
+        if not hasattr(optimizer, "validate_checkpoint_state"):
+            raise ValueError(
+                "optimizer does not support strict checkpoint validation."
+            )
+        optimizer.validate_checkpoint_state(
+            state,
+            forcefield,
+            require_completed_step=self._configured_start_epoch() > 0,
+        )
 
     def _write_workflow_checkpoint(self, ff_dir: Path) -> Path:
         """Persist the completed-epoch state used for workflow resume."""
         snapshot_path = ff_dir / "workflow_checkpoint.pkl"
         ff_dir.mkdir(parents=True, exist_ok=True)
         payload: Dict[str, Any] = {
-            "forcefield": copy.deepcopy(self.forcefield),
-            "optimizer_state": self.optimizer.state_dict(),
+            "forcefield": copy.deepcopy(self._active_forcefield()),
+            "optimizer_state": self._active_optimizer_state(),
             "workflow_rng_state": self.workflow_rng.getstate(),
         }
         sampler = getattr(self, "sampler", None)
@@ -281,7 +536,18 @@ class SamplingWorkflow(BaseWorkflow):
             payload = pickle.load(fh)
         self.forcefield = payload["forcefield"]
         self.optimizer = self._build_optimizer(self.forcefield)
-        self.optimizer.load_state_dict(payload["optimizer_state"])
+        optimizer_state = payload.get("optimizer_state")
+        if optimizer_state is None:
+            raise ValueError(
+                "Workflow checkpoint is missing 'optimizer_state'; strict "
+                "resume cannot reconstruct stateful optimizer moments."
+            )
+        self.optimizer.load_checkpoint_state(
+            optimizer_state,
+            self.forcefield,
+            require_completed_step=self._configured_start_epoch() > 0,
+        )
+        self._align_optimizer_params_to_forcefield()
         self.workflow_rng.setstate(payload["workflow_rng_state"])
         sampler = getattr(self, "sampler", None)
         sampler_state = payload.get("sampler_state")
@@ -293,17 +559,41 @@ class SamplingWorkflow(BaseWorkflow):
             scheduler.load_state_dict(scheduler_state)
         return snapshot_path
 
-    def _load_optimizer_snapshot(self, snapshot_path: Path) -> None:
-        """Restore optimizer state written by :meth:`_snapshot_optimizer`.
-
-        Silently tolerates a missing file (pre-snapshot runs) — resume then
-        degrades to zero-moment init, same as before this helper existed.
-        """
-        if not snapshot_path.exists():
+    def _align_optimizer_params_to_forcefield(self) -> None:
+        """Reject optimizer parameters that do not match checkpoint forcefield."""
+        optimizer_l = getattr(self.optimizer, "L", None)
+        if optimizer_l is None or not hasattr(self.forcefield, "param_array"):
             return
+        forcefield_params = np.asarray(
+            self.forcefield.param_array(),
+            dtype=np.asarray(optimizer_l).dtype,
+        )
+        if forcefield_params.shape != np.asarray(optimizer_l).shape:
+            raise ValueError(
+                "optimizer checkpoint parameter shape does not match "
+                "forcefield checkpoint parameter shape."
+            )
+        if not np.allclose(optimizer_l, forcefield_params, rtol=0.0, atol=1e-9):
+            raise ValueError(
+                "optimizer checkpoint field 'L' does not match checkpoint "
+                "forcefield parameters."
+            )
+
+    def _load_optimizer_snapshot(self, snapshot_path: Path) -> None:
+        """Restore a standalone optimizer snapshot with strict validation."""
+        if not snapshot_path.exists():
+            raise FileNotFoundError(
+                f"Optimizer snapshot {snapshot_path} not found; strict resume "
+                "cannot cold-start optimizer state."
+            )
         with open(snapshot_path, "rb") as fh:
             state = pickle.load(fh)
-        self.optimizer.load_state_dict(state)
+        self.optimizer.load_checkpoint_state(
+            state,
+            self.forcefield,
+            require_completed_step=self._configured_start_epoch() > 0,
+        )
+        self._align_optimizer_params_to_forcefield()
 
     def _elastic_core_bounds(
         self, explicit_ncores: Optional[int],
@@ -339,6 +629,8 @@ class SamplingWorkflow(BaseWorkflow):
         work_dir: Path,
         forcefield: Forcefield,
         need_hessian: bool,
+        noise_spec: Optional[Dict[str, Any]] = None,
+        gradient_convention: str = "physical",
     ) -> AAStats:
         """Run MPI engine in ``rem`` mode on AA reference trajectory.
 
@@ -366,12 +658,13 @@ class SamplingWorkflow(BaseWorkflow):
             "cutoff": cfg.system.cutoff,
             "steps": [
                 {
-                    "step_mode": "rem",
+                    "step_mode": cfg.training.method,
                     "need_hessian": need_hessian,
                     "output_file": str(output_file),
                 }
             ],
         }
+        self._apply_rem_statistics_options(spec["steps"][0])
         # AA-ref topology / alias overrides (from parser resolution)
         if cfg.aa_ref.ref_topo is not None:
             spec["topology"] = str(self._resolve_config_path(cfg.aa_ref.ref_topo))
@@ -387,6 +680,9 @@ class SamplingWorkflow(BaseWorkflow):
             spec["frame_start"] = cfg.aa_ref.skip_frames
         if cfg.aa_ref.n_frames > 0:
             spec["frame_end"] = cfg.aa_ref.skip_frames + cfg.aa_ref.n_frames
+        if noise_spec is not None:
+            spec["noise"] = dict(noise_spec)
+        self._apply_post_runtime_options(spec)
 
         run_post(
             spec,
@@ -406,4 +702,13 @@ class SamplingWorkflow(BaseWorkflow):
             hess_key="d2U_avg",
             need_hessian=need_hessian,
             label=f"AA engine result at {output_file!s}",
+            expected_gradient_convention=gradient_convention,
         )
+
+    def _apply_post_runtime_options(self, spec: Dict[str, Any]) -> None:
+        if self.config.sampling.perf_trace:
+            spec["perf_trace"] = True
+            interval = self.config.sampling.extras.get("heartbeat_interval", 25)
+            spec["heartbeat_interval"] = int(interval)
+        if bool(self.config.sampling.extras.get("perf_trace_all_ranks", False)):
+            spec["perf_trace_all_ranks"] = True

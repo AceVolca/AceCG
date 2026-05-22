@@ -135,7 +135,7 @@ class VPGrowthConfig:
     run: VPGrowthRun = field(default_factory=VPGrowthRun)
 
 
-# ─── Public API ───────────────────────────────────────────────────────
+# ── Public API ───────────────────────────────────────────────────────
 
 
 def parse_vp_growth_file(path: str | Path) -> VPGrowthConfig:
@@ -161,7 +161,7 @@ def parse_vp_growth_text(
     return replace(cfg, path=None)
 
 
-# ─── Core builder ─────────────────────────────────────────────────────
+# ── Core builder ─────────────────────────────────────────────────────
 
 
 def _build_vp_growth_config(
@@ -280,7 +280,7 @@ def _apply_vp_topology_overrides(
     return replace(vp_core, **kwargs) if kwargs else vp_core
 
 
-# ─── Field-level helpers ──────────────────────────────────────────────
+# ── Field-level helpers ──────────────────────────────────────────────
 
 
 def _parse_type_names_field(
@@ -391,7 +391,7 @@ def _as_bool(raw: Any) -> bool:
     raise ACGConfigError(f"Cannot interpret {raw!r} as a boolean.")
 
 
-# ─── Cross-section validation ─────────────────────────────────────────
+# ── Cross-section validation ─────────────────────────────────────────
 
 
 def _validate_alias_consistency(vp: VPConfig, aa_ref: VPGrowthAARef) -> None:
@@ -415,7 +415,8 @@ def _validate_alias_consistency(vp: VPConfig, aa_ref: VPGrowthAARef) -> None:
         for ix in group:
             all_labels.update(ix.type_keys)
     if vp.default_pair is not None:
-        all_labels.discard("default")  # sentinel, not a type label
+        # sentinel, not a type label
+        all_labels.discard("default")
 
     non_vp_labels = all_labels - vp_names - {"default"}
     if not non_vp_labels:

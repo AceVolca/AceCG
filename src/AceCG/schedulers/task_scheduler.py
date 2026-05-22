@@ -54,9 +54,7 @@ def _warn_unused_max_cores_once() -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Dataclasses
-# ---------------------------------------------------------------------------
+# ── Dataclasses ───────────────────────────────────────────────
 
 @dataclass
 class TaskSpec:
@@ -67,11 +65,15 @@ class TaskSpec:
     actual core count; when unset they all default to ``cpu_cores``.
     """
 
-    task_class: str                     # "xz" | "zbx"
-    frame_id: Optional[int]             # conditioning frame index
-    run_dir: str                        # task working directory (absolute)
+    # "xz" | "zbx"
+    task_class: str
+    # conditioning frame index
+    frame_id: Optional[int]
+    # task working directory (absolute)
+    run_dir: str
     cpu_cores: int                      # CPUs (default / fixed-width)
-    sim_input: str                      # input script filename (relative to run_dir)
+    # input script filename (relative to run_dir)
+    sim_input: str
     sim_backend: str = "lammps"
     sim_log: str = "sim.log"
     post_spec: Optional[Dict[str, Any]] = None
@@ -154,9 +156,7 @@ class AllTasksFailedError(RuntimeError):
     """Raised when xz fails or too few zbx tasks succeed."""
 
 
-# ---------------------------------------------------------------------------
-# sim_var resolution
-# ---------------------------------------------------------------------------
+# ── sim_var resolution ───────────────────────────────────────────────
 
 def resolve_sim_var(
     sim_var: Dict[str, str],
@@ -174,9 +174,7 @@ def resolve_sim_var(
     }
 
 
-# ---------------------------------------------------------------------------
-# TaskScheduler
-# ---------------------------------------------------------------------------
+# ── TaskScheduler ───────────────────────────────────────────────
 
 class TaskScheduler:
     """Stream tasks across a LeasePool with timestamped logging.
@@ -242,9 +240,7 @@ class TaskScheduler:
             raise ValueError("TaskScheduler state must contain 'rng_state'.")
         self.rng.setstate(state["rng_state"])
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    # ── Public API ───────────────────────────────────────────────
 
     def run_iteration(
         self,
@@ -308,9 +304,7 @@ class TaskScheduler:
             xz_ok=xz_ok,
         )
 
-    # ------------------------------------------------------------------
-    # Streaming engine
-    # ------------------------------------------------------------------
+    # ── Streaming engine ───────────────────────────────────────────────
 
     def _stream(
         self,
@@ -439,9 +433,7 @@ class TaskScheduler:
 
         return results
 
-    # ------------------------------------------------------------------
-    # Launching
-    # ------------------------------------------------------------------
+    # ── Launching ───────────────────────────────────────────────
 
     def _launch(self, task: TaskSpec, pr: PlacementResult) -> subprocess.Popen:
         """Write spec JSON, resolve sim_var, launch task_runner."""
@@ -477,6 +469,10 @@ class TaskScheduler:
             py_exe = self.python_exe
             post_payload = [py_exe, "-m", "AceCG.compute.mpi_engine"]
             post_launch = backend.realize(post_placement, post_payload, run_dir)
+            if spec_dict.get("post_spec") is not None:
+                spec_dict["post_spec"].setdefault(
+                    "expected_mpi_size", int(post_placement.n_ranks),
+                )
             spec_dict["post_launch"] = {
                 "argv": list(post_launch.argv),
                 "env_add": dict(post_launch.env_add),
@@ -521,9 +517,7 @@ class TaskScheduler:
                 pass
         return proc
 
-    # ------------------------------------------------------------------
-    # Process management
-    # ------------------------------------------------------------------
+    # ── Process management ───────────────────────────────────────────────
 
     def _kill_pid(self, pid: int) -> None:
         try:
@@ -563,9 +557,7 @@ class TaskScheduler:
             prev(signum, frame)
         sys.exit(1)
 
-    # ------------------------------------------------------------------
-    # Logging + timing persistence
-    # ------------------------------------------------------------------
+    # ── Logging + timing persistence ───────────────────────────────────────────────
 
     def _log(self, msg: str) -> None:
         elapsed = time.monotonic() - self._t_start
@@ -601,9 +593,7 @@ class TaskScheduler:
         )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ── Helpers ───────────────────────────────────────────────
 
 def _read_timing(run_dir: str) -> Optional[Dict[str, Any]]:
     path = Path(run_dir) / "task_timing.json"

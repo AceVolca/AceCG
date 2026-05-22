@@ -1,4 +1,3 @@
-# AceCG/trainers/analytic/multi.py
 """Analytic MultiTrainerAnalytic: meta-trainer combining multiple sub-trainers."""
 
 from __future__ import annotations
@@ -11,16 +10,15 @@ import numpy as np
 
 try:
     from typing import TypedDict, NotRequired
-except ImportError:  # Python < 3.11
+# Python < 3.11
+except ImportError:
     from typing_extensions import TypedDict, NotRequired
 
 from ..base import BaseTrainer
 
 
 
-# -----------------------------------------------------------------------------
-# TypedDict schemas
-# -----------------------------------------------------------------------------
+# ── TypedDict schemas ───────────────────────────────────────────────
 
 class MultiOut(TypedDict, total=False):
     """Return schema for MultiTrainerAnalytic.step."""
@@ -32,9 +30,7 @@ class MultiOut(TypedDict, total=False):
     meta: Dict[str, Any]
 
 
-# -----------------------------------------------------------------------------
-# Trainer
-# -----------------------------------------------------------------------------
+# ── Trainer ───────────────────────────────────────────────
 
 class MultiTrainerAnalytic(BaseTrainer):
     """Meta-trainer that combines multiple analytic trainers.
@@ -59,7 +55,8 @@ class MultiTrainerAnalytic(BaseTrainer):
       vector via `tr.update_forcefield(self.optimizer.L)`.
     """
 
-    # ---- Public schema objects (for documentation / validation) ----
+    # ── Public schema objects (for documentation / validation) ───────────────────────────────────────────────
+
     STEP_SCHEMA: Dict[str, Any] = {
         "batches": "required Sequence[dict]; length == len(trainers); batches[i] must satisfy trainers[i].BATCH_SCHEMA. For REM sub-batches, AA-side inputs may be supplied either as AA['dist'] with recompute_energy_grad_AA=True, or as precomputed energy_grad_AA (and d2U_AA when Hessian is required) with recompute_energy_grad_AA=False. CDREM sub-batches accept energy_grad_z_by_x, energy_grad_xz, and optional x_weight.",
         "return_keys_list": "optional Sequence[Sequence[str]]; if provided, filters keys in out['sub'][i]",
@@ -126,7 +123,7 @@ class MultiTrainerAnalytic(BaseTrainer):
         assert combine_mode in ("update", "grad"), "combine_mode must be 'update' or 'grad'"
         self.combine_mode = combine_mode
 
-        # Keep deep copy to avoid side-effects (preserve your original intent).
+        # Trainers are copied so this meta-trainer owns their optimizer state.
         self.trainers: List[BaseTrainer] = copy.deepcopy(list(trainer_list))
         self.weights = np.asarray(weight_array, dtype=float)
 
@@ -268,12 +265,12 @@ class MultiTrainerAnalytic(BaseTrainer):
 
         use_hessian = self.optimizer_accepts_hessian()
 
-        sub_full: List[Dict[str, Any]] = []  # full sub-trainer outputs
+        # full sub-trainer outputs
+        sub_full: List[Dict[str, Any]] = []
         sub_view: List[Dict[str, Any]] = []  # returned full/filtered outputs
 
-        # ----------------------------
-        # Mode A: combine sub-updates
-        # ----------------------------
+        # ── Mode A: combine sub-updates ───────────────────────────────────────────────
+
         if self.combine_mode == "update":
             updates = []
 
@@ -295,8 +292,10 @@ class MultiTrainerAnalytic(BaseTrainer):
                     keys = return_keys_list[i]
                     sub_view.append({k: out_i.get(k, None) for k in keys})
 
-            U = np.stack(updates, axis=0)         # (n_trainers, n_params)
-            final_update = self.weights @ U       # (n_params,), linear combination of updates from subtrainers
+            # (n_trainers, n_params)
+            U = np.stack(updates, axis=0)
+            # (n_params,), linear combination of updates from subtrainers
+            final_update = self.weights @ U
 
             self.optimizer.L += final_update
             self.clamp_and_update()
@@ -317,13 +316,13 @@ class MultiTrainerAnalytic(BaseTrainer):
                 },
             }
 
-        # -----------------------------------------
-        # Mode B: combine grads (+ Hessians) then step once (support multithreading)
-        # -----------------------------------------
+        # ── Mode B: combine grads (+ Hessians) then step once (support multithreading) ───────────────────────────────────────────────
+
         grads = []
         Hs = []
 
-        def _eval_one(args):  # dry-run a trainer.step
+        # dry-run a trainer.step
+        def _eval_one(args):
             i, tr, b = args
             out_i = tr.step(b, apply_update=False)
             return i, out_i
@@ -375,12 +374,15 @@ class MultiTrainerAnalytic(BaseTrainer):
                 sub_view.append({k: out_i.get(k, None) for k in keys})
 
 
-        G = np.stack(grads, axis=0)               # (n_trainers, n_params)
-        g_total = self.weights @ G                # (n_params,)
+        # (n_trainers, n_params)
+        G = np.stack(grads, axis=0)
+        # (n_params,)
+        g_total = self.weights @ G
 
         H_total = None
         if use_hessian and all(h is not None for h in Hs):
-            H_stack = np.stack(Hs, axis=0)        # (n_trainers, n_params, n_params)
+            # (n_trainers, n_params, n_params)
+            H_stack = np.stack(Hs, axis=0)
             H_total = np.tensordot(self.weights, H_stack, axes=(0, 0))
 
         if H_total is not None:

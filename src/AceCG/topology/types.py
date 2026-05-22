@@ -27,8 +27,10 @@ class InteractionKey(NamedTuple):
     ``InteractionKey`` is used as the key type in
     ``Forcefield[InteractionKey] -> list[BasePotential]``.
     """
-    style: str          # "pair", "bond", "angle", "dihedral"
-    types: Tuple[str, ...]  # Canonical type tuple
+    # "pair", "bond", "angle", "dihedral"
+    style: str
+    # Canonical type tuple
+    types: Tuple[str, ...]
 
     def label(self, delim: str = ":") -> str:
         """Return a compact string label.

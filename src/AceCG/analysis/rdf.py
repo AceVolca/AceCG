@@ -1,4 +1,3 @@
-# AceCG/analysis/rdf.py
 """Distribution analysis for pair / bond / angle / dihedral interactions.
 
 Computes RDF / PDF histograms over a trajectory or an MPI-produced
@@ -31,7 +30,8 @@ from ..topology.types import InteractionKey
 class DistributionResult:
     """Per-interaction distribution result.
 
-    Attributes:
+    Attributes
+    ----------
         key: The interaction key (pair/bond/angle/dihedral).
         x: Bin centers (distance [Å], angle/dihedral in degrees or radians
             depending on the requested units).
@@ -50,8 +50,10 @@ class DistributionResult:
     values: np.ndarray
     counts: np.ndarray
     edges: np.ndarray
-    mode: str              # "rdf" or "pdf"
-    variable: str          # "distance" | "angle" | "dihedral"
+    # "rdf" or "pdf"
+    mode: str
+    # "distance" | "angle" | "dihedral"
+    variable: str
     n_frames: int
     weight_sum: float
     meta: dict

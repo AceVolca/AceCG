@@ -1,4 +1,5 @@
-# AceCG/potentials/__init__.py
+"""Public exports for AceCG potentials."""
+
 from .base import BasePotential, IteratePotentials
 from .bspline import BSplinePotential
 from .gaussian import GaussianPotential
@@ -24,3 +25,16 @@ POTENTIAL_REGISTRY = {
     "double/gauss": UnnormalizedMultiGaussianPotential,
     "srlr_gauss": SRLRGaussianPotential,
 }
+
+
+def __getattr__(name: str):
+    """Lazily expose optional potential wrappers without import cycles."""
+    if name in {"BoundaryPriorPotential", "apply_boundary_prior"}:
+        from .boundary_prior import BoundaryPriorPotential, apply_boundary_prior
+
+        exports = {
+            "BoundaryPriorPotential": BoundaryPriorPotential,
+            "apply_boundary_prior": apply_boundary_prior,
+        }
+        return exports[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

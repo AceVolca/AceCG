@@ -1,4 +1,3 @@
-# AceCG/io/coordinates.py
 """
 AceCG CG coordinate builder.
 
@@ -59,9 +58,7 @@ from MDAnalysis.lib.distances import minimize_vectors, apply_PBC
 from .coordinates_writers import write_gro, write_lammps_data, write_pdb
 
 
-# -----------------------------
-# YAML / mapping helpers
-# -----------------------------
+# ── YAML / mapping helpers ───────────────────────────────────────────────
 
 def load_mapping_yaml(path: Union[str, Path]) -> Dict[str, Any]:
     """Load an AceCG coordinate mapping YAML file.
@@ -119,9 +116,7 @@ def bead_aa_indices(
     return [base0 + (_as_int(x) + shift) for x in rel]
 
 
-# -----------------------------
-# PBC / geometry helpers
-# -----------------------------
+# ── PBC / geometry helpers ───────────────────────────────────────────────
 
 def has_valid_box(u: mda.Universe) -> bool:
     """
@@ -175,7 +170,8 @@ def bead_position_and_mass(
     - If do_make_whole: apply MIC mapping within bead before averaging.
     """
     ag = u.atoms[list(aa_idx)]
-    pos = ag.positions.astype(float)  # Å
+    # Å
+    pos = ag.positions.astype(float)
     masses = ag.masses.astype(float)
     mass_sum = float(masses.sum())
 
@@ -198,9 +194,7 @@ def bead_position_and_mass(
     return xyz, mass_sum
 
 
-# -----------------------------
-# Sanity checks
-# -----------------------------
+# ── Sanity checks ───────────────────────────────────────────────
 
 def sanity_check_mapping(mapping: Dict[str, Any]) -> None:
     """
@@ -279,9 +273,7 @@ def sanity_check_against_universe(
                         )
 
 
-# -----------------------------
-# Public API (AceCG-style entry)
-# -----------------------------
+# ── Public API (AceCG-style entry) ───────────────────────────────────────────────
 
 def build_CG_coords(
     aa_coord: Union[str, Path],

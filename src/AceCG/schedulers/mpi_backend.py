@@ -30,9 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-# ---------------------------------------------------------------------------
-# Data objects
-# ---------------------------------------------------------------------------
+# ── Data objects ───────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class HostSlice:
@@ -40,7 +38,8 @@ class HostSlice:
 
     host: str
     cpu_ids: tuple[int, ...]
-    host_n_cpus: int = 0  # total CPUs on this host (0 = unknown)
+    # total CPUs on this host (0 = unknown)
+    host_n_cpus: int = 0
 
     @property
     def n_cpus(self) -> int:
@@ -93,9 +92,7 @@ class LaunchSpec:
     cwd: str | None = None
 
 
-# ---------------------------------------------------------------------------
-# Backend base class
-# ---------------------------------------------------------------------------
+# ── Backend base class ───────────────────────────────────────────────
 
 class MpiBackend(ABC):
     """Base class every MPI backend must inherit from."""
@@ -150,9 +147,7 @@ def _cpu_mask_hex(cpu_ids: tuple[int, ...]) -> str:
     return f"0x{mask:x}"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# ── Helpers ───────────────────────────────────────────────
 
 def _find_libpmi2() -> str | None:
     """Locate ``libpmi2.so`` via ``LD_LIBRARY_PATH``.
@@ -219,9 +214,7 @@ def _find_slurm_conf() -> str:
     return ""
 
 
-# ---------------------------------------------------------------------------
-# Intel MPI
-# ---------------------------------------------------------------------------
+# ── Intel MPI ───────────────────────────────────────────────
 
 class IntelMpiBackend(MpiBackend):
     """Intel MPI backend — supports local, SLURM, and SSH launches.
@@ -258,7 +251,8 @@ class IntelMpiBackend(MpiBackend):
         launch_mode: str = "mpmd",
     ) -> None:
         self.mpirun_path = mpirun_path
-        self.launch_mode = launch_mode  # "mpmd" or "srun"
+        # "mpmd" or "srun"
+        self.launch_mode = launch_mode
         self._libpmi2_path: str | None = _find_libpmi2()
         self._srun_path: str | None = shutil.which("srun")
         self._slurm_conf: str = _find_slurm_conf()
@@ -281,7 +275,7 @@ class IntelMpiBackend(MpiBackend):
             return self._realize_slurm(placement, payload_cmd, run_dir)
         return self._realize_ssh(placement, payload_cmd, run_dir)
 
-    # -- Local (single-host, shared-memory) ------------------------------
+    # ── Local (single-host, shared-memory) ───────────────────────────────────────────────
 
     def _realize_local(
         self,
@@ -303,7 +297,7 @@ class IntelMpiBackend(MpiBackend):
             },
         )
 
-    # -- SLURM (multi-host) ---------------------------------------------
+    # ── SLURM (multi-host) ───────────────────────────────────────────────
 
     def _realize_slurm(
         self,
@@ -403,7 +397,7 @@ class IntelMpiBackend(MpiBackend):
             env_strip_prefixes=("PMI_",),
         )
 
-    # -- SSH (multi-host, no SLURM) --------------------------------------
+    # ── SSH (multi-host, no SLURM) ───────────────────────────────────────────────
 
     def _realize_ssh(
         self,
@@ -434,9 +428,7 @@ IntelSlurmBackend = IntelMpiBackend
 IntelHydraSlurmBackend = IntelMpiBackend
 
 
-# ---------------------------------------------------------------------------
-# OpenMPI
-# ---------------------------------------------------------------------------
+# ── OpenMPI ───────────────────────────────────────────────
 
 class OpenMpiBackend(MpiBackend):
     """OpenMPI backend — supports local, SLURM, and SSH launches.
@@ -478,7 +470,7 @@ class OpenMpiBackend(MpiBackend):
             return self._realize_slurm(placement, payload_cmd, run_dir)
         return self._realize_ssh(placement, payload_cmd, run_dir)
 
-    # -- Local (single-host, shared-memory) ------------------------------
+    # ── Local (single-host, shared-memory) ───────────────────────────────────────────────
 
     def _realize_local(
         self,
@@ -498,7 +490,7 @@ class OpenMpiBackend(MpiBackend):
         )
         return LaunchSpec(argv=argv, env_add={})
 
-    # -- SLURM (multi-host) ---------------------------------------------
+    # ── SLURM (multi-host) ───────────────────────────────────────────────
 
     def _realize_slurm(
         self,
@@ -544,7 +536,7 @@ class OpenMpiBackend(MpiBackend):
             env_strip_prefixes=("PMI_", "SLURM_"),
         )
 
-    # -- SSH (multi-host, no SLURM) --------------------------------------
+    # ── SSH (multi-host, no SLURM) ───────────────────────────────────────────────
 
     def _realize_ssh(
         self,
@@ -578,9 +570,7 @@ class OpenMpiBackend(MpiBackend):
 OpenMPISlurmBackend = OpenMpiBackend
 
 
-# ---------------------------------------------------------------------------
-# MPICH
-# ---------------------------------------------------------------------------
+# ── MPICH ───────────────────────────────────────────────
 
 class MpichBackend(MpiBackend):
     """MPICH backend — supports local, SLURM, and SSH launches.
@@ -619,7 +609,7 @@ class MpichBackend(MpiBackend):
             return self._realize_slurm(placement, payload_cmd, run_dir)
         return self._realize_ssh(placement, payload_cmd, run_dir)
 
-    # -- Local (single-host) ---------------------------------------------
+    # ── Local (single-host) ───────────────────────────────────────────────
 
     def _realize_local(
         self,
@@ -638,7 +628,7 @@ class MpichBackend(MpiBackend):
         )
         return LaunchSpec(argv=argv, env_add={})
 
-    # -- SLURM (multi-host) ---------------------------------------------
+    # ── SLURM (multi-host) ───────────────────────────────────────────────
 
     def _realize_slurm(
         self,
@@ -683,7 +673,7 @@ class MpichBackend(MpiBackend):
             env_strip_prefixes=("PMI_", "SLURM_"),
         )
 
-    # -- SSH (multi-host, no SLURM) --------------------------------------
+    # ── SSH (multi-host, no SLURM) ───────────────────────────────────────────────
 
     def _realize_ssh(
         self,
@@ -719,9 +709,7 @@ class MpichBackend(MpiBackend):
 MPICHSlurmBackend = MpichBackend
 
 
-# ---------------------------------------------------------------------------
-# Local mpirun (any MPI, single-host only)
-# ---------------------------------------------------------------------------
+# ── Local mpirun (any MPI, single-host only) ───────────────────────────────────────────────
 
 class LocalMpirunBackend(MpiBackend):
     """Any MPI implementation, single-host shared-memory only.
@@ -768,9 +756,7 @@ class LocalMpirunBackend(MpiBackend):
         return LaunchSpec(argv=argv, env_add=env_add)
 
 
-# ---------------------------------------------------------------------------
-# MPI family detection
-# ---------------------------------------------------------------------------
+# ── MPI family detection ───────────────────────────────────────────────
 
 def _normalize_mpi_family(value: str | None) -> str | None:
     if value is None:

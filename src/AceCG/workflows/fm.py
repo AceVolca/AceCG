@@ -25,6 +25,7 @@ from ..topology.forcefield import Forcefield
 from ..topology.types import InteractionKey
 from ..trainers import FMTrainerAnalytic
 from .base import BaseWorkflow, _run_workflow_cli
+from .sampling import _BOLTZMANN_KCAL, resolve_aa_noise_sigma
 
 logger = get_screen_logger("fm")
 
@@ -246,6 +247,9 @@ class FMWorkflow(BaseWorkflow):
                 }
             ],
         }
+        noise_spec = self._fm_noise_runtime_spec(step_index)
+        if noise_spec is not None:
+            spec["noise"] = noise_spec
         if cfg.system.type_names is not None:
             spec["atom_type_name_aliases"] = cfg.system.type_names
 
@@ -256,6 +260,7 @@ class FMWorkflow(BaseWorkflow):
             spec["frame_start"] = cfg.aa_ref.skip_frames
         if cfg.aa_ref.n_frames > 0:
             spec["frame_end"] = cfg.aa_ref.skip_frames + cfg.aa_ref.n_frames
+        self._apply_post_runtime_options(spec)
 
         # Delegate MPI launch to the scheduler's run_post
         run_post(
@@ -273,8 +278,39 @@ class FMWorkflow(BaseWorkflow):
             batch = pickle.load(f)
         return batch
 
+    def _fm_noise_runtime_spec(self, step_index: int) -> Optional[Dict[str, Any]]:
+        noise = self.config.aa_ref.noise
+        if not bool(noise.enabled):
+            return None
+        stage = int(step_index) // int(noise.update_interval)
+        runtime = noise.to_runtime_dict()
+        runtime["sigma"] = resolve_aa_noise_sigma(
+            noise,
+            n_epochs=int(self.config.training.n_epochs),
+            stage=stage,
+        )
+        runtime["seed"] = int(noise.seed) + int(stage)
+        if int(noise.subsample_per_epoch) > 0:
+            runtime["subsample_seed"] = int(noise.seed) + int(step_index)
+        if float(noise.force_mix_ratio) > 0.0:
+            temperature = self.config.training.temperature
+            if temperature is None or float(temperature) <= 0.0:
+                raise ValueError(
+                    "noise_force_mix_ratio requires training.temperature or training.beta."
+                )
+            runtime["beta"] = 1.0 / (_BOLTZMANN_KCAL * float(temperature))
+        return runtime
 
-# ─── Module-private helpers ───────────────────────────────────────────
+    def _apply_post_runtime_options(self, spec: Dict[str, Any]) -> None:
+        if self.config.sampling.perf_trace:
+            spec["perf_trace"] = True
+            interval = self.config.sampling.extras.get("heartbeat_interval", 25)
+            spec["heartbeat_interval"] = int(interval)
+        if bool(self.config.sampling.extras.get("perf_trace_all_ranks", False)):
+            spec["perf_trace_all_ranks"] = True
+
+
+# ── Module-private helpers ───────────────────────────────────────────
 
 def _build_zero_potential(spec: FMInteractionSpec) -> BSplinePotential:
     if spec.model != "bspline":

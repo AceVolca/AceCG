@@ -55,7 +55,7 @@ from ..io.coordinates_writers import write_lammps_data
 from .types import InteractionKey
 
 
-# ─── Public dataclasses ───────────────────────────────────────────────
+# ── Public dataclasses ───────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -199,7 +199,7 @@ class VPGrownFrame:
     dimensions: np.ndarray
 
 
-# ─── Grower ───────────────────────────────────────────────────────────
+# ── Grower ───────────────────────────────────────────────────────────
 
 
 class VPGrower:
@@ -322,7 +322,7 @@ class VPGrower:
         return VPGrownFrame(positions=positions, dimensions=dimensions)
 
 
-# ─── LAMMPS data writer ──────────────────────────────────────────────
+# ── LAMMPS data writer ──────────────────────────────────────────────
 
 
 def write_vp_data(
@@ -371,7 +371,7 @@ def write_vp_data(
     return out_path
 
 
-# ─── Internal: name resolution ───────────────────────────────────────
+# ── Internal: name resolution ───────────────────────────────────────
 
 
 class _NameResolver:
@@ -402,6 +402,7 @@ class _NameResolver:
         # Use MDAnalysis atom.types for per-atom type codes; fall back
         # to name. For LAMMPS DATA universes without aliases, types are
         # stringified ids like "1", "2", ...
+        """Run the from universe operation."""
         types_attr = np.asarray(universe.atoms.types).astype(str)
 
         if type_aliases is None or not type_aliases:
@@ -476,7 +477,7 @@ def _carrier_mask(universe: mda.Universe, selection: Optional[str]) -> np.ndarra
     return mask
 
 
-# ─── Internal: template assembly ────────────────────────────────────
+# ── Internal: template assembly ────────────────────────────────────
 
 
 def _build_template(
@@ -797,7 +798,8 @@ def _build_inserted_bonded(
     resid_to_atoms: Dict[int, Dict[str, int]] = {}
     for idx, (name, resid_val) in enumerate(zip(atom_names, resids.tolist())):
         if name in vp_indices_by_name:
-            continue  # skip VPs
+            # skip VPs
+            continue
         resid_to_atoms.setdefault(int(resid_val), {})[str(name)] = idx
 
     # Build a resid → {vp_name: idx} lookup from the pre-built vp_indices_by_name.
@@ -914,7 +916,7 @@ def _assign_bonded_type_ids(
     return type_ids, id_to_key
 
 
-# ─── Internal: per-frame seeding and clash resolution ───────────────
+# ── Internal: per-frame seeding and clash resolution ───────────────
 
 
 def _group_bonds_by_vp(template: VPTopologyTemplate) -> Dict[str, Tuple[VPBondSpec, ...]]:
@@ -1150,7 +1152,7 @@ def _per_vp_anchor_direction(
     return out
 
 
-# ─── Tiny vector helpers ────────────────────────────────────────────
+# ── Tiny vector helpers ────────────────────────────────────────────
 
 
 def _unit(vec: np.ndarray) -> np.ndarray:

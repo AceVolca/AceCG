@@ -1,4 +1,5 @@
-# AceCG/io/trajectory.py
+"""AceCG io trajectory implementation."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -13,9 +14,7 @@ from .logger import get_screen_logger
 logger = get_screen_logger("trajectory")
 
 
-# ---------------------------------------------------------------------------
-# Type aliases
-# ---------------------------------------------------------------------------
+# ── Type aliases ───────────────────────────────────────────────
 
 FrameSpec = tuple[int, np.ndarray, np.ndarray]
 """(frame_id, positions, box) tuple for one trajectory frame."""
@@ -41,7 +40,8 @@ def load_dump_positions(trajectory_file: Path) -> np.ndarray:
     if total_lines < 9:
         raise ValueError(f"Dump file too short: {total_lines} lines")
     n_atoms = int(all_lines[3].strip())
-    header_lines = 9  # TIMESTEP, N, BOX BOUNDS (3 lines), ATOMS header
+    # TIMESTEP, N, BOX BOUNDS (3 lines), ATOMS header
+    header_lines = 9
     lines_per_frame = header_lines + n_atoms
     if total_lines < lines_per_frame:
         raise ValueError(
@@ -56,7 +56,8 @@ def load_dump_positions(trajectory_file: Path) -> np.ndarray:
     atoms_header = all_lines[header_lines - 1].strip()
     if not atoms_header.startswith("ITEM: ATOMS"):
         raise ValueError(f"Expected 'ITEM: ATOMS' at line {header_lines}, got: {atoms_header}")
-    columns = atoms_header.split()[2:]  # skip "ITEM:" and "ATOMS"
+    # skip "ITEM:" and "ATOMS"
+    columns = atoms_header.split()[2:]
     try:
         col_x = columns.index("x")
         col_y = columns.index("y")
@@ -243,8 +244,10 @@ def split_lammpstrj(
                     continue
 
                 # Read the full frame into a small list (size ~ natoms lines, manageable)
-                frame_lines = [line]  # ITEM: TIMESTEP
-                for _ in range(1):  # timestep value line
+                # ITEM: TIMESTEP
+                frame_lines = [line]
+                # timestep value line
+                for _ in range(1):
                     nxt = in_f.readline()
                     if not nxt:
                         raise ValueError("Unexpected EOF after ITEM: TIMESTEP")
@@ -430,7 +433,8 @@ def split_lammpstrj_mdanalysis(
         # We'll write orthorhombic bounds if we can't infer tilt.
         f.write("ITEM: BOX BOUNDS pp pp pp\n")
         # For safety, output as 0..L bounds from dimensions
-        dims = ts.dimensions  # (lx, ly, lz, alpha, beta, gamma)
+        # (lx, ly, lz, alpha, beta, gamma)
+        dims = ts.dimensions
         lx, ly, lz = float(dims[0]), float(dims[1]), float(dims[2])
         f.write(f"0.0 {lx:.8f}\n")
         f.write(f"0.0 {ly:.8f}\n")
@@ -466,7 +470,8 @@ def split_lammpstrj_mdanalysis(
                         f"Available examples: id, type, resid, resname, name, ..."
                     )
 
-        pos = agw.positions  # (N,3), in Angstrom
+        # (N,3), in Angstrom
+        pos = agw.positions
         # Compose line-by-line to avoid huge intermediate strings
         # Determine index mapping in fields
         # We'll handle x/y/z by reading pos
@@ -514,9 +519,7 @@ def split_lammpstrj_mdanalysis(
     return out_paths
 
 
-# ---------------------------------------------------------------------------
-# Generic LAMMPS dump frame reader (migrated from cdfm_realdata.py)
-# ---------------------------------------------------------------------------
+# ── LAMMPS dump frame reader ───────────────────────────────────────────────
 
 def _coerce_atom_field(values: Sequence[str]) -> np.ndarray:
     """Convert a dump column to int, float, or object dtype."""
@@ -662,9 +665,7 @@ def read_lammpstrj_frames(
     return {frame_id: records[frame_id] for frame_id in requested}
 
 
-# ---------------------------------------------------------------------------
-# Frame extraction helpers (moved from compute/postprocess.py)
-# ---------------------------------------------------------------------------
+# ── Frame extraction helpers ───────────────────────────────────────────────
 
 def iter_frames(
     universe: mda.Universe,

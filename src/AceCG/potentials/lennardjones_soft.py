@@ -1,4 +1,5 @@
-# AceCG/potentials/lennardjones_soft.py
+"""AceCG potentials lennardjones soft implementation."""
+
 from .base import BasePotential
 import numpy as np
 
@@ -73,9 +74,7 @@ class LennardJonesSoftPotential(BasePotential):
         """Return which soft-core LJ parameters enter the energy linearly."""
         return np.array([True, False, False], dtype=bool)
 
-    # ------------------------------------------------------------------
-    # Core value and force
-    # ------------------------------------------------------------------
+    # ── Core value and force ───────────────────────────────────────────────
 
     def _core_quantities(self, r: np.ndarray):
         """
@@ -85,6 +84,7 @@ class LennardJonesSoftPotential(BasePotential):
         -------
         A, invA, invA2, invA3, invA4, g, gA, gAA, r6_over_sig6
         """
+        r = np.asarray(r, dtype=float)
         epsilon, sigma, lam = self._params
         alpha_LJ = self.alpha_LJ
 
@@ -142,9 +142,7 @@ class LennardJonesSoftPotential(BasePotential):
         # Force is negative gradient
         return -dEdr
 
-    # ------------------------------------------------------------------
-    # First derivatives with respect to parameters
-    # ------------------------------------------------------------------
+    # ── First derivatives with respect to parameters ───────────────────────────────────────────────
 
     def depsilon(self, r: float) -> float:
         """
@@ -197,9 +195,7 @@ class LennardJonesSoftPotential(BasePotential):
         # dV/dλ = 4 ε [ h'(λ) g(A) + h(λ) g'(A) A_lambda ]
         return 4.0 * epsilon * (h1 * g + h * gA * A_lambda)
 
-    # ------------------------------------------------------------------
-    # Second derivatives with respect to parameters
-    # ------------------------------------------------------------------
+    # ── Second derivatives with respect to parameters ───────────────────────────────────────────────
 
     def depsilon_2(self, r: float) -> float:
         """
@@ -207,7 +203,7 @@ class LennardJonesSoftPotential(BasePotential):
 
         Since the potential is linear in epsilon, this is identically zero.
         """
-        return 0.0
+        return np.zeros_like(np.asarray(r, dtype=float), dtype=float)
 
     def depsilondsigma(self, r: float) -> float:
         """

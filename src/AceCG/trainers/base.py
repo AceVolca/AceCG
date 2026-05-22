@@ -1,4 +1,5 @@
-# AceCG/trainers/base.py
+"""AceCG trainers base implementation."""
+
 from abc import ABC, abstractmethod
 import numpy as np
 import copy
@@ -198,7 +199,41 @@ class BaseTrainer(ABC):
                 f"Linear scan mismatch: consumed {offset} params from a {n_params}-parameter container"
             )
         return True
-    
+
+    def is_gauge_free_energy_grad_cacheable(self) -> bool:
+        """Report whether active gauge-free energy gradients are AA-cacheable."""
+        n_params = self.forcefield.n_params()
+
+        mask = getattr(self.optimizer, "mask", None)
+        active_mask = np.asarray(mask, dtype=bool) if mask is not None else np.ones(n_params, dtype=bool)
+        if active_mask.shape != (n_params,):
+            raise ValueError(
+                f"Active parameter mask shape mismatch: expected {(n_params,)}, got {active_mask.shape}"
+            )
+
+        offset = 0
+        for _, pot in IteratePotentials(self.forcefield):
+            cacheable_mask = np.asarray(
+                pot.is_gauge_free_energy_grad_cacheable(),
+                dtype=bool,
+            )
+            n_local = pot.n_params()
+            if cacheable_mask.shape != (n_local,):
+                raise ValueError(
+                    f"Gauge-free cacheable mask shape mismatch for {type(pot).__name__}: "
+                    f"expected {(n_local,)}, got {cacheable_mask.shape}"
+                )
+            submask = active_mask[offset:offset + n_local]
+            if np.any(submask & ~cacheable_mask):
+                return False
+            offset += n_local
+
+        if offset != n_params:
+            raise ValueError(
+                f"Gauge-free cacheability scan mismatch: consumed {offset} params from a {n_params}-parameter container"
+            )
+        return True
+
     def optimizer_accepts_hessian(self) -> bool:
         """Return whether the configured optimizer can consume a Hessian.
 
@@ -210,6 +245,64 @@ class BaseTrainer(ABC):
             whether to require Hessian statistics in their batches.
         """
         return hasattr(self.optimizer, 'step') and 'hessian' in self.optimizer.step.__code__.co_varnames
+
+    def select_optimizer_gradient(
+        self,
+        masked_grad: np.ndarray,
+        *,
+        unmasked_grad: Optional[np.ndarray],
+        mode: str = "masked",
+        outside_aux_weight: float = 1.0,
+        allow_unmasked: bool = False,
+    ) -> np.ndarray:
+        """Return the gradient vector consumed by the optimizer.
+
+        Parameters
+        ----------
+        masked_grad : np.ndarray
+            Official masked objective gradient. This remains the metric
+            reported under ``grad`` by REM-style trainers.
+        unmasked_grad : np.ndarray, optional
+            Full-coordinate auxiliary gradient for hybrid or acknowledged
+            unmasked optimizer-gradient policies.
+        mode : {"masked", "hybrid_aux", "unmasked"}, default="masked"
+            Policy used only for the optimizer update.
+        outside_aux_weight : float, default=1.0
+            Weight multiplying the outside-mask auxiliary term in
+            ``hybrid_aux`` mode.
+        allow_unmasked : bool, default=False
+            Explicit acknowledgement required before ``unmasked`` mode can
+            drive the optimizer.
+        """
+        mode_norm = str(mode).strip().lower()
+        if mode_norm == "masked":
+            return np.asarray(masked_grad, dtype=float)
+        if unmasked_grad is None:
+            raise KeyError(
+                f"optimizer_gradient_mode={mode_norm!r} requires unmasked gradient statistics."
+            )
+        masked = np.asarray(masked_grad, dtype=float)
+        unmasked = np.asarray(unmasked_grad, dtype=float)
+        if masked.shape != unmasked.shape:
+            raise ValueError(
+                "Masked and unmasked optimizer gradients must have identical shape, "
+                f"got {masked.shape} and {unmasked.shape}."
+            )
+        if mode_norm == "hybrid_aux":
+            weight = float(outside_aux_weight)
+            if weight < 0.0:
+                raise ValueError("outside_aux_weight must be non-negative.")
+            return masked + weight * (unmasked - masked)
+        if mode_norm == "unmasked":
+            if not bool(allow_unmasked):
+                raise ValueError(
+                    "optimizer_gradient_mode='unmasked' requires explicit acknowledgement."
+                )
+            return unmasked
+        raise ValueError(
+            "optimizer_gradient_mode must be 'masked', 'hybrid_aux', or "
+            f"'unmasked', got {mode_norm!r}."
+        )
 
     @abstractmethod
     def step(self, batch: Dict[str, Any], apply_update: bool = True):
@@ -229,4 +322,3 @@ class BaseTrainer(ABC):
             Subclass-specific output payload.
         """
         pass
-

@@ -1,4 +1,5 @@
-# AceCG/fitters/base.py
+"""AceCG fitters base implementation."""
+
 from abc import ABC, abstractmethod
 from ..potentials.base import BasePotential
 

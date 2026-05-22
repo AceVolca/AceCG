@@ -11,6 +11,7 @@ reduced across replicas by ``CDFMTrainerAnalytic``.
 
 from __future__ import annotations
 
+import os
 import pickle
 import shutil
 import sys
@@ -33,6 +34,31 @@ from .base import _run_workflow_cli
 from .sampling import SamplingWorkflow
 
 logger = get_screen_logger("cdfm")
+
+
+def _cdfm_epoch_indices(start_epoch: int, n_epochs: int) -> range:
+    """Return global CDFM epoch indices for one append-resume invocation."""
+    if start_epoch < 0:
+        raise ValueError("training.start_epoch must be non-negative for CDFM.")
+    if n_epochs <= 0:
+        raise ValueError("training.n_epochs must be positive for CDFM.")
+    return range(start_epoch, start_epoch + n_epochs)
+
+
+def _assert_cdfm_iteration_dirs_available(
+    output_dir: Path,
+    epoch_indices: range,
+) -> None:
+    """Reject append targets that would overwrite existing CDFM outputs."""
+    for epoch in epoch_indices:
+        iter_dir = output_dir / f"iter_{epoch:04d}"
+        if not iter_dir.exists():
+            continue
+        if not iter_dir.is_dir() or any(iter_dir.iterdir()):
+            raise FileExistsError(
+                f"CDFM target {iter_dir} already exists and is not empty. "
+                "Quarantine or remove the partial iteration before resuming."
+            )
 
 
 class CDFMWorkflow(SamplingWorkflow):
@@ -193,6 +219,15 @@ class CDFMWorkflow(SamplingWorkflow):
         zbx_cpu = cfg.conditioning.ncores_per_task or max(
             host.n_cpus for host in self.resource_pool.hosts
         )
+        post_cpu = zbx_cpu
+        post_cpu_raw = os.environ.get("ACECG_CDFM_POST_N_RANKS")
+        if post_cpu_raw:
+            post_cpu = int(post_cpu_raw)
+            if post_cpu <= 0 or post_cpu > zbx_cpu:
+                raise ValueError(
+                    "ACECG_CDFM_POST_N_RANKS must be between 1 and "
+                    f"conditioning.ncores_per_task ({zbx_cpu}), got {post_cpu}."
+                )
         trajectory_relpath = str(plan.trajectory_path.relative_to(plan.run_dir))
         if plan.init_force_path is None:
             raise ValueError(
@@ -233,16 +268,19 @@ class CDFMWorkflow(SamplingWorkflow):
 
         return TaskSpec(
             task_class="zbx",
-            frame_id=plan.frame_id,                # conditioning frame index
+            # conditioning frame index
+            frame_id=plan.frame_id,
             run_dir=str(plan.run_dir.resolve()),
             cpu_cores=zbx_cpu,
             sim_input=plan.input_script_path.name,
             sim_backend=cfg.sampling.sim_backend,
-            sim_log="sim.log",                     # default LAMMPS log name
+            # default LAMMPS log name
+            sim_log="sim.log",
             post_spec=post_spec,
-            post_exec={"mode": "mpi", "n_ranks": zbx_cpu},
+            post_exec={"mode": "mpi", "n_ranks": post_cpu},
             sim_var=dict(cfg.sampling.sim_var),
-            archive_trajectory=False,              # trajectories cleaned after read
+            # trajectories cleaned after read
+            archive_trajectory=False,
             trajectory_files=[trajectory_relpath],
             single_host_only=False,
         )
@@ -323,12 +361,23 @@ class CDFMWorkflow(SamplingWorkflow):
     def run(self) -> Dict[str, Any]:
         """Execute the CDFM training loop."""
         cfg = self.config
-        n_epochs = cfg.training.n_epochs
+        n_epochs = int(cfg.training.n_epochs)
+        start_epoch = int(cfg.training.start_epoch)
+        epoch_indices = _cdfm_epoch_indices(start_epoch, n_epochs)
         K = cfg.conditioning.n_samples
         mode = str(cfg.training.extras.get("cdfm_mode", "direct")).strip().lower()
         results = []
 
-        for epoch in range(n_epochs):
+        _assert_cdfm_iteration_dirs_available(self.output_dir, epoch_indices)
+        if start_epoch > 0:
+            self.zbx_sampler.advance_epochs(n_epochs=start_epoch, n_runs=K)
+            logger.info(
+                "Appending CDFM epochs %d through %d from current forcefield.",
+                epoch_indices.start,
+                epoch_indices.stop - 1,
+            )
+
+        for epoch in epoch_indices:
             iter_dir = self.output_dir / f"iter_{epoch:04d}"
             iter_dir.mkdir(parents=True, exist_ok=True)
 
@@ -378,7 +427,13 @@ class CDFMWorkflow(SamplingWorkflow):
                 int(np.asarray(param_mask).size),
             )
 
-        return {"epochs": len(results), "results": results}
+        end_epoch = start_epoch + len(results) - 1
+        return {
+            "epochs": len(results),
+            "start_epoch": start_epoch,
+            "end_epoch": end_epoch,
+            "results": results,
+        }
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

@@ -1,4 +1,5 @@
-# AceCG/fitters/fit_bspline.py
+"""AceCG fitters fit bspline implementation."""
+
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
@@ -41,7 +42,7 @@ def _stack_weighted(
     return np.vstack(A_list), np.concatenate(b_list)
 
 
-# ---------- config ----------
+# ── config ───────────────────────────────────────────────
 
 @dataclass
 class BSplineConfig:
@@ -94,7 +95,7 @@ class BSplineConfig:
     bonded: bool = False
 
 
-# ---------- fitter ----------
+# ── fitter ───────────────────────────────────────────────
 
 class BSplineTableFitter(BaseTableFitter):
     """
@@ -168,9 +169,12 @@ class BSplineTableFitter(BaseTableFitter):
         )
 
         # design matrices via BSplinePotential (force-basis: B @ c = F)
-        B_data = tmp_pot.basis_values(r)                     # (N, m)
-        A_c0 = tmp_pot.basis_values(anchors_r)               # (Na, m) for F≈0
-        A_c1 = tmp_pot.basis_derivatives(anchors_r)           # (Na, m) for F'≈0
+        # (N, m)
+        B_data = tmp_pot.basis_values(r)
+        # (Na, m) for F≈0
+        A_c0 = tmp_pot.basis_values(anchors_r)
+        # (Na, m) for F'≈0
+        A_c1 = tmp_pot.basis_derivatives(anchors_r)
 
         # stacked weighted system
         A, b = _stack_weighted(

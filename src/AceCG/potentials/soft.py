@@ -1,3 +1,5 @@
+"""AceCG potentials soft implementation."""
+
 import numpy as np
 
 from .base import BasePotential

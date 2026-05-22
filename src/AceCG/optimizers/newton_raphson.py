@@ -1,4 +1,5 @@
-# AceCG/optimizers/newton_raphson.py
+"""AceCG optimizers newton raphson implementation."""
+
 import numpy as np
 from .base import BaseOptimizer
 
