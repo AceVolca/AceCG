@@ -13,6 +13,7 @@ from ..fitters import TABLE_FITTERS
 from ..potentials import POTENTIAL_REGISTRY
 from ..potentials.base import BasePotential
 from ..topology.forcefield import Forcefield
+from ..topology.topology_array import TopologyArrays
 from ..topology.types import InteractionKey
 from .tables import (
     cap_table_forces,
@@ -71,12 +72,32 @@ def _parse_pair_mask_spec(
 
 def _parse_bonded_mask_spec(
     tokens: Sequence[str],
+    *,
+    topology_arrays: TopologyArrays,
 ) -> Optional[tuple[InteractionKey, Optional[str], list[str]]]:
     if len(tokens) < 3 or tokens[0] not in {"bond_coeff", "angle_coeff"}:
         return None
     kind = tokens[0].split("_", 1)[0]
     potential_style = str(tokens[2]).strip().lower()
-    return InteractionKey(style=kind, types=(str(tokens[1]),)), potential_style, [str(token) for token in tokens[3:]]
+    type_num = str(tokens[1])
+    key = InteractionKey(style=kind, types=(type_num,))
+    # Match ReadLmpFF: LAMMPS bonded type ids are 1-based in coeff files,
+    # while TopologyArrays stores AceCG internal bonded type maps 0-based
+    # after applying any configured type aliases.
+    if type_num.isdigit():
+        bonded_type_id_to_key = getattr(topology_arrays, f"{kind}_type_id_to_key", None)
+        if bonded_type_id_to_key is None:
+            raise ValueError(
+                f"topology_arrays has no {kind}_type_id_to_key map required "
+                f"for numeric {tokens[0]} entries."
+            )
+        mapped_key = bonded_type_id_to_key.get(int(type_num) - 1)
+        if mapped_key is None:
+            raise KeyError(
+                f"{tokens[0]} type id {type_num} does not exist in topology_arrays."
+            )
+        key = mapped_key
+    return key, potential_style, [str(token) for token in tokens[3:]]
 
 
 def _looks_like_mask_payload(payload_tokens: Sequence[str]) -> bool:
@@ -118,6 +139,8 @@ def _parse_bounds_payload(
 def _read_lmpffmask_spec(
     file: str,
     pair_style: str,
+    *,
+    topology_arrays: TopologyArrays,
     pair_typ_sel: Optional[Sequence[str]] = None,
 ) -> tuple[tuple[InteractionKey, Optional[str], tuple[str, ...]], ...]:
     entries: list[tuple[InteractionKey, Optional[str], tuple[str, ...]]] = []
@@ -138,7 +161,7 @@ def _read_lmpffmask_spec(
                 pair_typ_sel=pair_typ_sel,
             )
             if parsed is None:
-                parsed = _parse_bonded_mask_spec(tokens)
+                parsed = _parse_bonded_mask_spec(tokens, topology_arrays=topology_arrays)
             if parsed is None:
                 continue
 
@@ -158,6 +181,8 @@ def _read_lmpffmask_spec(
 def _read_lmpffbounds_spec(
     file: str,
     pair_style: str,
+    *,
+    topology_arrays: TopologyArrays,
     pair_typ_sel: Optional[Sequence[str]] = None,
 ) -> tuple[tuple[InteractionKey, Optional[str], tuple[str, ...], tuple[str, ...]], ...]:
     entries: list[tuple[InteractionKey, Optional[str], tuple[str, ...], tuple[str, ...]]] = []
@@ -178,7 +203,7 @@ def _read_lmpffbounds_spec(
                 pair_typ_sel=pair_typ_sel,
             )
             if parsed is None:
-                parsed = _parse_bonded_mask_spec(tokens)
+                parsed = _parse_bonded_mask_spec(tokens, topology_arrays=topology_arrays)
             if parsed is None:
                 continue
 
@@ -200,6 +225,8 @@ def _read_lmpffbounds_spec(
 def ReadLmpFFMask(
     file: str,
     pair_style: str,
+    *,
+    topology_arrays: TopologyArrays,
     pair_typ_sel: Optional[List[str]] = None,
 ) -> Any:
     """Read an AceCG forcefield-mask file.
@@ -211,6 +238,9 @@ def ReadLmpFFMask(
     pair_style : str
         LAMMPS pair style in the source forcefield file. Use ``"hybrid"`` for
         hybrid pair coefficient lines.
+    topology_arrays : TopologyArrays
+        Topology metadata used to translate numeric bonded type ids into
+        canonical :class:`InteractionKey` values.
     pair_typ_sel : list[str], optional
         Pair sub-styles to include when ``pair_style="hybrid"``.
 
@@ -225,12 +255,15 @@ def ReadLmpFFMask(
         file,
         str(pair_style),
         pair_typ_sel=pair_typ_sel,
+        topology_arrays=topology_arrays,
     ))
 
 
 def ReadLmpFFBounds(
     file: str,
     pair_style: str,
+    *,
+    topology_arrays: TopologyArrays,
     pair_typ_sel: Optional[List[str]] = None,
 ) -> Any:
     """Read an AceCG forcefield-bounds file.
@@ -238,6 +271,8 @@ def ReadLmpFFBounds(
     Bounds entries use ``lb`` and/or ``ub`` sections after the optional
     potential style, for example ``pair_coeff A B gauss/cut lb None 5 0.3 ub
     -0.1 15 None``. ``None`` leaves that side unbounded for one parameter.
+    Numeric bonded coefficient entries are resolved through ``topology_arrays``
+    so their LAMMPS type ids map to canonical :class:`InteractionKey` values.
     """
     from ..configs.models import ForcefieldBoundsSpec
 
@@ -245,6 +280,7 @@ def ReadLmpFFBounds(
         file,
         str(pair_style),
         pair_typ_sel=pair_typ_sel,
+        topology_arrays=topology_arrays,
     ))
 
 

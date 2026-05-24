@@ -206,9 +206,14 @@ class REMBatch(TypedDict, total=False):
     """
     energy_grad_AA: Any
     energy_grad_CG: Any
+    unmasked_energy_grad_AA: NotRequired[Any]
+    unmasked_energy_grad_CG: NotRequired[Any]
     d2U_AA: NotRequired[Any]
     d2U_CG: NotRequired[Any]
     grad_outer_CG: NotRequired[Any]
+    optimizer_gradient_mode: NotRequired[str]
+    outside_aux_weight: NotRequired[float]
+    allow_unmasked_optimizer_gradient: NotRequired[bool]
     step_index: NotRequired[int]
 
 
@@ -231,6 +236,7 @@ class REMOut(TypedDict, total=False):
     """
     name: str
     grad: Any
+    optimizer_grad: NotRequired[Any]
     hessian: NotRequired[Any]
     update: Any
     energy_grad_AA: Any
@@ -286,6 +292,11 @@ class REMTrainerAnalytic(BaseTrainer):
         d2U_AA: Optional[np.ndarray] = None,
         d2U_CG: Optional[np.ndarray] = None,
         grad_outer_CG: Optional[np.ndarray] = None,
+        unmasked_energy_grad_AA: Optional[np.ndarray] = None,
+        unmasked_energy_grad_CG: Optional[np.ndarray] = None,
+        optimizer_gradient_mode: str = "masked",
+        outside_aux_weight: float = 1.0,
+        allow_unmasked_optimizer_gradient: bool = False,
         step_index: int = 0,
     ) -> REMBatch:
         """
@@ -322,6 +333,15 @@ class REMTrainerAnalytic(BaseTrainer):
             batch["d2U_CG"] = d2U_CG
         if grad_outer_CG is not None:
             batch["grad_outer_CG"] = grad_outer_CG
+        if unmasked_energy_grad_AA is not None:
+            batch["unmasked_energy_grad_AA"] = unmasked_energy_grad_AA
+        if unmasked_energy_grad_CG is not None:
+            batch["unmasked_energy_grad_CG"] = unmasked_energy_grad_CG
+        batch["optimizer_gradient_mode"] = optimizer_gradient_mode
+        batch["outside_aux_weight"] = float(outside_aux_weight)
+        batch["allow_unmasked_optimizer_gradient"] = bool(
+            allow_unmasked_optimizer_gradient
+        )
         return batch
 
     @staticmethod
@@ -333,6 +353,11 @@ class REMTrainerAnalytic(BaseTrainer):
         d2U_AA: Optional[np.ndarray] = None,
         d2U_CG_frame: Optional[np.ndarray] = None,
         grad_outer_CG_frame: Optional[np.ndarray] = None,
+        unmasked_energy_grad_AA: Optional[np.ndarray] = None,
+        unmasked_energy_grad_CG_frame: Optional[np.ndarray] = None,
+        optimizer_gradient_mode: str = "masked",
+        outside_aux_weight: float = 1.0,
+        allow_unmasked_optimizer_gradient: bool = False,
         step_index: int = 0,
     ) -> REMBatch:
         """Build a REMBatch from AA averages + per-frame CG stacks + a-posteriori weights.
@@ -377,6 +402,19 @@ class REMTrainerAnalytic(BaseTrainer):
 
         energy_grad_CG = w_norm @ grad_frame
 
+        unmasked_energy_grad_CG: Optional[np.ndarray] = None
+        if unmasked_energy_grad_CG_frame is not None:
+            unmasked_grad_frame = np.asarray(
+                unmasked_energy_grad_CG_frame,
+                dtype=np.float64,
+            )
+            if unmasked_grad_frame.ndim != 2 or unmasked_grad_frame.shape != grad_frame.shape:
+                raise ValueError(
+                    "unmasked_energy_grad_CG_frame must match energy_grad_CG_frame "
+                    f"shape {grad_frame.shape}, got {unmasked_grad_frame.shape}."
+                )
+            unmasked_energy_grad_CG = w_norm @ unmasked_grad_frame
+
         d2U_CG: Optional[np.ndarray] = None
         if d2U_CG_frame is not None:
             d2U_stack = np.asarray(d2U_CG_frame, dtype=np.float64)
@@ -403,6 +441,11 @@ class REMTrainerAnalytic(BaseTrainer):
             d2U_AA=d2U_AA,
             d2U_CG=d2U_CG,
             grad_outer_CG=grad_outer_CG,
+            unmasked_energy_grad_AA=unmasked_energy_grad_AA,
+            unmasked_energy_grad_CG=unmasked_energy_grad_CG,
+            optimizer_gradient_mode=optimizer_gradient_mode,
+            outside_aux_weight=outside_aux_weight,
+            allow_unmasked_optimizer_gradient=allow_unmasked_optimizer_gradient,
             step_index=step_index,
         )
 
@@ -439,6 +482,28 @@ class REMTrainerAnalytic(BaseTrainer):
 
         # --- REM gradient ---
         grad = self.beta * (energy_grad_AA - energy_grad_CG)
+        unmasked_grad = None
+        if "unmasked_energy_grad_AA" in batch or "unmasked_energy_grad_CG" in batch:
+            missing_unmasked = [
+                key for key in ("unmasked_energy_grad_AA", "unmasked_energy_grad_CG")
+                if key not in batch
+            ]
+            if missing_unmasked:
+                raise KeyError(
+                    "Missing unmasked REM gradient statistics: "
+                    + ", ".join(missing_unmasked)
+                )
+            unmasked_grad = self.beta * (
+                np.asarray(batch["unmasked_energy_grad_AA"], dtype=np.float64)
+                - np.asarray(batch["unmasked_energy_grad_CG"], dtype=np.float64)
+            )
+        optimizer_grad = self.select_optimizer_gradient(
+            grad,
+            unmasked_grad=unmasked_grad,
+            mode=str(batch.get("optimizer_gradient_mode", "masked")),
+            outside_aux_weight=float(batch.get("outside_aux_weight", 1.0)),
+            allow_unmasked=bool(batch.get("allow_unmasked_optimizer_gradient", False)),
+        )
 
         # --- Optional Hessian ---
         hessian = None
@@ -469,12 +534,12 @@ class REMTrainerAnalytic(BaseTrainer):
         # --- Optimization step ---
         if apply_update:
             if hessian is not None:
-                update = self.optimizer.step(grad, hessian=hessian)
+                update = self.optimizer.step(optimizer_grad, hessian=hessian)
             else:
-                update = self.optimizer.step(grad)
+                update = self.optimizer.step(optimizer_grad)
             self.clamp_and_update()
         else:
-            update = np.zeros_like(grad)
+            update = np.zeros_like(optimizer_grad)
 
         # --- Logging ---
         if self.logger is not None:
@@ -486,6 +551,11 @@ class REMTrainerAnalytic(BaseTrainer):
                 step_index,
             )
             self.logger.add_scalar("REM/grad_norm", float(np.linalg.norm(grad)), step_index)
+            self.logger.add_scalar(
+                "REM/optimizer_grad_norm",
+                float(np.linalg.norm(optimizer_grad)),
+                step_index,
+            )
             self.logger.add_scalar("REM/update_norm", float(np.linalg.norm(update)), step_index)
             if hessian is not None:
                 self.logger.add_scalar(
@@ -497,6 +567,7 @@ class REMTrainerAnalytic(BaseTrainer):
         return {
             "name": "REM",
             "grad": grad,
+            "optimizer_grad": optimizer_grad,
             "hessian": hessian,
             "update": update,
             "energy_grad_AA": energy_grad_AA,
@@ -504,7 +575,11 @@ class REMTrainerAnalytic(BaseTrainer):
             "meta": {
                 "step_index": step_index,
                 "grad_norm": float(np.linalg.norm(grad)),
+                "optimizer_grad_norm": float(np.linalg.norm(optimizer_grad)),
                 "update_norm": float(np.linalg.norm(update)),
                 "need_hessian": need_hessian,
+                "optimizer_gradient_mode": str(
+                    batch.get("optimizer_gradient_mode", "masked")
+                ),
             },
         }

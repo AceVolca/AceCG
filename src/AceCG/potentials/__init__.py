@@ -31,3 +31,14 @@ POTENTIAL_REGISTRY = {
     "double/gauss": UnnormalizedMultiGaussianPotential,
     "srlr_gauss": SRLRGaussianPotential,
 }
+
+
+def __getattr__(name: str):
+    if name in {"BoundaryPriorPotential", "apply_boundary_prior"}:
+        from .boundary_prior import BoundaryPriorPotential, apply_boundary_prior
+
+        return {
+            "BoundaryPriorPotential": BoundaryPriorPotential,
+            "apply_boundary_prior": apply_boundary_prior,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -19,4 +19,13 @@ __all__ = [
     "SamplingWorkflow",
     "VPGrowthResult",
     "VPGrowthWorkflow",
+    "run_boundary_prior",
 ]
+
+
+def __getattr__(name: str):
+    if name == "run_boundary_prior":
+        from .boundary_prior import run_boundary_prior
+
+        return run_boundary_prior
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Sequence, Tuple
 
 import numpy as np
 
+from ..configs.energy_mask import summarize_energy_mask_counts
+
 
 if TYPE_CHECKING:
     from ..topology.forcefield import Forcefield
@@ -54,6 +56,10 @@ _REQUEST_FLAGS: Tuple[str, ...] = (
     "need_energy_grad_outer",
     "need_gauge_free_energy_grad",
     "need_gauge_free_energy_grad_outer",
+    "need_unmasked_energy_grad",
+    "need_unmasked_energy_grad_outer",
+    "need_unmasked_gauge_free_energy_grad",
+    "need_unmasked_gauge_free_energy_grad_outer",
     "need_force_value",
     "need_force_grad",
     "need_fm_stats",
@@ -393,6 +399,52 @@ def finalize_fm_root(state: Dict[str, Any]) -> Dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _rem_has_energy_mask(step: Dict[str, Any]) -> bool:
+    """Return whether this REM-style step carries coordinate bounds."""
+    return bool(step.get("energy_mask"))
+
+
+def _rem_gradient_convention(step: Dict[str, Any]) -> str:
+    """Resolve the gauge convention for a REM-style reducer step."""
+    raw = step.get("gradient_convention")
+    has_mask = _rem_has_energy_mask(step)
+    step_mode = str(step.get("step_mode", "")).strip().lower()
+    if raw is None:
+        convention = "gauge_free" if step_mode == "rem" or has_mask else "physical"
+    else:
+        convention = str(raw).strip().lower()
+    if convention not in {"gauge_free", "physical"}:
+        raise ValueError(
+            "REM gradient_convention must be 'gauge_free' or 'physical', "
+            f"got {convention!r}."
+        )
+    if has_mask and convention == "physical":
+        raise ValueError(
+            "Coordinate-masked REM/CDREM statistics require gauge_free gradients."
+        )
+    return convention
+
+
+def _rem_needs_aux_unmasked_energy_grad(step: Dict[str, Any]) -> bool:
+    """Return whether the reducer must retain auxiliary unmasked gradients."""
+    return bool(step.get("need_aux_unmasked_energy_grad", False))
+
+
+def _merge_energy_mask_diagnostics(
+    state: Dict[str, Any],
+    diagnostics: Dict[str, Any],
+) -> None:
+    """Accumulate per-frame coordinate-mask diagnostics into reducer state."""
+    state["energy_mask_active"] += int(diagnostics.get("active", 0))
+    state["energy_mask_total"] += int(diagnostics.get("total", 0))
+    by_key = state["energy_mask_by_key"]
+    for label, counts in dict(diagnostics.get("by_key", {})).items():
+        if label not in by_key:
+            by_key[label] = {"active": 0, "total": 0}
+        by_key[label]["active"] += int(counts.get("active", 0))
+        by_key[label]["total"] += int(counts.get("total", 0))
+
+
 def init_rem_state(
     step: Dict[str, Any],
     forcefield_snapshot: "Forcefield",
@@ -402,18 +454,29 @@ def init_rem_state(
     n_params = forcefield_snapshot.n_params()
     need_hessian = bool(step.get("need_hessian", False))
     reduce_stack = bool(step.get("reduce_stack", False))
-    step_mode = str(step.get("step_mode", "")).strip().lower()
-    use_gauge_free_gradient = step_mode == "rem"
+    gradient_convention = _rem_gradient_convention(step)
+    # The auxiliary unmasked channel is optional. It exists only for
+    # optimizer-gradient policies such as hybrid_aux/unmasked; diagnostics
+    # and ordinary masked REM statistics do not require it.
+    use_aux_unmasked = _rem_needs_aux_unmasked_energy_grad(step)
     state: Dict[str, Any] = {
         "n_params": int(n_params),
         "need_hessian": need_hessian,
         "reduce_stack": reduce_stack,
-        "gradient_convention": "gauge_free" if use_gauge_free_gradient else "physical",
+        "gradient_convention": gradient_convention,
+        "use_aux_unmasked": use_aux_unmasked,
+        "has_energy_mask": _rem_has_energy_mask(step),
     }
+    if state["has_energy_mask"]:
+        state["energy_mask_active"] = 0
+        state["energy_mask_total"] = 0
+        state["energy_mask_by_key"] = {}
     if reduce_stack:
         state["energy_grad_frames"] = []
         state["weight_frames"] = []
         state["frame_ids"] = []
+        if use_aux_unmasked:
+            state["unmasked_energy_grad_frames"] = []
         if need_hessian:
             state["d2U_frames"] = []
             state["grad_outer_frames"] = []
@@ -421,6 +484,8 @@ def init_rem_state(
         state["energy_grad_sum"] = np.zeros(n_params, dtype=np.float32)
         state["weight_sum"] = 0.0
         state["n_frames"] = 0
+        if use_aux_unmasked:
+            state["unmasked_energy_grad_sum"] = np.zeros(n_params, dtype=np.float32)
         if need_hessian:
             state["d2U_sum"] = np.zeros((n_params, n_params), dtype=np.float32)
             state["grad_outer_sum"] = np.zeros((n_params, n_params), dtype=np.float32)
@@ -431,14 +496,17 @@ def init_rem_state(
 def request_rem(step: Dict[str, Any]) -> Dict[str, bool]:
     """Return observable requests required by the REM reducer."""
     need_hessian = bool(step.get("need_hessian", False))
-    step_mode = str(step.get("step_mode", "")).strip().lower()
-    use_gauge_free_gradient = step_mode == "rem"
+    gradient_convention = _rem_gradient_convention(step)
+    use_gauge_free_gradient = gradient_convention == "gauge_free"
+    use_aux_unmasked = _rem_needs_aux_unmasked_energy_grad(step)
     return {
         "need_energy_grad": not use_gauge_free_gradient,
         "need_energy_hessian": need_hessian,
         "need_energy_grad_outer": need_hessian and not use_gauge_free_gradient,
         "need_gauge_free_energy_grad": use_gauge_free_gradient,
         "need_gauge_free_energy_grad_outer": need_hessian and use_gauge_free_gradient,
+        "need_unmasked_energy_grad": use_aux_unmasked and not use_gauge_free_gradient,
+        "need_unmasked_gauge_free_energy_grad": use_aux_unmasked and use_gauge_free_gradient,
     }
 
 
@@ -454,19 +522,31 @@ def consume_rem_frame(
     if gradient_convention == "gauge_free":
         grad_key = "gauge_free_energy_grad"
         grad_outer_key = "gauge_free_energy_grad_outer"
+        unmasked_grad_key = "unmasked_gauge_free_energy_grad"
     elif gradient_convention == "physical":
         grad_key = "energy_grad"
         grad_outer_key = "energy_grad_outer"
+        unmasked_grad_key = "unmasked_energy_grad"
     else:
         raise ValueError(
             f"Unsupported REM gradient_convention {gradient_convention!r}."
         )
     need_hessian = bool(state["need_hessian"])
+    use_aux_unmasked = bool(state.get("use_aux_unmasked", False))
     grad = np.asarray(payload[grad_key], dtype=np.float32)
+    if state.get("has_energy_mask"):
+        diagnostics = payload.get("energy_mask_diagnostics")
+        if diagnostics is None:
+            raise KeyError("Masked REM payload must include energy_mask_diagnostics.")
+        _merge_energy_mask_diagnostics(state, diagnostics)
     if state["reduce_stack"]:
         state["energy_grad_frames"].append(grad)
         state["weight_frames"].append(float(frame_weight))
         state["frame_ids"].append(int(payload["frame_idx"]))
+        if use_aux_unmasked:
+            state["unmasked_energy_grad_frames"].append(
+                np.asarray(payload[unmasked_grad_key], dtype=np.float32)
+            )
         if need_hessian:
             state["d2U_frames"].append(
                 np.asarray(payload["energy_hessian"], dtype=np.float32)
@@ -479,6 +559,11 @@ def consume_rem_frame(
     state["energy_grad_sum"] += wi * grad
     state["weight_sum"] += wi
     state["n_frames"] += 1
+    if use_aux_unmasked:
+        state["unmasked_energy_grad_sum"] += wi * np.asarray(
+            payload[unmasked_grad_key],
+            dtype=np.float32,
+        )
     if need_hessian:
         state["d2U_sum"] += wi * np.asarray(payload["energy_hessian"], dtype=np.float32)
         state["grad_outer_sum"] += wi * np.asarray(
@@ -491,11 +576,16 @@ def local_partials_rem(state: Dict[str, Any]) -> Dict[str, Any]:
     n_params = int(state["n_params"])
     need_hessian = bool(state["need_hessian"])
     gradient_convention = str(state["gradient_convention"]).strip().lower()
+    use_aux_unmasked = bool(state.get("use_aux_unmasked", False))
     if gradient_convention not in {"gauge_free", "physical"}:
         raise ValueError(
             f"Unsupported REM gradient_convention {gradient_convention!r}."
         )
-    metadata = {"gradient_convention": gradient_convention}
+    metadata = {
+        "gradient_convention": gradient_convention,
+        "need_aux_unmasked_energy_grad": use_aux_unmasked,
+        "has_energy_mask": bool(state.get("has_energy_mask", False)),
+    }
     if state["reduce_stack"]:
         stack_1d = lambda arrs: (
             np.stack(arrs, axis=0).astype(np.float32, copy=False)
@@ -515,6 +605,14 @@ def local_partials_rem(state: Dict[str, Any]) -> Dict[str, Any]:
             "weight_frames": np.asarray(state["weight_frames"], dtype=np.float32),
             "frame_ids": np.asarray(state["frame_ids"], dtype=np.int64),
         }
+        if use_aux_unmasked:
+            out["unmasked_energy_grad_frames"] = stack_1d(
+                state["unmasked_energy_grad_frames"]
+            )
+        if state.get("has_energy_mask"):
+            out["energy_mask_active"] = int(state["energy_mask_active"])
+            out["energy_mask_total"] = int(state["energy_mask_total"])
+            out["energy_mask_by_key"] = dict(state["energy_mask_by_key"])
         if need_hessian:
             out["d2U_frames"] = stack_2d(state["d2U_frames"])
             out["grad_outer_frames"] = stack_2d(state["grad_outer_frames"])
@@ -526,6 +624,15 @@ def local_partials_rem(state: Dict[str, Any]) -> Dict[str, Any]:
         "weight_sum": float(state["weight_sum"]),
         "n_frames": int(state["n_frames"]),
     }
+    if use_aux_unmasked:
+        out["unmasked_energy_grad_sum"] = np.asarray(
+            state["unmasked_energy_grad_sum"],
+            dtype=np.float32,
+        )
+    if state.get("has_energy_mask"):
+        out["energy_mask_active"] = int(state["energy_mask_active"])
+        out["energy_mask_total"] = int(state["energy_mask_total"])
+        out["energy_mask_by_key"] = dict(state["energy_mask_by_key"])
     if need_hessian:
         out["d2U_sum"] = np.asarray(state["d2U_sum"], dtype=np.float32)
         out["grad_outer_sum"] = np.asarray(state["grad_outer_sum"], dtype=np.float32)
@@ -539,14 +646,20 @@ def local_partials_rem(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def reduce_plan_rem(step: Dict[str, Any]) -> Dict[str, Tuple[str, ...]]:
     need_hessian = bool(step.get("need_hessian", False))
+    use_aux_unmasked = _rem_needs_aux_unmasked_energy_grad(step)
+    has_energy_mask = _rem_has_energy_mask(step)
     if bool(step.get("reduce_stack", False)):
         stack_keys = ["energy_grad_frames", "weight_frames", "frame_ids"]
+        if use_aux_unmasked:
+            stack_keys.append("unmasked_energy_grad_frames")
         if need_hessian:
             stack_keys.extend(["d2U_frames", "grad_outer_frames"])
+        sum_keys = ["energy_mask_active", "energy_mask_total"] if has_energy_mask else []
         return {
-            "sum": (),
+            "sum": tuple(sum_keys),
             "max": (),
             "stack": tuple(stack_keys),
+            "dict_sum": ("energy_mask_by_key",) if has_energy_mask else (),
             "dict_update": ("metadata",),
         }
     sum_keys = ["energy_grad_sum", "weight_sum", "n_frames"]
@@ -554,21 +667,29 @@ def reduce_plan_rem(step: Dict[str, Any]) -> Dict[str, Tuple[str, ...]]:
     if need_hessian:
         sum_keys.extend(["d2U_sum", "grad_outer_sum"])
         stack_keys = ("energy_grad_frame",)
+    if use_aux_unmasked:
+        sum_keys.append("unmasked_energy_grad_sum")
+    if has_energy_mask:
+        sum_keys.extend(["energy_mask_active", "energy_mask_total"])
     return {
         "sum": tuple(sum_keys),
         "max": (),
         "stack": stack_keys,
+        "dict_sum": ("energy_mask_by_key",) if has_energy_mask else (),
         "dict_update": ("metadata",),
     }
 
 
 def finalize_rem_root(state: Dict[str, Any]) -> Dict[str, Any]:
     need_hessian = bool(state.get("need_hessian", False))
-    gradient_convention = str(state["metadata"]["gradient_convention"]).strip().lower()
+    metadata = dict(state["metadata"])
+    gradient_convention = str(metadata["gradient_convention"]).strip().lower()
     if gradient_convention not in {"gauge_free", "physical"}:
         raise ValueError(
             f"Unsupported REM gradient_convention {gradient_convention!r}."
         )
+    has_energy_mask = bool(metadata.get("has_energy_mask", False))
+    use_aux_unmasked = bool(metadata.get("need_aux_unmasked_energy_grad", False))
     if state.get("reduce_stack"):
         out = {
             "reduce_stack": True,
@@ -578,6 +699,17 @@ def finalize_rem_root(state: Dict[str, Any]) -> Dict[str, Any]:
             "n_frames": int(np.asarray(state["frame_ids"]).size),
             "gradient_convention": gradient_convention,
         }
+        if use_aux_unmasked:
+            out["unmasked_energy_grad_frame"] = np.asarray(
+                state["unmasked_energy_grad_frames"],
+                dtype=np.float64,
+            )
+        if has_energy_mask:
+            out["energy_mask_diagnostics"] = summarize_energy_mask_counts(
+                int(state.get("energy_mask_active", 0)),
+                int(state.get("energy_mask_total", 0)),
+                state.get("energy_mask_by_key", {}),
+            )
         if need_hessian:
             out["d2U_frame"] = np.asarray(state["d2U_frames"], dtype=np.float64)
             out["grad_outer_frame"] = np.asarray(state["grad_outer_frames"], dtype=np.float64)
@@ -593,6 +725,22 @@ def finalize_rem_root(state: Dict[str, Any]) -> Dict[str, Any]:
         "weight_sum": weight_sum,
         "gradient_convention": gradient_convention,
     }
+    if use_aux_unmasked:
+        if weight_sum > 0.0:
+            out["unmasked_energy_grad_avg"] = (
+                np.asarray(state["unmasked_energy_grad_sum"], dtype=np.float64)
+                / weight_sum
+            )
+        else:
+            out["unmasked_energy_grad_avg"] = np.zeros_like(
+                np.asarray(state["unmasked_energy_grad_sum"], dtype=np.float64)
+            )
+    if has_energy_mask:
+        out["energy_mask_diagnostics"] = summarize_energy_mask_counts(
+            int(state.get("energy_mask_active", 0)),
+            int(state.get("energy_mask_total", 0)),
+            state.get("energy_mask_by_key", {}),
+        )
     if need_hessian:
         if weight_sum > 0.0:
             out["d2U_avg"] = np.asarray(state["d2U_sum"], dtype=np.float64) / weight_sum

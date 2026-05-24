@@ -129,6 +129,7 @@ class REMWorkflow(SamplingWorkflow):
                     }
                 ],
             }
+            self._apply_rem_statistics_options(post_spec["steps"][0])
             if cfg.system.type_names is not None:
                 post_spec["atom_type_name_aliases"] = cfg.system.type_names
             if cfg.vp is not None:
@@ -175,6 +176,11 @@ class REMWorkflow(SamplingWorkflow):
                 d2U_AA=aa_stats.d2U,
                 d2U_CG=cg_stats.get("d2U_avg"),
                 grad_outer_CG=cg_stats.get("grad_outer_avg"),
+                unmasked_energy_grad_AA=aa_stats.unmasked_energy_grad,
+                unmasked_energy_grad_CG=cg_stats.get("unmasked_energy_grad_avg"),
+                optimizer_gradient_mode=self._optimizer_gradient_mode(),
+                outside_aux_weight=self._outside_aux_weight(),
+                allow_unmasked_optimizer_gradient=self._allow_unmasked_optimizer_gradient(),
                 step_index=epoch,
             )
             step_out = self.trainer.step(batch, apply_update=True)
@@ -186,8 +192,27 @@ class REMWorkflow(SamplingWorkflow):
             self.sampler.clean_epoch(state)
             self._snapshot_optimizer(ff_dir)
             self._write_workflow_checkpoint(ff_dir)
+            if self._validation_due_after_epoch(epoch):
+                self._run_validation_blocking(
+                    label=f"epoch_{epoch:04d}",
+                    epoch=epoch,
+                    scheduler=self.scheduler,
+                )
 
-        return {"epochs": len(results), "results": results}
+        if self._validation_enabled():
+            last_epoch = int(n_epochs) - 1
+            if last_epoch < 0 or not self._validation_due_after_epoch(last_epoch):
+                self._run_validation_blocking(
+                    label="final",
+                    epoch=last_epoch,
+                    scheduler=self.scheduler,
+                )
+
+        return {
+            "epochs": len(results),
+            "results": results,
+            "validation": self._validation_result_payload(),
+        }
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

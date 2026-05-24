@@ -281,26 +281,42 @@ def force(
         else None
     )
 
+    active_param_mask = None
+    if param_mask is not None:
+        active_param_mask = np.asarray(param_mask, dtype=bool).reshape(-1)
+        if active_param_mask.shape != (n_params,):
+            raise ValueError(
+                f"param_mask shape must be ({n_params},), got {active_param_mask.shape}"
+            )
+
     for key, pot, sl in param_blocks:
         if interaction_mask is not None and not interaction_mask.get(key, True):
             continue
+        block_has_trainable_params = (
+            active_param_mask is None
+            or bool(np.any(active_param_mask[sl]))
+        )
+        mat_for_potential = mat if block_has_trainable_params else None
         t_project = time.monotonic()
         if key.style == "pair":
-            _project_pair(mat, fvec, frame_geometry, key, pot, sl)
+            _project_pair(mat_for_potential, fvec, frame_geometry, key, pot, sl)
         elif key.style == "bond":
-            _project_bond(mat, fvec, frame_geometry, key, pot, sl)
+            _project_bond(mat_for_potential, fvec, frame_geometry, key, pot, sl)
         elif key.style == "angle":
-            _project_angle(mat, fvec, frame_geometry, key, pot, sl)
+            _project_angle(mat_for_potential, fvec, frame_geometry, key, pot, sl)
         elif key.style == "dihedral":
-            _project_dihedral(mat, fvec, frame_geometry, key, pot, sl)
+            _project_dihedral(mat_for_potential, fvec, frame_geometry, key, pot, sl)
         _add_timing(timing, f"force_project_{key.style}", time.monotonic() - t_project)
 
     mat_obs = mat[:, rows, :] if mat is not None else None
     fvec_obs = fvec[:, rows] if fvec is not None else None
-    if param_mask is not None and mat_obs is not None:
-        pmask = np.asarray(param_mask, dtype=bool)
-        if not np.all(pmask):
-            mat_obs[:, :, ~pmask] = 0.0
+    if (
+        active_param_mask is not None
+        and mat_obs is not None
+        and (return_grad or return_hessian)
+    ):
+        if not np.all(active_param_mask):
+            mat_obs[:, :, ~active_param_mask] = 0.0
 
     result: Dict[str, Any] = {}
     if return_grad:
@@ -339,6 +355,7 @@ def force(
             reference_force=reference_obs,
             weights=weights,
             n_params=n_params,
+            param_mask=active_param_mask,
         )
         result["fm_stats_sum" if sample_shape else "fm_stats"] = stats
         _add_timing(timing, "force_fm_stats", time.monotonic() - t_stats)
@@ -353,6 +370,7 @@ def _fm_stats(
     reference_force: np.ndarray,
     weights: np.ndarray,
     n_params: int,
+    param_mask: Optional[np.ndarray] = None,
 ) -> Dict[str, Any]:
     f_obs = np.asarray(model_force, dtype=np.float32)
     y_obs = np.asarray(reference_force, dtype=np.float32)
@@ -378,14 +396,39 @@ def _fm_stats(
             "Force Jacobian batch shape must be "
             f"{(n_samples, n_obs, n_params)}, got {J_obs.shape}."
         )
-    for sample_id in range(n_samples):
-        wi = np.float32(w[sample_id])
-        if wi == 0.0:
-            continue
-        J = J_obs[sample_id]
-        JtJ += wi * (J.T @ J)
-        Jtf += wi * (J.T @ f_obs[sample_id])
-        Jty += wi * (J.T @ y_obs[sample_id])
+    if param_mask is None:
+        active_cols = np.arange(n_params, dtype=np.int64)
+    else:
+        mask = np.asarray(param_mask, dtype=bool).reshape(-1)
+        if mask.shape != (n_params,):
+            raise ValueError(f"param_mask shape must be ({n_params},), got {mask.shape}")
+        active_cols = np.flatnonzero(mask)
+
+    if active_cols.size:
+        if active_cols.size == n_params:
+            for sample_id in range(n_samples):
+                wi = np.float32(w[sample_id])
+                if wi == 0.0:
+                    continue
+                J = J_obs[sample_id]
+                JtJ += wi * (J.T @ J)
+                Jtf += wi * (J.T @ f_obs[sample_id])
+                Jty += wi * (J.T @ y_obs[sample_id])
+        else:
+            JtJ_active = np.zeros((active_cols.size, active_cols.size), dtype=np.float32)
+            Jtf_active = np.zeros(active_cols.size, dtype=np.float32)
+            Jty_active = np.zeros(active_cols.size, dtype=np.float32)
+            for sample_id in range(n_samples):
+                wi = np.float32(w[sample_id])
+                if wi == 0.0:
+                    continue
+                J = J_obs[sample_id][:, active_cols]
+                JtJ_active += wi * (J.T @ J)
+                Jtf_active += wi * (J.T @ f_obs[sample_id])
+                Jty_active += wi * (J.T @ y_obs[sample_id])
+            JtJ[np.ix_(active_cols, active_cols)] = JtJ_active
+            Jtf[active_cols] = Jtf_active
+            Jty[active_cols] = Jty_active
 
     return {
         "JtJ": JtJ,

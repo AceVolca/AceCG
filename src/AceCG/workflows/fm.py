@@ -17,7 +17,7 @@ from ..configs.parser import validate_fm_spec_domain
 from ..configs.utils import parse_pair_style_options
 from ..fitters import TABLE_FITTERS
 from ..io.logger import get_screen_logger
-from ..io.forcefield import resolve_source_table_entries
+from ..io.forcefield import ReadLmpFF, resolve_source_table_entries
 from ..io.tables import export_tables
 from ..potentials.bspline import BSplinePotential
 from ..schedulers.task_runner import run_post
@@ -45,10 +45,10 @@ class FMWorkflow(BaseWorkflow):
         logger.info("FM resource pool: %s", self.resource_pool)
         self._fm_runtime_specs: List[Dict[str, Any]] = []
         self.forcefield = self._build_fm_forcefield()
-        self.forcefield.apply_specs(
-            mask_spec=self.config.system.forcefield_mask,
-            bounds_spec=self.config.system.forcefield_bounds,
-        )
+        if self.config.system.forcefield_mask is not None:
+            self.forcefield.build_mask(init_mask=self._build_forcefield_mask(self.forcefield))
+        if self.config.system.forcefield_bounds is not None:
+            self._apply_forcefield_bounds(self.forcefield)
         self._use_solver = self._should_use_solver()
         if self._use_solver:
             self.trainer_or_solver = self._build_solver()
@@ -100,9 +100,9 @@ class FMWorkflow(BaseWorkflow):
             rd = spec.to_runtime_dict()
             canonical_key = spec.ikey
 
-            if spec.init_mode == "authored_zero":
-                potential = _build_zero_potential(spec)
-                ff_data[canonical_key] = [potential]
+            if spec.init_mode in {"authored_zero", "authored_direct"}:
+                potential = _build_authored_potential(spec)
+                ff_data.setdefault(canonical_key, []).append(potential)
                 rd.setdefault("n_coeffs", spec.model_size)
                 rd["min"] = spec.domain[0]
                 rd["max"] = spec.domain[1]
@@ -110,7 +110,7 @@ class FMWorkflow(BaseWorkflow):
                 rd["table_max"] = spec.domain[1]
                 rd["resolution"] = spec.resolution
                 rd["table_resolution"] = spec.resolution
-                if "degree" not in rd and spec.model_overrides:
+                if spec.model == "bspline" and "degree" not in rd and spec.model_overrides:
                     degree = spec.model_overrides.get("degree")
                     if degree is not None:
                         rd["degree"] = int(degree)
@@ -154,7 +154,33 @@ class FMWorkflow(BaseWorkflow):
             runtime_specs.append(rd)
 
         self._fm_runtime_specs = runtime_specs
-        return Forcefield(ff_data)
+        self._append_fixed_priors(ff_data)
+        forcefield = Forcefield(ff_data)
+        if cfg.system.fixed_forcefield_path:
+            forcefield.key_mask = {key: True for key in forcefield}
+        return forcefield
+
+    def _append_fixed_priors(self, ff_data: Dict[InteractionKey, list]) -> None:
+        """Append fixed LAMMPS priors to the FM forcefield data in-place."""
+        fixed_path_raw = self.config.system.fixed_forcefield_path
+        if not fixed_path_raw:
+            return
+        fixed_path = self._resolve_config_path(fixed_path_raw)
+        if fixed_path is None:
+            raise ValueError("system.fixed_forcefield_path is configured but unresolved.")
+        pair_style, sel_styles = parse_pair_style_options(self.config.system.pair_style)
+        fixed_ff = ReadLmpFF(
+            str(fixed_path),
+            pair_style,
+            pair_typ_sel=sel_styles,
+            cutoff=None,
+            table_fit=self.config.system.table_fit or "multigaussian",
+            table_fit_overrides=self.config.system.table_fit_overrides,
+            topology_arrays=self.topology,
+        )
+        for key, pot in fixed_ff.iter_potentials():
+            pot.param_mask = np.zeros(pot.n_params(), dtype=bool)
+            ff_data.setdefault(key, []).append(pot)
 
     # ── run ─────────────────────────────────────────────────────
 
@@ -165,17 +191,24 @@ class FMWorkflow(BaseWorkflow):
         if self._use_solver:
             batch = self._run_post_accumulation(step_index=0)
             if batch is None:
-                return {"epochs": 0, "results": []}
+                return {
+                    "epochs": 0,
+                    "results": [],
+                    "validation": self._validation_result_payload(),
+                }
             batch["step_index"] = 0
             result = self.trainer_or_solver.solve(batch)
             self.forcefield.update_params(self.trainer_or_solver.get_params())
             table_manifest = self._export_table_bundle()
+            if self._validation_enabled():
+                self._run_validation_blocking(label="final", epoch=0)
             logger.info("Solver result: %s", result)
             return {
                 "epochs": 1,
                 "results": [result],
                 "table_dir": str(self.output_dir / "tables"),
                 "table_manifest": table_manifest,
+                "validation": self._validation_result_payload(),
             }
 
         # Trainer (iterative) path
@@ -189,23 +222,48 @@ class FMWorkflow(BaseWorkflow):
             self.forcefield.update_params(self.trainer_or_solver.get_params())
             results.append(out)
             logger.info("Epoch %d: %s", epoch, out)
+            if self._validation_due_after_epoch(epoch):
+                self._run_validation_blocking(
+                    label=f"epoch_{epoch:04d}",
+                    epoch=epoch,
+                )
+        if self._validation_enabled():
+            last_epoch = int(cfg.training.n_epochs) - 1
+            if last_epoch < 0 or not self._validation_due_after_epoch(last_epoch):
+                self._run_validation_blocking(label="final", epoch=last_epoch)
         table_manifest = self._export_table_bundle() if results else {"tables": {}}
         return {
             "epochs": len(results),
             "results": results,
             "table_dir": str(self.output_dir / "tables"),
             "table_manifest": table_manifest,
+            "validation": self._validation_result_payload(),
         }
 
     def _export_table_bundle(self) -> Dict[str, Any]:
         """Export solved FM tables into the run root for downstream comparisons."""
         if not self._fm_runtime_specs:
             return {"tables": {}}
+        export_forcefield = self._trainable_export_forcefield()
         return export_tables(
             {"interactions": self._fm_runtime_specs},
-            self.forcefield,
+            export_forcefield,
             self.output_dir / "tables",
         )
+
+    def _trainable_export_forcefield(self) -> Forcefield:
+        """Return only optimizer-active potentials for FM table export."""
+        data: Dict[InteractionKey, list] = {}
+        for key, pot in self.forcefield.iter_potentials():
+            local_mask = getattr(pot, "param_mask", None)
+            if local_mask is None:
+                active = True
+            else:
+                local_mask = local_mask() if callable(local_mask) else local_mask
+                active = bool(np.any(np.asarray(local_mask, dtype=bool)))
+            if active:
+                data.setdefault(key, []).append(pot)
+        return Forcefield(data)
 
     def _run_post_accumulation(
         self, *, step_index: int = 0
@@ -313,6 +371,24 @@ class FMWorkflow(BaseWorkflow):
 
 
 # ─── Module-private helpers ───────────────────────────────────────────
+
+def _build_authored_potential(spec: FMInteractionSpec) -> Any:
+    if spec.model in {"gaussian", "gauss/cut"}:
+        from ..potentials.gaussian import GaussianPotential
+
+        overrides = dict(spec.model_overrides)
+        potential = GaussianPotential(
+            spec.types[0],
+            spec.types[-1],
+            float(overrides["A"]),
+            float(overrides["r0"]),
+            float(overrides["sigma"]),
+            float(overrides.get("cutoff", spec.domain[1])),
+        )
+        setattr(potential, "_acecg_lammps_style", "gauss/cut")
+        return potential
+    return _build_zero_potential(spec)
+
 
 def _build_zero_potential(spec: FMInteractionSpec) -> BSplinePotential:
     if spec.model != "bspline":

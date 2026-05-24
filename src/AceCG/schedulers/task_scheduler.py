@@ -77,9 +77,13 @@ class TaskSpec:
     post_spec: Optional[Dict[str, Any]] = None
     post_exec: Optional[Dict[str, Any]] = None
     sim_var: Dict[str, str] = field(default_factory=dict)
+    sim_cmd: Optional[List[str]] = None
     archive_trajectory: bool = False
     trajectory_files: List[str] = field(default_factory=list)
     extra_env: Dict[str, str] = field(default_factory=dict)
+    role: str = "training"
+    required: bool = True
+    metadata: Dict[str, Any] = field(default_factory=dict)
     min_cores: Optional[int] = None
     preferred_cores: Optional[int] = None
     max_cores: Optional[int] = None
@@ -113,6 +117,9 @@ class TaskSpec:
             "archive_trajectory": self.archive_trajectory,
             "trajectory_files": self.trajectory_files,
             "extra_env": self.extra_env,
+            "role": self.role,
+            "required": self.required,
+            "metadata": self.metadata,
         }
         if self.post_exec is not None:
             d["post_exec"] = self.post_exec
@@ -143,6 +150,8 @@ class IterationResult:
     succeeded_zbx: int
     failed_zbx: int
     xz_ok: bool
+    succeeded_validation: int = 0
+    failed_validation: int = 0
 
     @property
     def n_total(self) -> int:
@@ -273,8 +282,12 @@ class TaskScheduler:
             list(xz_tasks) + list(zbx_tasks), lease_pool, placer,
         )
 
-        # Check xz failures
-        xz_results = [r for r in results if r.task.task_class == "xz"]
+        # Check required xz failures.  Optional validation xz tasks may fail
+        # without aborting the training iteration.
+        xz_results = [
+            r for r in results
+            if r.task.task_class == "xz" and r.task.required
+        ]
         xz_ok = all(r.ok for r in xz_results) if xz_results else True
         if not xz_ok:
             raise AllTasksFailedError("xz task failed — aborting iteration")
@@ -284,6 +297,13 @@ class TaskScheduler:
         succeeded_zbx = sum(1 for r in zbx_results if r.ok)
         failed_zbx = len(zbx_results) - succeeded_zbx
         min_ok = self.min_success_zbx if self.min_success_zbx is not None else n_zbx
+
+        validation_results = [
+            r for r in results
+            if r.task.role == "validation" or not r.task.required
+        ]
+        succeeded_validation = sum(1 for r in validation_results if r.ok)
+        failed_validation = len(validation_results) - succeeded_validation
 
         if n_zbx > 0 and succeeded_zbx < min_ok:
             raise AllTasksFailedError(
@@ -306,6 +326,8 @@ class TaskScheduler:
             succeeded_zbx=succeeded_zbx,
             failed_zbx=failed_zbx,
             xz_ok=xz_ok,
+            succeeded_validation=succeeded_validation,
+            failed_validation=failed_validation,
         )
 
     # ------------------------------------------------------------------
@@ -406,8 +428,10 @@ class TaskScheduler:
                     elapsed=elapsed, timing=timing,
                 ))
 
-                # xz failure → kill all, return partial results
-                if rc != 0 and task.task_class == "xz":
+                # Required xz failure → kill all, return partial results.
+                # Optional validation xz failures are recorded and do not
+                # stop the rest of the iteration.
+                if rc != 0 and task.task_class == "xz" and task.required:
                     self._kill_all(active)
                     for apid, (p, _, apr, _) in active.items():
                         try:
@@ -428,12 +452,28 @@ class TaskScheduler:
                     _fill()
 
         if pending:
+            optional_pending = [t for t in pending if not t.required]
+            required_pending = [t for t in pending if t.required]
+            for task in optional_pending:
+                self._log(
+                    f"{task.task_class.upper()} UNSCHEDULED | "
+                    f"role={task.role} fid={task.frame_id} "
+                    f"cores={task.min_cores}-{task.max_cores}"
+                )
+                results.append(TaskResult(
+                    task=task,
+                    returncode=-1,
+                    elapsed=0.0,
+                    timing={"status": "unscheduled"},
+                ))
+            if not required_pending:
+                return results
             raise RuntimeError(
-                f"{len(pending)} tasks were never scheduled: "
+                f"{len(required_pending)} tasks were never scheduled: "
                 + ", ".join(
                     f"{t.task_class}(fid={t.frame_id}, "
                     f"cores={t.min_cores}-{t.max_cores})"
-                    for t in pending
+                    for t in required_pending
                 )
             )
 
@@ -455,7 +495,8 @@ class TaskScheduler:
         spec_dict = task.to_spec_dict(cpu_cores)
 
         # Build sim LaunchSpec and serialize it fully.
-        sim_launch = backend.realize(placement, self.pool.sim_cmd, run_dir)
+        sim_cmd = list(task.sim_cmd) if task.sim_cmd is not None else self.pool.sim_cmd
+        sim_launch = backend.realize(placement, sim_cmd, run_dir)
         spec_dict["sim_launch"] = {
             "argv": list(sim_launch.argv),
             "env_add": dict(sim_launch.env_add),
@@ -589,12 +630,15 @@ class TaskScheduler:
             "tasks": [
                 {
                     "task_class": r.task.task_class,
+                    "role": r.task.role,
+                    "required": r.task.required,
                     "frame_id": r.task.frame_id,
                     "returncode": r.returncode,
                     "elapsed": r.elapsed,
                     "sim_loop": (r.timing or {}).get("sim_loop"),
                     "sim_wall": (r.timing or {}).get("sim_wall"),
                     "post_wall": (r.timing or {}).get("post_wall"),
+                    "metadata": dict(r.task.metadata),
                 }
                 for r in results
             ],

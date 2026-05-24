@@ -8,12 +8,11 @@ from __future__ import annotations
 import copy
 import fnmatch
 import re
-from collections.abc import Iterable, Mapping, MutableMapping, Sequence
-from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple
+from collections.abc import Iterable, Mapping, MutableMapping
+from typing import Dict, Generator, Iterator, List, Optional, Tuple
 
 import numpy as np
 
-from ..potentials import POTENTIAL_REGISTRY
 from ..potentials.base import BasePotential
 from .types import InteractionKey
 
@@ -44,7 +43,8 @@ class Forcefield(MutableMapping):
 
     __slots__ = (
         "_data", "_param",
-        "_param_mask", "_key_mask", "_param_bounds_lb", "_param_bounds_ub",
+        "_param_mask", "_key_mask",
+        "_param_bounds_lb", "_param_bounds_ub",
         "_param_mask_signature", "_param_bounds_signature",
         "_param_mask_dirty", "_param_bounds_dirty",
         "_vp_types", "_virtual_mask", "_real_mask", "_real_virtual_mask",
@@ -80,7 +80,7 @@ class Forcefield(MutableMapping):
         elif isinstance(data, Forcefield):
             self._data = dict(data._data)
             for f in self._CACHE_FIELDS:
-                setattr(self, f, self._copy_val(getattr(data, f)))
+                setattr(self, f, self._copy_val(getattr(data, f, None)))
             self._rebuild_structure_cache()
             self._sync_mask_cache_from_potentials()
             self._sync_bounds_cache_from_potentials()
@@ -152,7 +152,7 @@ class Forcefield(MutableMapping):
         memo[id(self)] = new
         new._data = copy.deepcopy(self._data, memo)
         for f in self._CACHE_FIELDS:
-            setattr(new, f, self._copy_val(getattr(self, f)))
+            setattr(new, f, self._copy_val(getattr(self, f, None)))
         new._rebuild_structure_cache()
         new._sync_mask_cache_from_potentials()
         new._sync_bounds_cache_from_potentials()
@@ -242,7 +242,7 @@ class Forcefield(MutableMapping):
         self._param = L.copy()
 
     # ------------------------------------------------------------------
-    # Masks (L2 per-parameter & L1 per-key)
+    # Masks (per-parameter trainability and per-key compute enablement)
     # ------------------------------------------------------------------
 
     @property
@@ -268,35 +268,32 @@ class Forcefield(MutableMapping):
         n = self.n_params()
         if mask.shape != (n,):
             raise ValueError(f"param_mask shape must be ({n},), got {mask.shape}")
-        signature, key_mask = self._assign_potential_masks(mask)
+        signature, _ = self._assign_potential_masks(mask)
         self._param_mask = self._readonly_array(mask.copy())
         self._param_mask_signature = signature
         self._param_mask_dirty = False
-        self._key_mask = key_mask
 
     @property
     def key_mask(self) -> Dict[InteractionKey, bool]:
-        """L1 per-key mask ``{key: bool}``.  Synced bidirectionally with ``param_mask``.
+        """Per-key compute mask ``{key: bool}``.
 
         >>> ff.key_mask = {bond_key: True, angle_key: False}
         """
-        _ = self.param_mask
+        if self._key_mask is None:
+            self._key_mask = {key: True for key in self._data}
         return self._key_mask
 
     @key_mask.setter
     def key_mask(self, km: Mapping[InteractionKey, bool]) -> None:
-        """Set the interaction-level mask and propagate it to parameters."""
+        """Set the interaction-level compute mask without changing params."""
         self._validate_interaction_keyed_mapping("key_mask", km)
-        n = self.n_params()
-        mask = self.param_mask.copy() if n else np.ones(n, dtype=bool)
-        offset = 0
-        for key, val in self._data.items():
-            pots = val if isinstance(val, list) else [val]
-            block_n = sum(p.n_params() for p in pots)
-            if key in km:
-                mask[offset:offset + block_n] = km[key]
-            offset += block_n
-        self.param_mask = mask
+        unknown = [key for key in km if key not in self._data]
+        if unknown:
+            raise KeyError(f"key_mask contains unknown interaction key {unknown[0]!r}")
+        self._key_mask = {
+            key: bool(km.get(key, True))
+            for key in self._data
+        }
 
     def build_mask(
         self,
@@ -392,61 +389,6 @@ class Forcefield(MutableMapping):
 
         self.param_mask = mask
         return mask
-
-    def apply_mask_spec(self, mask_spec: Any) -> np.ndarray:
-        """Apply a parsed forcefield mask spec to this forcefield.
-
-        ``mask_spec`` is typically returned by :func:`AceCG.ReadLmpFFMask`.
-        Entries are matched by :class:`InteractionKey` and, when present, by
-        LAMMPS potential style. The resulting mask is stored on the potential
-        objects and returned in global parameter order.
-
-        >>> spec = ReadLmpFFMask("forcefield.mask", "hybrid")
-        >>> mask = ff.apply_mask_spec(spec)
-        """
-        param_mask = np.ones(self.n_params(), dtype=bool)
-        if not mask_spec:
-            self.param_mask = param_mask
-            return param_mask
-
-        blocks = self._forcefield_style_blocks()
-
-        for entry in mask_spec.entries:
-            if len(entry) == 2:
-                key, payload = entry
-                potential_style = None
-            else:
-                key, potential_style, payload = entry
-
-            block_info = blocks.get(key)
-            if block_info is None:
-                raise KeyError(
-                    f"Mask entry for {self._entry_label(key, potential_style)} "
-                    "does not match any interaction in the current forcefield."
-                )
-
-            if potential_style is None:
-                block = block_info["slice"]
-                param_mask[block] = self._parse_local_mask_spec(
-                    payload,
-                    block.stop - block.start,
-                    key,
-                    potential_style,
-                )
-                continue
-
-            matches = self._matching_style_segments(block_info, key, potential_style, "Mask")
-            local_size = sum(segment["slice"].stop - segment["slice"].start for segment in matches)
-            local_mask = self._parse_local_mask_spec(payload, local_size, key, potential_style)
-            local_offset = 0
-            for segment in matches:
-                sl = segment["slice"]
-                n_local = sl.stop - sl.start
-                param_mask[sl] = local_mask[local_offset:local_offset + n_local]
-                local_offset += n_local
-
-        self.param_mask = param_mask
-        return param_mask
 
     def derive_l1_mask(self, l2_mask: Optional[np.ndarray] = None) -> Dict[InteractionKey, bool]:
         """Derive L1 key mask from an L2 mask.  No-arg returns cached ``key_mask``.
@@ -680,92 +622,6 @@ class Forcefield(MutableMapping):
         self.param_bounds = (lb, ub)
         return lb, ub
 
-    def apply_bounds_spec(
-        self,
-        bounds_spec: Any,
-        *,
-        clamp: bool = True,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Apply a parsed forcefield bounds spec to this forcefield.
-
-        ``bounds_spec`` is typically returned by :func:`AceCG.ReadLmpFFBounds`.
-        The stored parameter bounds are updated in place. When ``clamp=True``,
-        the current parameter vector is clipped into the new bounds immediately.
-
-        >>> spec = ReadLmpFFBounds("forcefield.bounds", "hybrid")
-        >>> lb, ub = ff.apply_bounds_spec(spec)
-        """
-        lb, ub = self.param_bounds
-        lb = lb.copy()
-        ub = ub.copy()
-        if not bounds_spec:
-            self.param_bounds = (lb, ub)
-            if clamp:
-                self.update_params(self.apply_bounds(self.param_array()))
-            return lb, ub
-
-        blocks = self._forcefield_style_blocks()
-
-        for key, potential_style, lb_tokens, ub_tokens in bounds_spec.entries:
-            block_info = blocks.get(key)
-            if block_info is None:
-                raise KeyError(
-                    f"Bounds entry for {self._entry_label(key, potential_style)} "
-                    "does not match any interaction in the current forcefield."
-                )
-
-            if potential_style is None:
-                slices = [block_info["slice"]]
-            else:
-                matches = self._matching_style_segments(block_info, key, potential_style, "Bounds")
-                slices = [segment["slice"] for segment in matches]
-
-            self._apply_bound_tokens_to_slices(
-                lb,
-                ub,
-                slices,
-                key,
-                potential_style,
-                lb_tokens,
-                ub_tokens,
-            )
-
-        if np.any(lb > ub):
-            bad = int(np.flatnonzero(lb > ub)[0])
-            raise ValueError(
-                f"Forcefield bounds lower entry exceeds upper entry at parameter index {bad}: "
-                f"lb={lb[bad]}, ub={ub[bad]}."
-            )
-        self.param_bounds = (lb, ub)
-        if clamp:
-            self.update_params(self.apply_bounds(self.param_array()))
-        return lb, ub
-
-    def apply_specs(
-        self,
-        *,
-        mask_spec: Any = None,
-        bounds_spec: Any = None,
-        clamp_bounds: bool = True,
-    ) -> Dict[str, Any]:
-        """Apply parsed mask and/or bounds specs to this forcefield.
-
-        This is a convenience wrapper for forcefield metadata parsed from files:
-
-        >>> ff.apply_specs(
-        ...     mask_spec=ReadLmpFFMask("forcefield.mask", "hybrid"),
-        ...     bounds_spec=ReadLmpFFBounds("forcefield.bounds", "hybrid"),
-        ... )
-
-        Returns a dictionary containing the arrays that were updated.
-        """
-        out: Dict[str, Any] = {}
-        if mask_spec is not None:
-            out["mask"] = self.apply_mask_spec(mask_spec)
-        if bounds_spec is not None:
-            out["bounds"] = self.apply_bounds_spec(bounds_spec, clamp=clamp_bounds)
-        return out
-
     def describe_bounds(
         self,
         lb: Optional[np.ndarray] = None,
@@ -817,7 +673,7 @@ class Forcefield(MutableMapping):
         """Deep-copy all potentials and caches.  ``ff2 = ff.deepcopy()``."""
         out = Forcefield(copy.deepcopy(self._data))
         for f in self._CACHE_FIELDS:
-            setattr(out, f, self._copy_val(getattr(self, f)))
+            setattr(out, f, self._copy_val(getattr(self, f, None)))
         out._rebuild_structure_cache()
         out._sync_mask_cache_from_potentials()
         out._sync_bounds_cache_from_potentials()
@@ -826,234 +682,6 @@ class Forcefield(MutableMapping):
     # ==================================================================
     # Private helpers
     # ==================================================================
-
-    def _forcefield_style_blocks(self) -> Dict[InteractionKey, Dict[str, Any]]:
-        offset = 0
-        blocks: Dict[InteractionKey, Dict[str, Any]] = {}
-        for key, val in self.items():
-            pots = val if isinstance(val, list) else [val]
-            block_start = offset
-            segments = []
-            for pot_index, pot in enumerate(pots):
-                n_local = pot.n_params()
-                segments.append(
-                    {
-                        "slice": slice(offset, offset + n_local),
-                        "styles": self._potential_style_labels(pot),
-                        "pot_index": pot_index,
-                    }
-                )
-                offset += n_local
-            blocks[key] = {"slice": slice(block_start, offset), "segments": segments}
-        return blocks
-
-    @staticmethod
-    def _potential_style_labels(potential: Any) -> set[str]:
-        """Return LAMMPS-style labels usable by mask/bounds specs."""
-
-        def explicit_labels(obj: Any) -> set[str]:
-            labels: set[str] = set()
-            for attr in ("_acecg_lammps_style", "_acecg_style", "lammps_style"):
-                value = getattr(obj, attr, None)
-                if callable(value):
-                    value = value()
-                if value is None:
-                    continue
-                if isinstance(value, str):
-                    labels.add(value.strip().lower())
-                elif isinstance(value, Sequence):
-                    labels.update(str(item).strip().lower() for item in value)
-            return {label for label in labels if label}
-
-        labels = explicit_labels(potential)
-        wrapped = getattr(potential, "potential", None)
-        if wrapped is not None and wrapped is not potential:
-            labels.update(explicit_labels(wrapped))
-        if labels:
-            return labels
-
-        targets = [potential]
-        if wrapped is not None and wrapped is not potential:
-            targets.insert(0, wrapped)
-        inferred: set[str] = set()
-        for target in targets:
-            for style, cls in POTENTIAL_REGISTRY.items():
-                if isinstance(target, cls):
-                    inferred.add(str(style).strip().lower())
-        return inferred
-
-    @staticmethod
-    def _entry_label(key: Any, potential_style: Optional[str]) -> str:
-        label = key.label() if hasattr(key, "label") else str(key)
-        return f"{label} {potential_style}" if potential_style else label
-
-    def _matching_style_segments(
-        self,
-        block_info: Dict[str, Any],
-        key: InteractionKey,
-        potential_style: str,
-        label_kind: str,
-    ) -> list[Dict[str, Any]]:
-        style_norm = str(potential_style).strip().lower()
-        matches = [
-            segment
-            for segment in block_info["segments"]
-            if style_norm in segment["styles"]
-        ]
-        if matches:
-            return matches
-        available = sorted(
-            {
-                style
-                for segment in block_info["segments"]
-                for style in segment["styles"]
-            }
-        )
-        raise KeyError(
-            f"{label_kind} entry for {key.label()} style {potential_style!r} "
-            f"does not match any potential in the current forcefield. "
-            f"Available styles: {available}"
-        )
-
-    def _parse_local_mask_spec(
-        self,
-        payload: tuple[str, ...],
-        size: int,
-        key: Any,
-        potential_style: Optional[str] = None,
-    ) -> np.ndarray:
-        if not payload:
-            return np.ones(size, dtype=bool)
-
-        true_tokens = {"1", "true", "yes", "on"}
-        false_tokens = {"0", "false", "no", "off"}
-
-        mode = payload[0].strip().lower()
-        if mode in {"mask", "unmask"}:
-            index_tokens = tuple(str(token).strip().lower() for token in payload[1:])
-            if not index_tokens:
-                raise ValueError(
-                    f"{self._entry_label(key, potential_style)} uses '{mode}' "
-                    "but provides no index range."
-                )
-            spec = ",".join(index_tokens).strip()
-            if spec == "all":
-                selected = np.ones(size, dtype=bool)
-            elif spec == "none":
-                selected = np.zeros(size, dtype=bool)
-            else:
-                selected = np.zeros(size, dtype=bool)
-                all_idx = np.arange(size, dtype=np.int64)
-                fields = []
-                for token in index_tokens:
-                    fields.extend(part.strip() for part in token.split(",") if part.strip())
-                for field in fields:
-                    if ":" in field:
-                        start_text, stop_text = field.split(":", 1)
-                        start = int(start_text) if start_text else None
-                        stop = int(stop_text) if stop_text else None
-                        selected[all_idx[slice(start, stop)]] = True
-                        continue
-                    idx = int(field)
-                    if idx < 0:
-                        idx += size
-                    if idx < 0 or idx >= size:
-                        raise IndexError(
-                            f"Mask index {field!r} is out of range for "
-                            f"{self._entry_label(key, potential_style)} with {size} parameters."
-                        )
-                    selected[idx] = True
-            local_mask = np.ones(size, dtype=bool) if mode == "mask" else np.zeros(size, dtype=bool)
-            local_mask[selected] = mode == "unmask"
-            return local_mask
-
-        values = []
-        for token in payload:
-            lowered = token.strip().lower()
-            if lowered in true_tokens:
-                values.append(True)
-                continue
-            if lowered in false_tokens:
-                values.append(False)
-                continue
-            raise ValueError(
-                f"Invalid mask payload for {self._entry_label(key, potential_style)}: {payload!r}"
-            )
-        local_mask = np.asarray(values, dtype=bool)
-        if local_mask.shape != (size,):
-            raise ValueError(
-                f"{self._entry_label(key, potential_style)} mask length {local_mask.size} "
-                f"does not match the current parameter block size {size}."
-            )
-        return local_mask
-
-    def _parse_bound_tokens(
-        self,
-        tokens: tuple[str, ...],
-        size: int,
-        *,
-        lower: bool,
-        key: Any,
-        potential_style: Optional[str],
-    ) -> Optional[np.ndarray]:
-        if not tokens:
-            return None
-        if len(tokens) != size:
-            side = "lb" if lower else "ub"
-            raise ValueError(
-                f"{self._entry_label(key, potential_style)} {side} length {len(tokens)} "
-                f"does not match the current parameter block size {size}."
-            )
-        none_tokens = {"none", "null", "na", "n/a", "*"}
-        values = []
-        for token in tokens:
-            lowered = str(token).strip().lower()
-            if lowered in none_tokens:
-                values.append(-np.inf if lower else np.inf)
-                continue
-            try:
-                values.append(float(token))
-            except ValueError as exc:
-                side = "lb" if lower else "ub"
-                raise ValueError(
-                    f"Invalid {side} token {token!r} for "
-                    f"{self._entry_label(key, potential_style)}."
-                ) from exc
-        return np.asarray(values, dtype=float)
-
-    def _apply_bound_tokens_to_slices(
-        self,
-        lb: np.ndarray,
-        ub: np.ndarray,
-        slices: list[slice],
-        key: Any,
-        potential_style: Optional[str],
-        lb_tokens: tuple[str, ...],
-        ub_tokens: tuple[str, ...],
-    ) -> None:
-        local_size = sum(sl.stop - sl.start for sl in slices)
-        local_lb = self._parse_bound_tokens(
-            lb_tokens,
-            local_size,
-            lower=True,
-            key=key,
-            potential_style=potential_style,
-        )
-        local_ub = self._parse_bound_tokens(
-            ub_tokens,
-            local_size,
-            lower=False,
-            key=key,
-            potential_style=potential_style,
-        )
-        local_offset = 0
-        for sl in slices:
-            n_local = sl.stop - sl.start
-            if local_lb is not None:
-                lb[sl] = local_lb[local_offset:local_offset + n_local]
-            if local_ub is not None:
-                ub[sl] = local_ub[local_offset:local_offset + n_local]
-            local_offset += n_local
 
     @staticmethod
     def _copy_val(v):
@@ -1115,7 +743,6 @@ class Forcefield(MutableMapping):
         if mask:
             self._param_mask_dirty = True
             self._param_mask_signature = None
-            self._key_mask = None
         if bounds:
             self._param_bounds_dirty = True
             self._param_bounds_signature = None
@@ -1261,7 +888,6 @@ class Forcefield(MutableMapping):
             signature = self._metadata_signature("mask")
         self._param_mask_signature = signature
         self._param_mask_dirty = False
-        self._key_mask = self._derive_key_mask_from_l2(self._param_mask)
 
     def _sync_bounds_cache_from_potentials(
         self,

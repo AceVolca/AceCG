@@ -1,6 +1,6 @@
 # 07 Trainer Module Developer Reference
 
-*Updated: 2026-05-06.*
+*Updated: 2026-05-24.*
 
 The trainer layer sits above `compute/` and next to `solvers/`. It consumes workflow-built batch statistics and produces gradients, Hessians, update steps, and diagnostics. It does not own MPI execution, trajectory extraction, or reducer runtime state.
 
@@ -16,7 +16,7 @@ The trainer layer sits above `compute/` and next to `solvers/`. It consumes work
 | `trainers/analytic/fm.py` | Iterative FM/DSM trainer consuming the standard FM reducer payload |
 | `trainers/analytic/cdrem.py` | Latent-variable CDREM trainer |
 | `trainers/analytic/cdfm.py` | CDFM gradient consumer with EM guardrail handling |
-| `trainers/analytic/L0.py` | First-order L0 gate trainer for `GatedPotential` forcefields |
+| `trainers/analytic/l0.py` | First-order L0 gate trainer for `GatedPotential` forcefields |
 | `trainers/analytic/multi.py` | Meta-trainer that combines multiple child trainers |
 | `trainers/autodiff/` | Placeholder package for future autodiff trainers |
 
@@ -124,7 +124,20 @@ AA-side statistics come from workflow-built batches, usually pickle output from 
 For REM, compute-side post-processing uses gauge-free energy gradients so
 parameter-dependent bonded B-spline gauge shifts do not enter cached AA
 statistics or REM gradient averages. CDREM keeps the physical energy-gradient
-convention because it remains on the physical latent-energy path.
+convention because it remains on the physical latent-energy path, except when
+a coordinate `energy_mask` is configured. Masked REM/CDREM batches may include
+auxiliary unmasked gradient statistics from the same frames.
+
+Optimizer-gradient selection is centralized in `BaseTrainer.select_optimizer_gradient()`:
+
+| Mode | Optimizer gradient | Intended use |
+|---|---|---|
+| `masked` | masked statistic | Default for coordinate-masked REM/CDREM. |
+| `hybrid_aux` | `masked + outside_aux_weight * (unmasked - masked)` | Keep masked diagnostics while partially restoring outside-mask signal. |
+| `unmasked` | unmasked statistic | Explicit escape hatch; requires `allow_unmasked_optimizer_gradient=true`. |
+
+The unmasked channel here is relative to the coordinate mask only. It still
+respects forcefield parameter masks, so frozen parameters remain frozen.
 
 ### `FMTrainerAnalytic`
 

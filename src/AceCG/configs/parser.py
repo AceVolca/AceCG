@@ -22,6 +22,7 @@ from .models import (
     SchedulerConfig,
     SystemConfig,
     TrainingConfig,
+    ValidationConfig,
 )
 from .utils import (
     extract_frame_id_from_data_file,
@@ -29,6 +30,7 @@ from .utils import (
     parse_pair_style_options,
 )
 from ..io.forcefield import ReadLmpFFBounds, ReadLmpFFMask
+from ..topology.topology_array import TopologyArrays, collect_topology_arrays
 from ..topology.types import InteractionKey
 
 
@@ -55,7 +57,7 @@ _SUPPORTED_OPTIMIZER_TOKENS = frozenset(
 )
 _RESERVED_SECTIONS = frozenset({"vp", "conditioning"})
 _KNOWN_SECTIONS = (
-    frozenset({"system", "training", "sampling", "scheduler", "aa_ref"})
+    frozenset({"system", "training", "sampling", "validation", "scheduler", "aa_ref"})
     | _RESERVED_SECTIONS
 )
 _KNOWN_NESTED_SECTIONS = frozenset({"training.fm_specs"})
@@ -65,6 +67,7 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
         {
             "topology_file",
             "forcefield_path",
+            "fixed_forcefield_path",
             "forcefield_mask_path",
             "forcefield_bounds_path",
             "forcefield_format",
@@ -95,6 +98,15 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
             "beta",
             "cdfm_mode",
             "need_hessian",
+            "energy_mask",
+            "optimizer_gradient_mode",
+            "outside_aux_weight",
+            "allow_unmasked_optimizer_gradient",
+            "boundary_prior",
+            "boundary_prior_path",
+            "boundary_prior_pair_decay",
+            "boundary_prior_pair_strength",
+            "boundary_prior_wall_k_min",
         }
     ),
     "sampling": frozenset(
@@ -109,6 +121,20 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
             "perf_trace_all_ranks",
             "heartbeat_interval",
             "sim_var",
+        }
+    ),
+    "validation": frozenset(
+        {
+            "sim_backend",
+            "input",
+            "engine_command",
+            "init_config_pool",
+            "ncores",
+            "num_epochs_per_validation",
+            "sim_var",
+            "forcefield_template_path",
+            "replay_mode",
+            "archive_trajectory",
         }
     ),
     "scheduler": frozenset(
@@ -154,7 +180,15 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
         }
     ),
     "conditioning": frozenset(
-        {"input", "init_config_pool", "init_force_pool", "mask_cg_only", "n_samples", "ncores_per_task"}
+        {
+            "input",
+            "init_config_pool",
+            "init_force_pool",
+            "mask_cg_only",
+            "n_samples",
+            "ncores_per_task",
+            "post_n_ranks",
+        }
     ),
 }
 _FM_SPEC_ALLOWED_KEYS = frozenset({"pair_specs", "bond_specs", "angle_specs"})
@@ -280,6 +314,7 @@ def build_acg_config(
     system_raw = dict(raw.get("system", {}))
     training_raw = dict(raw.get("training", {}))
     sampling_raw = dict(raw.get("sampling", {}))
+    validation_raw = dict(raw.get("validation", {}))
     scheduler_raw = dict(raw.get("scheduler", {}))
     aa_ref_raw = dict(raw.get("aa_ref", {}))
     fm_specs_raw = dict(raw.get("training.fm_specs", {}))
@@ -294,6 +329,7 @@ def build_acg_config(
     _warn_unknown_keys("system", system_raw)
     _warn_unknown_keys("training", training_raw)
     _warn_unknown_keys("sampling", sampling_raw)
+    _warn_unknown_keys("validation", validation_raw)
     _warn_unknown_keys("scheduler", scheduler_raw)
     _warn_unknown_keys("aa_ref", aa_ref_raw)
     if conditioning_raw:
@@ -344,10 +380,21 @@ def build_acg_config(
 
     topology_file = _pop_optional_str(system_raw, "topology_file")
     forcefield_path = _pop_optional_str(system_raw, "forcefield_path")
+    fixed_forcefield_path = _pop_optional_str(system_raw, "fixed_forcefield_path")
     forcefield_mask_path = _pop_optional_str(system_raw, "forcefield_mask_path")
     forcefield_bounds_path = _pop_optional_str(system_raw, "forcefield_bounds_path")
     forcefield_format = _pop_optional_str(system_raw, "forcefield_format")
     pair_style = _pop_optional_str(system_raw, "pair_style")
+    forcefield_spec_topology = None
+    if forcefield_path or forcefield_mask_path or forcefield_bounds_path:
+        forcefield_spec_topology = _collect_system_topology_arrays(
+            config_path=path,
+            topology_file=topology_file,
+            exclude_bonded=exclude_bonded,
+            exclude_option=exclude_option,
+            type_names=type_names,
+            vp_raw=vp_raw,
+        )
 
     forcefield_mask = None
     mask_source = forcefield_mask_path or forcefield_path
@@ -365,6 +412,7 @@ def build_acg_config(
                 str(mask_path),
                 pair_kind,
                 pair_typ_sel=sel_styles,
+                topology_arrays=forcefield_spec_topology,
             )
         except Exception as exc:
             raise ACGConfigError(
@@ -386,6 +434,7 @@ def build_acg_config(
                 str(bounds_path),
                 pair_kind,
                 pair_typ_sel=sel_styles,
+                topology_arrays=forcefield_spec_topology,
             )
         except Exception as exc:
             raise ACGConfigError(
@@ -395,6 +444,7 @@ def build_acg_config(
     system = SystemConfig(
         topology_file=topology_file,
         forcefield_path=forcefield_path,
+        fixed_forcefield_path=fixed_forcefield_path,
         forcefield_mask_path=forcefield_mask_path,
         forcefield_mask=forcefield_mask,
         forcefield_bounds_path=forcefield_bounds_path,
@@ -457,6 +507,24 @@ def build_acg_config(
         perf_trace=_pop_optional_bool(sampling_raw, "perf_trace", default=False),
         sim_var=_pop_sim_var(sampling_raw),
         extras=sampling_raw,
+    )
+
+    validation = ValidationConfig(
+        sim_backend=str(
+            validation_raw.pop("sim_backend", "lammps")
+        ).strip().lower(),
+        input=_pop_optional_str(validation_raw, "input"),
+        engine_command=_pop_optional_str(validation_raw, "engine_command"),
+        init_config_pool=_pop_optional_str(validation_raw, "init_config_pool"),
+        ncores=_pop_optional_int(validation_raw, "ncores"),
+        num_epochs_per_validation=_pop_optional_int(
+            validation_raw, "num_epochs_per_validation"
+        ),
+        sim_var=_pop_sim_var(validation_raw),
+        forcefield_template_path=_pop_optional_str(
+            validation_raw, "forcefield_template_path"
+        ),
+        extras=validation_raw,
     )
 
     _launcher_raw = scheduler_raw.pop("launcher", None)
@@ -548,6 +616,9 @@ def build_acg_config(
         ncores_per_task=_pop_optional_int(
             conditioning_raw, "ncores_per_task"
         ),
+        post_n_ranks=_pop_optional_int(
+            conditioning_raw, "post_n_ranks"
+        ),
         extras=conditioning_raw,
     )
 
@@ -556,6 +627,7 @@ def build_acg_config(
         system=system,
         training=training,
         sampling=sampling,
+        validation=validation,
         scheduler=scheduler,
         aa_ref=aa_ref,
         vp=types.SimpleNamespace(**vp_raw) if vp_raw else None,
@@ -563,6 +635,45 @@ def build_acg_config(
     )
     _validate_config(config)
     return config
+
+
+def _collect_system_topology_arrays(
+    *,
+    config_path: Path,
+    topology_file: Optional[str],
+    exclude_bonded: Tuple[str, str, str],
+    exclude_option: str,
+    type_names: Optional[Mapping[str, str]],
+    vp_raw: Mapping[str, Any],
+) -> Optional[TopologyArrays]:
+    if not topology_file:
+        return None
+    topology_path = Path(topology_file).expanduser()
+    if not topology_path.is_absolute():
+        topology_path = config_path.parent / topology_path
+    if not topology_path.exists():
+        return None
+
+    raw_vp_names = vp_raw.get("vp_names") if vp_raw else None
+    if raw_vp_names is None:
+        vp_names = None
+    elif isinstance(raw_vp_names, str):
+        vp_names = (raw_vp_names,)
+    elif isinstance(raw_vp_names, Iterable):
+        vp_names = tuple(str(item) for item in raw_vp_names)
+    else:
+        vp_names = None
+
+    import MDAnalysis as mda
+
+    universe = mda.Universe(str(topology_path))
+    return collect_topology_arrays(
+        universe,
+        exclude_bonded=exclude_bonded,
+        exclude_option=exclude_option,
+        atom_type_name_aliases=type_names,
+        vp_names=vp_names,
+    )
 
 
 # ─── Validation ───────────────────────────────────────────────────────
@@ -573,7 +684,10 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
     source_free_fm = (
         method in {"fm", "dsm"}
         and len(interactions) > 0
-        and all(spec.init_mode == "authored_zero" for spec in interactions)
+        and all(
+            spec.init_mode in {"authored_zero", "authored_direct"}
+            for spec in interactions
+        )
     )
 
     # System
@@ -584,7 +698,11 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
     if (not source_free_fm) and not (config.system.forcefield_path or config.training.para_path):
         raise ACGConfigError(
             "Define either system.forcefield_path or training.para_path so "
-            "AceCG can load real.settings, or use authored B-spline FM specs only."
+            "AceCG can load real.settings, or use authored FM specs only."
+        )
+    if config.system.fixed_forcefield_path and not config.system.pair_style:
+        raise ACGConfigError(
+            "system.pair_style is required when system.fixed_forcefield_path is set."
         )
 
     # Training
@@ -738,6 +856,49 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
         if not config.sampling.engine_command:
             raise ACGConfigError(
                 f"sampling.engine_command is required for method={method!r}."
+            )
+
+    # Optional validation is simulation-only: no replay and no trajectory cleanup.
+    validation = config.validation
+    if "replay_mode" in validation.extras:
+        raise ACGConfigError(
+            "validation simulations are not replayable; remove validation.replay_mode."
+        )
+    if "archive_trajectory" in validation.extras:
+        raise ACGConfigError(
+            "validation trajectories are always archived; remove validation.archive_trajectory."
+        )
+    if validation.enabled:
+        if validation.sim_backend != "lammps":
+            raise ACGConfigError(
+                "validation.sim_backend must be 'lammps'."
+            )
+        if not validation.engine_command:
+            raise ACGConfigError(
+                "validation.engine_command is required when validation.input is set."
+            )
+        if validation.ncores is not None and validation.ncores <= 0:
+            raise ACGConfigError("validation.ncores must be positive when set.")
+        if (
+            validation.num_epochs_per_validation is not None
+            and validation.num_epochs_per_validation <= 0
+        ):
+            raise ACGConfigError(
+                "validation.num_epochs_per_validation must be positive when set."
+            )
+        if not (config.system.forcefield_path or validation.forcefield_template_path):
+            raise ACGConfigError(
+                "validation.forcefield_template_path is required when validation "
+                "is enabled and system.forcefield_path is absent. Validation "
+                "needs a LAMMPS-compatible forcefield template for WriteLmpFF."
+            )
+        if not config.system.pair_style:
+            raise ACGConfigError(
+                "system.pair_style is required when validation is enabled."
+            )
+        if config.scheduler.task_timeout is None or config.scheduler.task_timeout <= 0:
+            raise ACGConfigError(
+                "scheduler.task_timeout is required when validation is enabled."
             )
 
     # Conditioning (cdrem/cdfm only)
@@ -1337,7 +1498,7 @@ def _parse_one_fm_spec(
     entry_index: int,
 ) -> FMInteractionSpec:
     if isinstance(raw_spec, Mapping):
-        return _parse_named_bspline_fm_spec(
+        return _parse_named_fm_spec(
             raw_spec,
             expected_style=expected_style,
             entry_index=entry_index,
@@ -1454,7 +1615,7 @@ def _parse_one_fm_spec(
     )
 
 
-def _parse_named_bspline_fm_spec(
+def _parse_named_fm_spec(
     raw_spec: Mapping[str, Any],
     *,
     expected_style: str,
@@ -1475,10 +1636,19 @@ def _parse_named_bspline_fm_spec(
             f"{key_prefix} uses the legacy model_size field. "
             "Use n_coeffs in authored B-spline specs."
         )
-    if "model" in raw_spec and str(raw_spec["model"]).strip().lower() != "bspline":
+
+    model = str(raw_spec.get("model", "bspline")).strip().lower()
+    if model in {"gaussian", "gauss/cut"}:
+        return _parse_named_gaussian_fm_spec(
+            raw_spec,
+            expected_style=expected_style,
+            entry_index=entry_index,
+            key_prefix=key_prefix,
+        )
+    if model != "bspline":
         raise ACGConfigError(
-            f"{key_prefix} authored specs only support model='bspline', "
-            f"got {raw_spec['model']!r}."
+            f"{key_prefix} authored specs support model='bspline' or "
+            f"model='gauss/cut', got {raw_spec.get('model')!r}."
         )
 
     raw_types = raw_spec.get("types")
@@ -1540,6 +1710,87 @@ def _parse_named_bspline_fm_spec(
         model_overrides={"degree": degree},
         init_mode="authored_zero",
         resolution=_AUTHORED_FM_EXPORT_RESOLUTION[style],
+    )
+
+
+def _parse_named_gaussian_fm_spec(
+    raw_spec: Mapping[str, Any],
+    *,
+    expected_style: str,
+    entry_index: int,
+    key_prefix: str,
+) -> FMInteractionSpec:
+    if expected_style != "pair":
+        raise ACGConfigError(f"{key_prefix} gauss/cut specs are pair-only.")
+
+    style = str(raw_spec.get("style", expected_style)).strip().lower()
+    if style != "pair":
+        raise ACGConfigError(
+            f"{key_prefix} declared style {style!r}; expected 'pair'."
+        )
+
+    raw_types = raw_spec.get("types")
+    if not isinstance(raw_types, (list, tuple)):
+        raise ACGConfigError(f"{key_prefix} types must be a list/tuple.")
+    normalized_types = _normalize_fm_spec_types(
+        "pair", raw_types, entry_index=entry_index
+    )
+
+    raw_domain = raw_spec.get("domain")
+    if not isinstance(raw_domain, (list, tuple)) or len(raw_domain) != 2:
+        raise ACGConfigError(
+            f"{key_prefix} gauss/cut specs must define domain = [min, max]."
+        )
+    minimum = float(raw_domain[0])
+    maximum = float(raw_domain[1])
+    if not minimum < maximum:
+        raise ACGConfigError(
+            f"{key_prefix} requires domain min < max, got {minimum} >= {maximum}."
+        )
+
+    if "params" in raw_spec:
+        params = raw_spec["params"]
+        if not isinstance(params, (list, tuple)) or len(params) != 3:
+            raise ACGConfigError(f"{key_prefix} params must be [A, r0, sigma].")
+        A, r0, sigma = (float(params[0]), float(params[1]), float(params[2]))
+    else:
+        missing = [name for name in ("A", "r0", "sigma") if name not in raw_spec]
+        if missing:
+            raise ACGConfigError(
+                f"{key_prefix} gauss/cut specs must define A, r0, and sigma."
+            )
+        A = float(raw_spec["A"])
+        r0 = float(raw_spec["r0"])
+        sigma = float(raw_spec["sigma"])
+    if not math.isfinite(A):
+        raise ACGConfigError(f"{key_prefix} A must be finite.")
+    if not math.isfinite(r0):
+        raise ACGConfigError(f"{key_prefix} r0 must be finite.")
+    if not math.isfinite(sigma) or sigma <= 0.0:
+        raise ACGConfigError(f"{key_prefix} sigma must be finite and positive.")
+
+    cutoff = float(raw_spec.get("cutoff", maximum))
+    if not math.isfinite(cutoff) or cutoff <= 0.0:
+        raise ACGConfigError(f"{key_prefix} cutoff must be finite and positive.")
+    resolution = float(raw_spec.get("resolution", _AUTHORED_FM_EXPORT_RESOLUTION["pair"]))
+    if not math.isfinite(resolution) or resolution <= 0.0:
+        raise ACGConfigError(f"{key_prefix} resolution must be finite and positive.")
+
+    return FMInteractionSpec(
+        style="pair",
+        types=normalized_types,
+        model="gauss/cut",
+        model_size=3,
+        domain=(minimum, maximum),
+        max_force=None,
+        model_overrides={
+            "A": A,
+            "r0": r0,
+            "sigma": sigma,
+            "cutoff": cutoff,
+        },
+        init_mode="authored_direct",
+        resolution=resolution,
     )
 
 

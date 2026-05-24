@@ -1,6 +1,6 @@
 # 11 I/O Utilities Developer Reference
 
-*Updated: 2026-04-23.*
+*Updated: 2026-05-24.*
 
 > This chapter covers generic I/O utilities only. VP-specific `latent.settings` and table generation are documented in [10_vp_grower.md](10_vp_grower.md).
 
@@ -54,35 +54,21 @@ Developer contract:
 | Function | Purpose |
 |---|---|
 | `ReadLmpFFMask()` | Parse authored forcefield mask files |
-| `ReadLmpFFBounds()` | Parse authored forcefield bounds files |
+| `ReadLmpFFBounds()` | Parse authored parameter-bound files |
 | `ReadLmpFF()` | Read a `Forcefield` from LAMMPS-style settings |
 | `WriteLmpFF()` | Write the current `Forcefield` to new settings / table files |
 | `resolve_source_table_entries()` | Resolve original table tokens and table names for FM source-table paths |
-
-Mask files accept style-qualified entries so overlay stacks can be masked per potential:
-
-```text
-pair_coeff A B gauss/cut mask 0 1 2
-pair_coeff A B lj/cut unmask all
-```
-
-Without a style token, the mask entry applies to the full concatenated parameter block for that interaction key.
-
-Bounds files use the same interaction/style selector and then `lb` / `ub`
-sections. `None` means unbounded on that side for one parameter:
-
-```text
-pair_coeff A B gauss/cut lb None 5 0.3 ub -0.1 15 None
-pair_coeff A B lj/cut lb 0 None ub 2 2
-```
-
-After workflow construction applies `system.forcefield_bounds_path`, the
-current parameter vector is clamped into the configured bounds.
 
 `ReadLmpFF()` has two important conventions:
 
 - if `topology_arrays` is provided, bond/angle type ids are restored to canonical `InteractionKey` values
 - `table` styles are not retained as raw tables; they are fitted into runtime potentials according to `table_fit`
+
+`ReadLmpFFMask()` and `ReadLmpFFBounds()` require `topology_arrays`. Numeric
+bonded coefficient entries such as `bond_coeff 4 ...` and `angle_coeff 7 ...`
+are LAMMPS 1-based type ids; the readers translate them through the topology
+maps into canonical interaction keys after configured type aliases are applied.
+The returned specs therefore contain keys such as `bond:HG:VP`, not `bond:4`.
 
 `WriteLmpFF()` is the corresponding write side:
 

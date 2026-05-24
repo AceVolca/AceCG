@@ -12,10 +12,12 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import glob
+import json
 import pickle
 import random
 import re
 import shlex
+import shutil
 import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -26,6 +28,8 @@ import numpy as np
 
 from ..configs.models import ACGConfig
 from ..configs.parser import _parse_scalar_or_literal, parse_acg_file
+from ..configs.utils import parse_pair_style_options
+from ..io.forcefield import WriteLmpFF
 from ..optimizers import (
     AdamMaskedOptimizer,
     AdamWMaskedOptimizer,
@@ -34,7 +38,9 @@ from ..optimizers import (
     RMSpropMaskedOptimizer,
 )
 from ..potentials import POTENTIAL_REGISTRY
+from ..samplers.base import BaseSampler, InitConfigRecord
 from ..schedulers.resource_pool import ResourcePool
+from ..schedulers.task_scheduler import TaskScheduler, TaskSpec
 from ..topology.forcefield import Forcefield
 from ..topology.topology_array import TopologyArrays, collect_topology_arrays
 
@@ -159,6 +165,10 @@ class BaseWorkflow(ABC):
     def __init__(self, config: ACGConfig, **kwargs: Any) -> None:
         self.config = self._apply_overrides(config, kwargs)
         self.workflow_rng = random.Random(int(self.config.training.seed))
+        self.validation_rng = random.Random(int(self.config.training.seed) + 7919)
+        self._validation_sampler: Optional[BaseSampler] = None
+        self._validation_scheduler: Optional[TaskScheduler] = None
+        self._validation_records: list[dict[str, Any]] = []
         self.output_dir = self._build_output_dir()
         self.topology = self._build_topology()
 
@@ -215,6 +225,278 @@ class BaseWorkflow(ABC):
         query = str(raw if raw.is_absolute() else self._config_base_dir() / raw)
         return [Path(match).resolve(strict=False) for match in sorted(glob.glob(query))]
 
+    # ── validation helpers ──────────────────────────────────────
+
+    def _validation_enabled(self) -> bool:
+        return bool(getattr(self.config, "validation", None) and self.config.validation.enabled)
+
+    def _validation_due_after_epoch(self, epoch: int) -> bool:
+        if not self._validation_enabled():
+            return False
+        interval = self.config.validation.num_epochs_per_validation
+        return interval is not None and (int(epoch) + 1) % int(interval) == 0
+
+    def _validation_sim_cmd(self) -> list[str]:
+        cmd = self.config.validation.engine_command
+        if not cmd:
+            raise ValueError("validation.engine_command is required.")
+        return shlex.split(cmd)
+
+    def _get_validation_sampler(self) -> BaseSampler:
+        if self._validation_sampler is not None:
+            return self._validation_sampler
+        if not self._validation_enabled():
+            raise ValueError("Validation is not enabled.")
+        cfg = self.config.validation
+        sim_input = self._resolve_config_path(cfg.input)
+        if sim_input is None:
+            raise ValueError("validation.input is required.")
+        init_paths = self._glob_config_paths(cfg.init_config_pool)
+        if cfg.init_config_pool is not None and not init_paths:
+            raise ValueError(
+                "validation.init_config_pool glob matched no files: "
+                f"{cfg.init_config_pool!r}"
+            )
+        init_pool = [InitConfigRecord(path=p) for p in init_paths]
+        self._validation_sampler = BaseSampler(
+            sim_input=sim_input,
+            sim_backend=cfg.sim_backend,
+            init_config_pool=init_pool or None,
+            replay_mode="off",
+            rng=self.validation_rng,
+        )
+        return self._validation_sampler
+
+    def _get_validation_scheduler(self) -> TaskScheduler:
+        if self._validation_scheduler is not None:
+            return self._validation_scheduler
+        cfg = self.config.scheduler
+        pool = self._build_resource_pool(sim_cmd=self._validation_sim_cmd())
+        self._validation_scheduler = TaskScheduler(
+            pool,
+            task_timeout=cfg.task_timeout,
+            min_success_zbx=None,
+            python_exe=cfg.python_exe,
+            rng_seed=self.validation_rng.randint(0, 2**31 - 1),
+        )
+        return self._validation_scheduler
+
+    def _validation_forcefield_template_path(self) -> Path:
+        raw = (
+            self.config.validation.forcefield_template_path
+            or self.config.system.forcefield_path
+        )
+        path = self._resolve_config_path(raw)
+        if path is None:
+            raise ValueError(
+                "validation.forcefield_template_path is required when "
+                "system.forcefield_path is absent."
+            )
+        return path
+
+    def _write_lammps_forcefield_bundle(
+        self,
+        ff_dir: Path,
+        *,
+        forcefield: Optional[Forcefield] = None,
+        template_path: Optional[Path] = None,
+        runtime_relpath: Optional[Path] = None,
+    ) -> Path:
+        """Write a LAMMPS-compatible forcefield bundle under *ff_dir*.
+
+        ``WriteLmpFF`` needs an existing settings/include file so it can
+        preserve coefficient commands, table filenames, and hybrid styles.
+        """
+        cfg = self.config.system
+        pair_style, sel_styles = parse_pair_style_options(cfg.pair_style)
+        source = template_path or self._resolve_config_path(cfg.forcefield_path)
+        if source is None:
+            raise ValueError("A LAMMPS forcefield template path is required.")
+        ff = forcefield if forcefield is not None else getattr(self, "forcefield", None)
+        if ff is None:
+            raise ValueError("No runtime forcefield is available to export.")
+        ff_file = ff_dir / (runtime_relpath or Path(source).name)
+        ff_file.parent.mkdir(parents=True, exist_ok=True)
+        WriteLmpFF(
+            str(source),
+            str(ff_file),
+            ff,
+            pair_style,
+            pair_typ_sel=sel_styles,
+            topology_arrays=self.topology,
+        )
+        return ff_file
+
+    def _validation_forcefield_runtime_relpath(self, template_path: Path) -> Path:
+        sim_input = self._resolve_config_path(self.config.validation.input)
+        if sim_input is not None:
+            try:
+                return template_path.relative_to(sim_input.parent)
+            except ValueError:
+                pass
+        return Path(template_path.name)
+
+    @staticmethod
+    def _copy_forcefield_bundle_to_run(ff_dir: Path, run_dir: Path) -> None:
+        for src in ff_dir.rglob("*"):
+            if not src.is_file() or src.suffix == ".pkl":
+                continue
+            dst = run_dir / src.relative_to(ff_dir)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+
+    @staticmethod
+    def _core_bounds_from_pool(
+        resource_pool: ResourcePool,
+        explicit_ncores: Optional[int],
+    ) -> tuple[int, int, int, int]:
+        hosts = resource_pool.hosts
+        if not hosts:
+            raise RuntimeError("resource_pool has no hosts")
+        if explicit_ncores is not None:
+            n = int(explicit_ncores)
+            return n, n, n, n
+        max_host = max(h.n_cpus for h in hosts)
+        min_host = min(h.n_cpus for h in hosts)
+        total = sum(h.n_cpus for h in hosts)
+        return max_host, min_host, max_host, total
+
+    def _build_validation_task(
+        self,
+        *,
+        label: str,
+        epoch: Optional[int],
+        forcefield: Optional[Forcefield] = None,
+        resource_pool: Optional[ResourcePool] = None,
+    ) -> TaskSpec:
+        """Stage one validation replica and return its optional xz task."""
+        if not self._validation_enabled():
+            raise ValueError("Validation is not enabled.")
+
+        scheduler_pool = resource_pool
+        if scheduler_pool is None:
+            scheduler = getattr(self, "scheduler", None)
+            scheduler_pool = getattr(scheduler, "pool", None)
+        if scheduler_pool is None:
+            scheduler_pool = self._get_validation_scheduler().pool
+
+        validation_dir = self.output_dir / "validation" / str(label)
+        ff_dir = validation_dir / "ff"
+        template_path = self._validation_forcefield_template_path()
+        self._write_lammps_forcefield_bundle(
+            ff_dir,
+            forcefield=forcefield,
+            template_path=template_path,
+            runtime_relpath=self._validation_forcefield_runtime_relpath(
+                template_path
+            ),
+        )
+
+        sampler = self._get_validation_sampler()
+        state = sampler.init_epoch(
+            iteration_index=-1 if epoch is None else int(epoch),
+            epoch_dir=validation_dir / "epoch",
+            n_runs=1,
+        )
+        plan = state.replica_plans[0]
+        self._copy_forcefield_bundle_to_run(ff_dir, plan.run_dir)
+
+        cpu, min_cores, pref_cores, max_cores = self._core_bounds_from_pool(
+            scheduler_pool,
+            self.config.validation.ncores,
+        )
+        trajectory_relpath = str(plan.trajectory_path.relative_to(plan.run_dir))
+        return TaskSpec(
+            task_class="xz",
+            frame_id=None,
+            run_dir=str(plan.run_dir.resolve()),
+            cpu_cores=cpu,
+            min_cores=min_cores,
+            preferred_cores=pref_cores,
+            max_cores=max_cores,
+            sim_input=plan.input_script_path.name,
+            sim_backend=self.config.validation.sim_backend,
+            sim_var=dict(self.config.validation.sim_var),
+            sim_cmd=self._validation_sim_cmd(),
+            post_spec=None,
+            post_exec=None,
+            archive_trajectory=True,
+            trajectory_files=[trajectory_relpath],
+            role="validation",
+            required=False,
+            metadata={
+                "validation_label": str(label),
+                "epoch": None if epoch is None else int(epoch),
+            },
+            single_host_only=False,
+        )
+
+    def _run_validation_blocking(
+        self,
+        *,
+        label: str,
+        epoch: Optional[int],
+        forcefield: Optional[Forcefield] = None,
+        scheduler: Optional[TaskScheduler] = None,
+    ) -> Any:
+        if not self._validation_enabled():
+            return None
+        validation_scheduler = scheduler or self._get_validation_scheduler()
+        task = self._build_validation_task(
+            label=label,
+            epoch=epoch,
+            forcefield=forcefield,
+            resource_pool=validation_scheduler.pool,
+        )
+        result = validation_scheduler.run_iteration(
+            xz_tasks=[task],
+            zbx_tasks=[],
+            iter_dir=self.output_dir / "validation" / str(label),
+        )
+        self._record_validation_results(result)
+        return result
+
+    def _record_validation_results(self, iter_result: Any) -> list[dict[str, Any]]:
+        results = getattr(iter_result, "results", None)
+        if results is None:
+            return []
+        records: list[dict[str, Any]] = []
+        for result in results:
+            task = getattr(result, "task", None)
+            if task is None or getattr(task, "role", "training") != "validation":
+                continue
+            metadata = dict(getattr(task, "metadata", {}) or {})
+            record = {
+                "label": metadata.get("validation_label"),
+                "epoch": metadata.get("epoch"),
+                "run_dir": task.run_dir,
+                "ok": bool(getattr(result, "ok", False)),
+                "returncode": int(getattr(result, "returncode", -1)),
+                "elapsed": float(getattr(result, "elapsed", 0.0)),
+                "timing": getattr(result, "timing", None),
+            }
+            self._validation_records.append(record)
+            records.append(record)
+        if records:
+            self._write_validation_summary()
+        return records
+
+    def _validation_result_payload(self) -> dict[str, Any]:
+        return {
+            "enabled": self._validation_enabled(),
+            "runs": list(self._validation_records),
+        }
+
+    def _write_validation_summary(self) -> None:
+        if not self._validation_enabled():
+            return
+        path = self.output_dir / "validation_summary.json"
+        path.write_text(
+            json.dumps(self._validation_result_payload(), indent=2, default=str)
+            + "\n",
+            encoding="utf-8",
+        )
+
     def _forcefield_style_blocks(self, forcefield: Forcefield) -> dict[Any, dict[str, Any]]:
         blocks: dict[Any, dict[str, Any]] = {}
         offset = 0
@@ -237,7 +519,7 @@ class BaseWorkflow(ABC):
 
     def _build_forcefield_mask(self, forcefield: Forcefield) -> np.ndarray:
         mask_spec = self.config.system.forcefield_mask
-        param_mask = np.ones(forcefield.n_params(), dtype=bool)
+        param_mask = forcefield.param_mask.copy()
         if not mask_spec:
             return param_mask
 
@@ -512,6 +794,8 @@ class BaseWorkflow(ABC):
 
         labels = explicit_labels(potential)
         wrapped = getattr(potential, "potential", None)
+        if wrapped is None:
+            wrapped = getattr(potential, "base", None)
         if wrapped is not None and wrapped is not potential:
             labels.update(explicit_labels(wrapped))
         if labels:
@@ -525,6 +809,8 @@ class BaseWorkflow(ABC):
             for style, cls in POTENTIAL_REGISTRY.items():
                 if isinstance(target, cls):
                     inferred.add(str(style).strip().lower())
+            if type(target).__name__ == "BSplinePotential":
+                inferred.add("table")
         return inferred
 
     def _build_optimizer(

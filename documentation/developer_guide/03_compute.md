@@ -1,6 +1,6 @@
 # 03 Compute Module Developer Reference
 
-*Updated: 2026-05-05.*
+*Updated: 2026-05-24.*
 
 The compute layer is the task-scoped numerical runtime between trajectory/topology I/O and trainers.
 
@@ -226,7 +226,20 @@ All scheduled compute outputs are pickle files. Each payload is a top-level dict
 For `step_mode="rem"`, energy-gradient requests use the gauge-free gradient
 channel. This removes parameter-dependent bonded B-spline gauge shifts from
 REM statistics. `step_mode="cdrem"` stays on the physical energy-gradient
-channel.
+channel unless a coordinate mask is configured, in which case the reducer uses
+gauge-free gradients for the masked statistic.
+
+REM-style steps may carry `energy_mask`, a JSON-friendly mapping keyed by
+interaction label. The compute kernel applies this mask to geometry coordinates
+before summing energy-gradient channels. The mask is a coordinate selector, not
+a parameter trainability selector; `Forcefield.param_mask` is applied afterward
+to all gradient channels. Masked runs also emit `energy_mask_diagnostics` with
+active/total counts and per-interaction fractions.
+
+When a step sets `need_aux_unmasked_energy_grad`, the reducer requests an
+additional unmasked energy-gradient channel from the same frames. This channel
+is used only by trainer optimizer-gradient policies such as `hybrid_aux` and
+`unmasked`; ordinary masked REM/CDREM statistics do not need it.
 
 ### `step_mode="fm"`
 

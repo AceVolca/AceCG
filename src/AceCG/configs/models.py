@@ -112,6 +112,7 @@ class SystemConfig:
 
     topology_file: Optional[str] = None
     forcefield_path: Optional[str] = None
+    fixed_forcefield_path: Optional[str] = None
     forcefield_mask_path: Optional[str] = None
     forcefield_mask: Optional[ForcefieldMaskSpec] = None
     forcefield_bounds_path: Optional[str] = None
@@ -163,6 +164,26 @@ class SamplingConfig:
     perf_trace: bool = False
     sim_var: Dict[str, str] = field(default_factory=dict)
     extras: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ValidationConfig:
+    """Optional simulation-only forcefield validation configuration."""
+
+    input: Optional[str] = None
+    engine_command: Optional[str] = None
+    sim_backend: str = "lammps"
+    init_config_pool: Optional[str] = None
+    ncores: Optional[int] = None
+    num_epochs_per_validation: Optional[int] = None
+    sim_var: Dict[str, str] = field(default_factory=dict)
+    forcefield_template_path: Optional[str] = None
+    extras: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether validation is configured to run."""
+        return bool(self.input)
 
 
 @dataclass(frozen=True)
@@ -254,6 +275,7 @@ class ConditioningConfig:
     mask_cg_only: bool = True
     n_samples: int = 15
     ncores_per_task: Optional[int] = None
+    post_n_ranks: Optional[int] = None
     extras: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -266,6 +288,7 @@ class ACGConfig:
     system: SystemConfig = field(default_factory=SystemConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     aa_ref: AARefConfig = field(default_factory=AARefConfig)
     vp: Optional[VPConfig] = None

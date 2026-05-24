@@ -45,10 +45,10 @@ class BaseTrainer(ABC):
     logger : object or None
         Optional scalar logger.
     """
-    def __init__(self, 
-                 forcefield: Forcefield, 
-                 optimizer: BaseOptimizer, 
-                 beta: Optional[float] = None, 
+    def __init__(self,
+                 forcefield: Forcefield,
+                 optimizer: BaseOptimizer,
+                 beta: Optional[float] = None,
                  logger=None):
         self.forcefield = copy.deepcopy(forcefield)
         self.optimizer = copy.deepcopy(optimizer)
@@ -93,6 +93,52 @@ class BaseTrainer(ABC):
         if not np.shares_memory(Lc, self.optimizer.L) or not np.allclose(Lc, self.optimizer.L):
             self.optimizer.set_params(Lc)
         self.update_forcefield(self.optimizer.L)
+
+    def select_optimizer_gradient(
+        self,
+        masked_grad: np.ndarray,
+        *,
+        unmasked_grad: Optional[np.ndarray],
+        mode: str = "masked",
+        outside_aux_weight: float = 1.0,
+        allow_unmasked: bool = False,
+    ) -> np.ndarray:
+        """Choose the gradient passed to the optimizer when a coordinate mask is active.
+
+        ``masked_grad`` is the normal REM/CDREM statistic. ``unmasked_grad``
+        is an optional auxiliary channel from the same frames before applying
+        the coordinate mask; it should not be confused with parameter masks.
+        """
+        mode_norm = str(mode).strip().lower()
+        masked = np.asarray(masked_grad, dtype=float)
+        if mode_norm == "masked":
+            return masked
+        if unmasked_grad is None:
+            raise KeyError(
+                f"optimizer_gradient_mode={mode_norm!r} requires unmasked gradient statistics."
+            )
+        unmasked = np.asarray(unmasked_grad, dtype=float)
+        if unmasked.shape != masked.shape:
+            raise ValueError(
+                "unmasked optimizer gradient shape mismatch: "
+                f"masked={masked.shape}, unmasked={unmasked.shape}."
+            )
+        if mode_norm == "hybrid_aux":
+            weight = float(outside_aux_weight)
+            if weight < 0.0:
+                raise ValueError("outside_aux_weight must be nonnegative.")
+            return masked + weight * (unmasked - masked)
+        if mode_norm == "unmasked":
+            if not allow_unmasked:
+                raise ValueError(
+                    "optimizer_gradient_mode='unmasked' requires "
+                    "training.allow_unmasked_optimizer_gradient = true."
+                )
+            return unmasked
+        raise ValueError(
+            "optimizer_gradient_mode must be 'masked', 'hybrid_aux', or 'unmasked', "
+            f"got {mode!r}."
+        )
 
     def get_param_names(self) -> List[str]:
         """Return ordered human-readable names for all forcefield parameters.

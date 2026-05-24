@@ -72,12 +72,22 @@ class DSMWorkflow(FMWorkflow):
             ff_dir = self._checkpoint_dir_for_epoch(epoch)
             self._snapshot_optimizer(ff_dir)
             self._write_workflow_checkpoint(ff_dir)
+            if self._validation_due_after_epoch(epoch):
+                self._run_validation_blocking(
+                    label=f"epoch_{epoch:04d}",
+                    epoch=epoch,
+                )
+        if self._validation_enabled():
+            last_epoch = n_epochs - 1
+            if last_epoch < 0 or not self._validation_due_after_epoch(last_epoch):
+                self._run_validation_blocking(label="final", epoch=last_epoch)
         table_manifest = self._export_table_bundle() if results else {"tables": {}}
         return {
             "epochs": len(results),
             "results": results,
             "table_dir": str(self.output_dir / "tables"),
             "table_manifest": table_manifest,
+            "validation": self._validation_result_payload(),
         }
 
     def _run_post_accumulation(

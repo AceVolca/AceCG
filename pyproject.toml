@@ -28,6 +28,7 @@ acg-rem = "AceCG.workflows.rem:main"
 acg-cdfm = "AceCG.workflows.cdfm:main"
 acg-cdrem = "AceCG.workflows.cdrem:main"
 acg-vpgrower = "AceCG.workflows.vp_growth:main"
+acg-boundary-prior = "AceCG.workflows.boundary_prior:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

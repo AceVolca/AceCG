@@ -17,9 +17,10 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 
+from ..configs.energy_mask import normalize_energy_mask_spec
 from ..configs.models import ACGConfig
 from ..configs.utils import parse_pair_style_options
-from ..io.forcefield import ReadLmpFF, WriteLmpFF
+from ..io.forcefield import ReadLmpFF
 from ..samplers.base import BaseSampler, InitConfigRecord
 from ..schedulers.task_runner import run_post
 from ..schedulers.task_scheduler import TaskScheduler
@@ -57,6 +58,7 @@ class AAStats:
     energy_grad: np.ndarray
     d2U: Optional[np.ndarray] = None
     gradient_convention: str = "physical"
+    unmasked_energy_grad: Optional[np.ndarray] = None
 
     @staticmethod
     def _normalize_gradient_convention(value: Any) -> Optional[str]:
@@ -127,6 +129,9 @@ class AAStats:
             energy_grad=np.asarray(payload[grad_key], dtype=np.float64),
             d2U=None if d2u_raw is None else np.asarray(d2u_raw, dtype=np.float64),
             gradient_convention=gradient_convention or expected_gradient_convention or "physical",
+            unmasked_energy_grad=None
+            if payload.get("unmasked_energy_grad_avg") is None
+            else np.asarray(payload["unmasked_energy_grad_avg"], dtype=np.float64),
         )
 
 
@@ -147,10 +152,10 @@ class SamplingWorkflow(BaseWorkflow):
         self.forcefield = self._build_forcefield()
         if self.config.vp is not None and self.config.vp.vp_names:
             self.forcefield.set_vp_masks(self.config.vp.vp_names)
-        self.forcefield.apply_specs(
-            mask_spec=self.config.system.forcefield_mask,
-            bounds_spec=self.config.system.forcefield_bounds,
-        )
+        if self.config.system.forcefield_mask is not None:
+            self.forcefield.build_mask(init_mask=self._build_forcefield_mask(self.forcefield))
+        if self.config.system.forcefield_bounds is not None:
+            self._apply_forcefield_bounds(self.forcefield)
         self.resource_pool = self._build_resource_pool()
         self.scheduler = self._build_scheduler()
         self.sampler = self._build_sampler()
@@ -339,25 +344,7 @@ class SamplingWorkflow(BaseWorkflow):
 
     def _write_forcefield(self, ff_dir: Path) -> Path:
         """Write the current runtime forcefield bundle under *ff_dir*."""
-        cfg = self.config.system
-        pair_style, sel_styles = parse_pair_style_options(cfg.pair_style)
-        source = Path(cfg.forcefield_path)
-        runtime_relpath = Path(source.name)
-        ff_file = ff_dir / runtime_relpath
-        ff_file.parent.mkdir(parents=True, exist_ok=True)
-        # WriteLmpFF needs an existing source file to copy structure from
-        src = self._resolve_config_path(cfg.forcefield_path)
-        if src is None:
-            raise ValueError("system.forcefield_path is required for runtime forcefield export.")
-        WriteLmpFF(
-            str(src),
-            str(ff_file),
-            self.forcefield,
-            pair_style,
-            pair_typ_sel=sel_styles,
-            topology_arrays=self.topology,
-        )
-        return ff_file
+        return self._write_lammps_forcefield_bundle(ff_dir)
 
     def _snapshot_forcefield(self, ff_dir: Path, forcefield: Optional[Forcefield] = None) -> Path:
         """Pickle a deep-copy of the forcefield for MPI engine consumption."""
@@ -382,8 +369,10 @@ class SamplingWorkflow(BaseWorkflow):
         """
         snapshot_path = ff_dir / "optimizer_snapshot.pkl"
         ff_dir.mkdir(parents=True, exist_ok=True)
+        trainer = getattr(self, "trainer", None)
+        optimizer = getattr(trainer, "optimizer", self.optimizer)
         with open(snapshot_path, "wb") as fh:
-            pickle.dump(self.optimizer.state_dict(), fh,
+            pickle.dump(optimizer.state_dict(), fh,
                         protocol=pickle.HIGHEST_PROTOCOL)
         return snapshot_path
 
@@ -391,9 +380,11 @@ class SamplingWorkflow(BaseWorkflow):
         """Persist the completed-epoch state used for workflow resume."""
         snapshot_path = ff_dir / "workflow_checkpoint.pkl"
         ff_dir.mkdir(parents=True, exist_ok=True)
+        trainer = getattr(self, "trainer", None)
+        optimizer = getattr(trainer, "optimizer", self.optimizer)
         payload: Dict[str, Any] = {
             "forcefield": copy.deepcopy(self.forcefield),
-            "optimizer_state": self.optimizer.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
             "workflow_rng_state": self.workflow_rng.getstate(),
         }
         sampler = getattr(self, "sampler", None)
@@ -454,16 +445,7 @@ class SamplingWorkflow(BaseWorkflow):
         ``cpu_cores`` is the nominal default written into ``TaskSpec`` — the
         Placer overrides it at launch time with the actual allocation.
         """
-        hosts = self.resource_pool.hosts
-        if not hosts:
-            raise RuntimeError("resource_pool has no hosts")
-        if explicit_ncores is not None:
-            n = int(explicit_ncores)
-            return n, n, n, n
-        max_host = max(h.n_cpus for h in hosts)
-        min_host = min(h.n_cpus for h in hosts)
-        total = sum(h.n_cpus for h in hosts)
-        return max_host, min_host, max_host, total
+        return self._core_bounds_from_pool(self.resource_pool, explicit_ncores)
 
     # ── AA engine post-processing helpers ───────────────────────
 
@@ -508,6 +490,7 @@ class SamplingWorkflow(BaseWorkflow):
                 }
             ],
         }
+        self._apply_rem_statistics_options(spec["steps"][0])
         # AA-ref topology / alias overrides (from parser resolution)
         if cfg.aa_ref.ref_topo is not None:
             spec["topology"] = str(self._resolve_config_path(cfg.aa_ref.ref_topo))
@@ -555,3 +538,33 @@ class SamplingWorkflow(BaseWorkflow):
             spec["heartbeat_interval"] = int(interval)
         if bool(self.config.sampling.extras.get("perf_trace_all_ranks", False)):
             spec["perf_trace_all_ranks"] = True
+
+    def _energy_mask_runtime_spec(self) -> Optional[dict[str, dict[str, float | None]]]:
+        raw = self.config.training.extras.get("energy_mask")
+        if raw in (None, False):
+            return None
+        return normalize_energy_mask_spec(raw)
+
+    def _optimizer_gradient_mode(self) -> str:
+        return str(
+            self.config.training.extras.get("optimizer_gradient_mode", "masked")
+        ).strip().lower()
+
+    def _outside_aux_weight(self) -> float:
+        return float(self.config.training.extras.get("outside_aux_weight", 1.0))
+
+    def _allow_unmasked_optimizer_gradient(self) -> bool:
+        return bool(
+            self.config.training.extras.get("allow_unmasked_optimizer_gradient", False)
+        )
+
+    def _apply_rem_statistics_options(self, step: Dict[str, Any]) -> None:
+        energy_mask = self._energy_mask_runtime_spec()
+        if energy_mask is not None:
+            step["energy_mask"] = energy_mask
+        # Only request auxiliary unmasked statistics when the trainer may use
+        # them for the optimizer step. The default masked mode keeps the
+        # post-processing payload small.
+        mode = self._optimizer_gradient_mode()
+        if mode in {"hybrid_aux", "unmasked"}:
+            step["need_aux_unmasked_energy_grad"] = True

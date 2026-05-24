@@ -1,6 +1,6 @@
 # 09 Workflow Module Developer Reference
 
-*Updated: 2026-05-05.*
+*Updated: 2026-05-24.*
 
 > This chapter covers training / orchestration workflows only. VP grower is documented separately in [10_vp_grower.md](10_vp_grower.md).
 
@@ -20,6 +20,7 @@ The workflow layer sits above scheduler, trainer, and solver. It connects config
 | `workflows/fm.py` | `FMWorkflow` |
 | `workflows/dsm.py` | `DSMWorkflow` |
 | `workflows/__init__.py` | Public workflow class exports |
+| `workflows/boundary_prior.py` | One-shot endpoint-prior forcefield post-processing CLI |
 
 ---
 
@@ -72,7 +73,6 @@ Important shared helpers:
 | `_build_optimizer()` | Selects optimizer from `training.optimizer` / `training.trainer` |
 | `_build_resource_pool()` | Discovers MPI backend and CPU resources from environment and scheduler config |
 | `_build_forcefield_mask()` | Compiles `[system] forcefield_mask` into runtime `param_mask` |
-| `_build_forcefield_bounds()` | Compiles `[system] forcefield_bounds` into runtime `param_bounds` |
 
 Important development rule: `BaseWorkflow.run()` remains abstract. Real training loops belong in concrete workflow classes.
 
@@ -83,7 +83,7 @@ Important development rule: `BaseWorkflow.run()` remains abstract. Real training
 `SamplingWorkflow` is the shared base for REM, CDREM, and CDFM. It adds:
 
 - `ReadLmpFF()` force-field loading
-- combination of VP mask, user `forcefield_mask`, and user `forcefield_bounds`
+- combination of VP mask and user `forcefield_mask`
 - `TaskScheduler` and `BaseSampler` / `ConditionedSampler` construction
 - unified `beta = 1 / (k_B T)` derivation
 - AA reference-data strategy and workflow checkpoint I/O
@@ -102,6 +102,8 @@ Key helpers:
 | `_snapshot_optimizer()` | Save Adam/AdamW/RMSprop internal state |
 | `_write_workflow_checkpoint()` | Save full resume state |
 | `_load_workflow_checkpoint()` | Restore from the latest completed epoch |
+| `_energy_mask_runtime_spec()` | Normalize `training.energy_mask` for REM/CDREM post specs |
+| `_apply_rem_statistics_options()` | Attach coordinate-mask and auxiliary-unmasked requests to REM-style steps |
 
 `SamplingWorkflow` itself does not define a training loop. It only collects common behavior for workflows that run simulations.
 
@@ -112,6 +114,25 @@ Noise stage is `epoch // aa_ref.noise_update_interval`; `noise_schedule` and
 stage` can reuse AA statistics when the active gradient convention is
 cacheable. `aa_ref.noise_subsample_per_epoch` selects a sorted, no-replacement
 frame subset after the usual AA frame slicing.
+
+`training.energy_mask` is a REM/CDREM post-processing option. The workflow
+does not apply the coordinate mask itself; it normalizes the spec and forwards
+it to the reducer step. If `training.optimizer_gradient_mode` is `hybrid_aux`
+or `unmasked`, the workflow also requests auxiliary unmasked gradient
+statistics so the trainer can select the optimizer gradient explicitly.
+
+### Validation Tasks
+
+Training workflows can run optional simulation-only validation through a
+`[validation]` config section. Validation tasks are scheduled as non-required
+xz tasks: failures are recorded in workflow return payloads and scheduler
+timing files, but they do not abort an otherwise successful training epoch.
+FM can run validation after solver/trainer steps; REM, CDREM, DSM, and CDFM
+use the shared workflow helpers in `BaseWorkflow`.
+
+Validation is deliberately simulation-only. It uses the current forcefield
+bundle and a validation LAMMPS input, then records task success/failure; it
+does not feed statistics back into trainers.
 
 ---
 
@@ -156,6 +177,15 @@ ordinary sampled-CG REM branch.
 - every zbx task uses `step_mode="cdfm_zbx"`
 
 In the active repo, `y_eff` no longer has a separate `cdfm_y_eff` step. It is computed during the rank-0 preprocessing phase of `cdfm_zbx` from `(init_config, init_force)` and then broadcast to all ranks in that replica.
+
+### `BoundaryPriorWorkflow`
+
+`acg-boundary-prior` is a one-shot post-processing path. It reads an existing
+LAMMPS forcefield, wraps selected interactions in fixed endpoint priors, and
+writes a new LAMMPS settings/table bundle under `training.output_dir`. The
+input bounds use the same interaction-label syntax as `training.energy_mask`,
+but this workflow changes the exported potential shape rather than changing
+REM/CDREM statistics.
 
 ### `FMWorkflow`
 

@@ -45,6 +45,7 @@ from .reducers import (
     step_reduce_plan,
     step_request,
 )
+from ..configs.energy_mask import normalize_energy_mask_spec
 from ..io.logger import get_screen_logger
 from ..topology.forcefield import Forcefield
 from ..topology.neighbor import compute_pairs_by_type
@@ -552,6 +553,61 @@ def _weighted_accumulate(
         out[key] = contribution
 
 
+def _merge_energy_mask_diagnostics(
+    out: Dict[str, Any],
+    diagnostics: Mapping[str, Any],
+) -> None:
+    """Merge one energy-mask diagnostics payload into compute results."""
+    if "energy_mask_diagnostics" not in out:
+        out["energy_mask_diagnostics"] = {
+            "active": int(diagnostics.get("active", 0)),
+            "total": int(diagnostics.get("total", 0)),
+            "by_key": {
+                str(label): {
+                    "active": int(counts.get("active", 0)),
+                    "total": int(counts.get("total", 0)),
+                }
+                for label, counts in dict(diagnostics.get("by_key", {})).items()
+            },
+        }
+        return
+    current = out["energy_mask_diagnostics"]
+    current["active"] += int(diagnostics.get("active", 0))
+    current["total"] += int(diagnostics.get("total", 0))
+    by_key = current.setdefault("by_key", {})
+    for label, counts in dict(diagnostics.get("by_key", {})).items():
+        label = str(label)
+        if label not in by_key:
+            by_key[label] = {"active": 0, "total": 0}
+        by_key[label]["active"] += int(counts.get("active", 0))
+        by_key[label]["total"] += int(counts.get("total", 0))
+
+
+def _shared_energy_mask_from_steps(
+    steps: Sequence[Mapping[str, Any]],
+    shared_spec: Mapping[str, Any],
+) -> Optional[dict[str, dict[str, float | None]]]:
+    """Return the single coordinate-mask spec shared by all post steps."""
+    raw_specs: list[Any] = []
+    shared_mask = shared_spec.get("energy_mask")
+    if shared_mask not in (None, False):
+        raw_specs.append(shared_mask)
+    for step in steps:
+        step_mask = step.get("energy_mask")
+        if step_mask not in (None, False):
+            raw_specs.append(step_mask)
+    if not raw_specs:
+        return None
+    normalized = [normalize_energy_mask_spec(spec) for spec in raw_specs]
+    first = normalized[0]
+    for spec in normalized[1:]:
+        if spec != first:
+            raise ValueError(
+                "All post-processing steps in one run_post call must use the same energy_mask."
+            )
+    return first
+
+
 def _merge_fm_stats(out: Dict[str, Any], partial: Dict[str, Any]) -> None:
     if "fm_stats" not in out:
         out["fm_stats"] = {
@@ -757,6 +813,7 @@ class MPIComputeEngine:
         neighbor_skin: float = 0.0,
         neighbor_reference_positions: Optional[np.ndarray] = None,
         neighbor_reference_box: Optional[np.ndarray] = None,
+        coordinate_mask: Optional[Mapping[str, Any]] = None,
         **kwargs,
     ) -> Dict[str, Any]:
         """Compute registered observables for one frame or same-frame batch.
@@ -992,6 +1049,10 @@ class MPIComputeEngine:
                 or bool(request.get("need_energy_grad_outer", False))
                 or bool(request.get("need_gauge_free_energy_grad", False))
                 or bool(request.get("need_gauge_free_energy_grad_outer", False))
+                or bool(request.get("need_unmasked_energy_grad", False))
+                or bool(request.get("need_unmasked_energy_grad_outer", False))
+                or bool(request.get("need_unmasked_gauge_free_energy_grad", False))
+                or bool(request.get("need_unmasked_gauge_free_energy_grad_outer", False))
             ):
                 t0 = time.monotonic()
                 energy_result = energy(
@@ -1007,11 +1068,27 @@ class MPIComputeEngine:
                     return_gauge_free_energy_grad_outer=bool(
                         request.get("need_gauge_free_energy_grad_outer", False)
                     ),
+                    return_unmasked_energy_grad=bool(
+                        request.get("need_unmasked_energy_grad", False)
+                    ),
+                    return_unmasked_energy_grad_outer=bool(
+                        request.get("need_unmasked_energy_grad_outer", False)
+                    ),
+                    return_unmasked_gauge_free_energy_grad=bool(
+                        request.get("need_unmasked_gauge_free_energy_grad", False)
+                    ),
+                    return_unmasked_gauge_free_energy_grad_outer=bool(
+                        request.get("need_unmasked_gauge_free_energy_grad_outer", False)
+                    ),
+                    coordinate_mask=coordinate_mask,
                 )
+                diagnostics = energy_result.pop("energy_mask_diagnostics", None)
                 for key, value in energy_result.items():
                     # Reducers consume single-frame-shaped payloads, so batch
                     # observables are folded to weighted averages here.
                     _weighted_accumulate(results, key, value, chunk_weights)
+                if diagnostics is not None:
+                    _merge_energy_mask_diagnostics(results, diagnostics)
                 if timing is not None:
                     _add_timing(timing, "energy_kernel", time.monotonic() - t0)
 
@@ -1282,11 +1359,18 @@ class MPIComputeEngine:
                     merged: Dict[Any, Any] = {}
                     for item in gathered:
                         for subkey, value in dict(item).items():
-                            arr = np.asarray(value)
-                            if subkey in merged:
-                                merged[subkey] = np.asarray(merged[subkey]) + arr
+                            if isinstance(value, Mapping):
+                                target = dict(merged.get(subkey, {}))
+                                for inner_key, inner_value in value.items():
+                                    prev = target.get(inner_key, 0)
+                                    target[inner_key] = prev + inner_value
+                                merged[subkey] = target
                             else:
-                                merged[subkey] = arr.copy()
+                                arr = np.asarray(value)
+                                if subkey in merged:
+                                    merged[subkey] = np.asarray(merged[subkey]) + arr
+                                else:
+                                    merged[subkey] = arr.copy()
                     reduced[key] = merged
             for key in dict_update_keys:
                 gathered = comm.gather(local_result.get(key, {}), root=0)
@@ -1387,8 +1471,10 @@ class MPIComputeEngine:
                 )
 
                 original_param_mask = forcefield_snapshot.param_mask.copy()
+                original_key_mask = dict(forcefield_snapshot.key_mask)
                 cg_mask = forcefield_snapshot.real_mask.copy()
                 forcefield_snapshot.param_mask = cg_mask
+                forcefield_snapshot.key_mask = forcefield_snapshot.derive_l1_mask(cg_mask)
                 try:
                     baseline_request = {flag: False for flag in _REQUEST_FLAGS}
                     baseline_request["need_force_value"] = True
@@ -1416,6 +1502,7 @@ class MPIComputeEngine:
                         )
                 finally:
                     forcefield_snapshot.param_mask = original_param_mask
+                    forcefield_snapshot.key_mask = original_key_mask
 
                 y_eff_single = y_ref_flat - f_model_real
             else:
@@ -1678,14 +1765,15 @@ class MPIComputeEngine:
             sel_indices=sel_indices,
             exclude_option=exclude_option,
         )
-        # Refresh the cached interaction_mask in case the mask setter
-        # produced a new key_mask object during preprocessing.
+        # Refresh the cached interaction_mask in case preprocessing changed
+        # forcefield key-mask metadata.
         interaction_mask = getattr(forcefield_snapshot, "key_mask", None)
         
         step_states = [
             init_step_state(step, forcefield_snapshot, topology_arrays) for step in one_pass_steps
         ]
         request = self._shared_step_requests(one_pass_steps)
+        coordinate_mask = _shared_energy_mask_from_steps(one_pass_steps, shared_spec)
         if noise_spec is not None and (collect_observables or request.get("need_frame_cache", False)):
             raise ValueError(
                 "spec['noise'] batch processing does not support frame-cache or observables requests."
@@ -1750,6 +1838,7 @@ class MPIComputeEngine:
                     timing=local_timing,
                     return_observables=collect_observables,
                     frame_idx=frame_id,
+                    coordinate_mask=coordinate_mask,
                 )
                 compute_sec = time.monotonic() - t_compute
                 noise_sec = 0.0
@@ -1788,6 +1877,7 @@ class MPIComputeEngine:
                     neighbor_reference_box=box
                     if use_reference_neighbor_frame
                     else None,
+                    coordinate_mask=coordinate_mask,
                 )
                 compute_sec = time.monotonic() - t_compute
                 _add_timing(local_timing, "compute_noisy_total", compute_sec)

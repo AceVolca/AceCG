@@ -73,10 +73,14 @@ class CDFMWorkflow(SamplingWorkflow):
         ``mask_cg_only=False`` the training mask is left unchanged. Either
         way the composition is AND-ed with the current
         ``forcefield.param_mask`` so any ``[system] forcefield_mask`` entries
-        set upstream are preserved. The baseline force computation in
-        ``compute/mpi_engine.py`` swaps ``param_mask`` to the CG-only mask
-        temporarily and restores the original before the main frame loop, so
-        this install is about the training gradient only.
+        set upstream are preserved. CDFM uses the derived key mask for the main
+        zbx interaction set, matching the historical CG-only masking behavior
+        even though ``param_mask`` and ``key_mask`` are now independent.
+
+        The baseline force computation in ``compute/mpi_engine.py`` explicitly
+        swaps both ``param_mask`` and the derived CG-only ``key_mask``
+        temporarily, then restores the original masks before the main frame
+        loop.
         """
         current = self.forcefield.param_mask
         if self.config.conditioning.mask_cg_only:
@@ -85,6 +89,7 @@ class CDFMWorkflow(SamplingWorkflow):
         else:
             init_mask = np.asarray(current, dtype=bool).copy()
         self.forcefield.build_mask(init_mask=init_mask)
+        self.forcefield.key_mask = self.forcefield.derive_l1_mask(init_mask)
 
     # ── builders ────────────────────────────────────────────────
 
@@ -193,6 +198,12 @@ class CDFMWorkflow(SamplingWorkflow):
         zbx_cpu = cfg.conditioning.ncores_per_task or max(
             host.n_cpus for host in self.resource_pool.hosts
         )
+        post_n_ranks = cfg.conditioning.post_n_ranks or zbx_cpu
+        if post_n_ranks < 1 or post_n_ranks > zbx_cpu:
+            raise ValueError(
+                "conditioning.post_n_ranks must be between 1 and "
+                f"conditioning.ncores_per_task ({zbx_cpu}); got {post_n_ranks}."
+            )
         trajectory_relpath = str(plan.trajectory_path.relative_to(plan.run_dir))
         if plan.init_force_path is None:
             raise ValueError(
@@ -240,7 +251,7 @@ class CDFMWorkflow(SamplingWorkflow):
             sim_backend=cfg.sampling.sim_backend,
             sim_log="sim.log",                     # default LAMMPS log name
             post_spec=post_spec,
-            post_exec={"mode": "mpi", "n_ranks": zbx_cpu},
+            post_exec={"mode": "mpi", "n_ranks": post_n_ranks},
             sim_var=dict(cfg.sampling.sim_var),
             archive_trajectory=False,              # trajectories cleaned after read
             trajectory_files=[trajectory_relpath],
@@ -248,6 +259,67 @@ class CDFMWorkflow(SamplingWorkflow):
         )
 
     # ── batch collection ────────────────────────────────────────
+
+    def _load_resume_state(self, start_epoch: int) -> bool:
+        """Load CDFM resume state.
+
+        Returns ``True`` when the active epoch directory should be moved aside
+        before replaying ``start_epoch``.  Normal resumes load the completed
+        checkpoint from ``iter_{start_epoch - 1}``; legacy CDFM runs before
+        workflow checkpointing can only resume from the pre-epoch forcefield
+        snapshot in ``iter_{start_epoch}``.
+        """
+        if start_epoch <= 0:
+            return False
+
+        prev_ff_dir = self.output_dir / f"iter_{start_epoch - 1:04d}" / "ff"
+        prev_snapshot = prev_ff_dir / "workflow_checkpoint.pkl"
+        if prev_snapshot.exists():
+            self._load_workflow_checkpoint(prev_ff_dir)
+            self.trainer = self._build_trainer()
+            logger.info(
+                "Resuming from epoch %d (loaded %s)", start_epoch, prev_snapshot,
+            )
+            return False
+
+        current_ff_dir = self.output_dir / f"iter_{start_epoch:04d}" / "ff"
+        legacy_snapshot = current_ff_dir / "forcefield_snapshot.pkl"
+        if legacy_snapshot.exists():
+            with open(legacy_snapshot, "rb") as fh:
+                self.forcefield = pickle.load(fh)
+            self.optimizer = self._build_optimizer(self.forcefield)
+            self.trainer = self._build_trainer()
+            logger.warning(
+                "Resuming epoch %d from legacy pre-epoch forcefield snapshot %s. "
+                "No workflow checkpoint was present, so optimizer moments and "
+                "workflow RNG state are restarted from config seed.",
+                start_epoch,
+                legacy_snapshot,
+            )
+            return True
+
+        raise FileNotFoundError(
+            f"Cannot resume CDFM from epoch {start_epoch}: neither completed "
+            f"checkpoint {prev_snapshot} nor legacy pre-epoch snapshot "
+            f"{legacy_snapshot} exists."
+        )
+
+    def _move_incomplete_iteration(self, iter_dir: Path) -> None:
+        """Move a partial iteration aside so replay cannot reuse stale results."""
+        if not iter_dir.exists():
+            return
+        stem = f"{iter_dir.name}_incomplete_before_resume"
+        backup = iter_dir.with_name(stem)
+        suffix = 1
+        while backup.exists():
+            backup = iter_dir.with_name(f"{stem}_{suffix:02d}")
+            suffix += 1
+        shutil.move(str(iter_dir), str(backup))
+        logger.warning(
+            "Moved incomplete iteration directory before replay: %s -> %s",
+            iter_dir,
+            backup,
+        )
 
     def _collect_cdfm_batch(
         self,
@@ -324,12 +396,26 @@ class CDFMWorkflow(SamplingWorkflow):
         """Execute the CDFM training loop."""
         cfg = self.config
         n_epochs = cfg.training.n_epochs
+        start_epoch = cfg.training.start_epoch
         K = cfg.conditioning.n_samples
         mode = str(cfg.training.extras.get("cdfm_mode", "direct")).strip().lower()
         results = []
+        pending_validation_epoch: Optional[int] = None
 
-        for epoch in range(n_epochs):
+        clean_resume_epoch = self._load_resume_state(start_epoch)
+        if (
+            start_epoch > 0
+            and self._validation_enabled()
+            and start_epoch < n_epochs
+            and self._validation_due_after_epoch(start_epoch - 1)
+        ):
+            pending_validation_epoch = start_epoch - 1
+
+        for epoch in range(start_epoch, n_epochs):
             iter_dir = self.output_dir / f"iter_{epoch:04d}"
+            if clean_resume_epoch and epoch == start_epoch:
+                self._move_incomplete_iteration(iter_dir)
+                clean_resume_epoch = False
             iter_dir.mkdir(parents=True, exist_ok=True)
 
             # ── Phase 1: write FF ────────────────────────────────
@@ -353,13 +439,24 @@ class CDFMWorkflow(SamplingWorkflow):
                 self._build_zbx_task(plan, ff_snapshot_path, mode=mode)
                 for plan in zbx_state.replica_plans
             ]
+            xz_tasks = []
+            if pending_validation_epoch is not None:
+                xz_tasks.append(
+                    self._build_validation_task(
+                        label=f"epoch_{pending_validation_epoch:04d}",
+                        epoch=pending_validation_epoch,
+                        resource_pool=self.scheduler.pool,
+                    )
+                )
+                pending_validation_epoch = None
 
             # ── Phase 4: scheduler execution ─────────────────────
             iter_result = self.scheduler.run_iteration(
-                xz_tasks=[],
+                xz_tasks=xz_tasks,
                 zbx_tasks=zbx_tasks,
                 iter_dir=iter_dir,
             )
+            self._record_validation_results(iter_result)
 
             # ── Phase 5: read results + train ────────────────────
             batch = self._collect_cdfm_batch(zbx_state, epoch)
@@ -377,8 +474,28 @@ class CDFMWorkflow(SamplingWorkflow):
                 int(np.asarray(param_mask).sum()),
                 int(np.asarray(param_mask).size),
             )
+            self.zbx_sampler.clean_epoch(zbx_state)
+            self._snapshot_optimizer(ff_dir)
+            self._write_workflow_checkpoint(ff_dir)
+            if (
+                self._validation_enabled()
+                and self._validation_due_after_epoch(epoch)
+                and epoch < n_epochs - 1
+            ):
+                pending_validation_epoch = epoch
 
-        return {"epochs": len(results), "results": results}
+        if self._validation_enabled():
+            self._run_validation_blocking(
+                label="final",
+                epoch=int(n_epochs) - 1,
+                scheduler=self.scheduler,
+            )
+
+        return {
+            "epochs": len(results),
+            "results": results,
+            "validation": self._validation_result_payload(),
+        }
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

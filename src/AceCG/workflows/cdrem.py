@@ -125,6 +125,7 @@ class CDREMWorkflow(SamplingWorkflow):
                 }
             ],
         }
+        self._apply_rem_statistics_options(post_spec["steps"][0])
         if cfg.system.type_names is not None:
             post_spec["atom_type_name_aliases"] = cfg.system.type_names
         if cfg.vp is not None:
@@ -180,6 +181,7 @@ class CDREMWorkflow(SamplingWorkflow):
                 }
             ],
         }
+        self._apply_rem_statistics_options(post_spec["steps"][0])
         if cfg.system.type_names is not None:
             post_spec["atom_type_name_aliases"] = cfg.system.type_names
         if cfg.vp is not None:
@@ -227,9 +229,16 @@ class CDREMWorkflow(SamplingWorkflow):
         with open(xz_result_path, "rb") as fh:
             xz_stats = pickle.load(fh)
         energy_grad_xz = np.asarray(xz_stats["energy_grad_avg"], dtype=np.float64)
+        unmasked_energy_grad_xz_raw = xz_stats.get("unmasked_energy_grad_avg")
+        unmasked_energy_grad_xz = (
+            None
+            if unmasked_energy_grad_xz_raw is None
+            else np.asarray(unmasked_energy_grad_xz_raw, dtype=np.float64)
+        )
 
         # ── zbx results: one energy_grad_avg per frame ──────────
         energy_grad_z_by_x = []
+        unmasked_energy_grad_z_by_x = [] if unmasked_energy_grad_xz is not None else None
         d2U_z_by_x_list = [] if need_hessian else None
         cov_z_by_x_list = [] if need_hessian else None
 
@@ -247,6 +256,16 @@ class CDREMWorkflow(SamplingWorkflow):
             energy_grad_z_by_x.append(
                 np.asarray(zbx_stats["energy_grad_avg"], dtype=np.float64)
             )
+            if unmasked_energy_grad_z_by_x is not None:
+                raw_unmasked = zbx_stats.get("unmasked_energy_grad_avg")
+                if raw_unmasked is None:
+                    raise KeyError(
+                        f"zbx result for frame {plan.frame_id} is missing "
+                        "'unmasked_energy_grad_avg' required by the optimizer gradient mode."
+                    )
+                unmasked_energy_grad_z_by_x.append(
+                    np.asarray(raw_unmasked, dtype=np.float64)
+                )
             if need_hessian:
                 d2U_z_by_x_list.append(
                     np.asarray(zbx_stats["d2U_avg"], dtype=np.float64)
@@ -271,8 +290,16 @@ class CDREMWorkflow(SamplingWorkflow):
             "energy_grad_z_by_x": np.array(energy_grad_z_by_x),
             "energy_grad_xz": energy_grad_xz,
             # x_weight — omitted; defaults to uniform averaging over x
+            "optimizer_gradient_mode": self._optimizer_gradient_mode(),
+            "outside_aux_weight": self._outside_aux_weight(),
+            "allow_unmasked_optimizer_gradient": self._allow_unmasked_optimizer_gradient(),
             "step_index": epoch,
         }
+        if unmasked_energy_grad_xz is not None:
+            batch_kwargs["unmasked_energy_grad_xz"] = unmasked_energy_grad_xz
+            batch_kwargs["unmasked_energy_grad_z_by_x"] = np.array(
+                unmasked_energy_grad_z_by_x
+            )
 
         if need_hessian:
             batch_kwargs["d2U_z_by_x"] = np.array(d2U_z_by_x_list)
@@ -295,6 +322,7 @@ class CDREMWorkflow(SamplingWorkflow):
         start_epoch = cfg.training.start_epoch
         K = cfg.conditioning.n_samples
         results = []
+        pending_validation_epoch: Optional[int] = None
 
         if start_epoch > 0:
             prev_ff_dir = (
@@ -311,6 +339,12 @@ class CDREMWorkflow(SamplingWorkflow):
             logger.info(
                 "Resuming from epoch %d (loaded %s)", start_epoch, prev_snapshot,
             )
+            if (
+                self._validation_enabled()
+                and start_epoch < n_epochs
+                and self._validation_due_after_epoch(start_epoch - 1)
+            ):
+                pending_validation_epoch = start_epoch - 1
 
         for epoch in range(start_epoch, n_epochs):
             iter_dir = self.output_dir / f"iter_{epoch:04d}"
@@ -348,13 +382,24 @@ class CDREMWorkflow(SamplingWorkflow):
                 self._build_zbx_task(plan, ff_snapshot_path)
                 for plan in zbx_state.replica_plans
             ]
+            xz_tasks = [xz_task]
+            if pending_validation_epoch is not None:
+                xz_tasks.append(
+                    self._build_validation_task(
+                        label=f"epoch_{pending_validation_epoch:04d}",
+                        epoch=pending_validation_epoch,
+                        resource_pool=self.scheduler.pool,
+                    )
+                )
+                pending_validation_epoch = None
 
             # ── Phase 5: scheduler execution ─────────────────────
             iter_result = self.scheduler.run_iteration(
-                xz_tasks=[xz_task],
+                xz_tasks=xz_tasks,
                 zbx_tasks=zbx_tasks,
                 iter_dir=iter_dir,
             )
+            self._record_validation_results(iter_result)
             if not iter_result.xz_ok:
                 logger.error("CDREM xz sampling failed at epoch %d", epoch)
                 break
@@ -375,8 +420,25 @@ class CDREMWorkflow(SamplingWorkflow):
             self.sampler.clean_epoch(xz_state)
             self._snapshot_optimizer(ff_dir)
             self._write_workflow_checkpoint(ff_dir)
+            if (
+                self._validation_enabled()
+                and self._validation_due_after_epoch(epoch)
+                and epoch < n_epochs - 1
+            ):
+                pending_validation_epoch = epoch
 
-        return {"epochs": len(results), "results": results}
+        if self._validation_enabled():
+            self._run_validation_blocking(
+                label="final",
+                epoch=int(n_epochs) - 1,
+                scheduler=self.scheduler,
+            )
+
+        return {
+            "epochs": len(results),
+            "results": results,
+            "validation": self._validation_result_payload(),
+        }
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
