@@ -25,7 +25,7 @@ Use a compute node for MPI, LAMMPS, production runs, and long test suites.
 
 ## Latest update
 
-- 05/24/2026, Weizhi: Merged several new functionalities, including on-the-fly validation simulations, L0 gate utilities, mask & bound utilities, coordinate masks for REM diagnostics, etc.
+- 05/24/2026, Weizhi: Merged several new functionalities, including on-the-fly validation simulations (Weizhi), L0 gate utilities (Ace), mask & bound utilities (Ace & Weizhi), coordinate masks for REM diagnostics (Zhikun), etc.
 - 05/06/2026, Ace: Added potential-local mask/bounds metadata (Ace, Weizhi), versioned Forcefield metadata caching (Weizhi), hard-concrete L0 gate utilities (Ace).
 - 05/05/2026, Weizhi: Added DSM, noisy FM, mixed noisy FM, noisy REM, batch compute backends, and gauge-free gradient support (Zhikun).
 - 04/24/2026, Weizhi: Synced all architectural updates to the current repo. See the developer guide for all details. AceCG is now with MPI CPU support, multitask scheduling, unified topology management, parallelized compute backends, config file parsing, command-line interface, etc.
