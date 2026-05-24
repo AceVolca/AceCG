@@ -1,6 +1,6 @@
 # AceCG: A Comprehensive Engine for Coarse-Graining
 
-<img width="300" height="236" alt="image" src="https://github.com/user-attachments/assets/5ea05560-34f4-438c-b332-58ba576080fa" />
+<img width="250" height="250" alt="image" src="https://github.com/user-attachments/assets/102f6238-9eb4-4d3c-b555-50cac0b8df90" />
 
 AceCG is a versatile and MPI-enabled coarse-graining force-field training engine.
 
@@ -25,9 +25,14 @@ Use a compute node for MPI, LAMMPS, production runs, and long test suites.
 
 ## Latest update
 
+- 05/24/2026, Weizhi: Merged several new functionalities, including on-the-fly validation simulations, L0 gate utilities, mask & bound utilities, coordinate masks for REM diagnostics, etc.
 - 05/06/2026, Ace: Added potential-local mask/bounds metadata (Ace, Weizhi), versioned Forcefield metadata caching (Weizhi), hard-concrete L0 gate utilities (Ace).
 - 05/05/2026, Weizhi: Added DSM, noisy FM, mixed noisy FM, noisy REM, batch compute backends, and gauge-free gradient support (Zhikun).
 - 04/24/2026, Weizhi: Synced all architectural updates to the current repo. See the developer guide for all details. AceCG is now with MPI CPU support, multitask scheduling, unified topology management, parallelized compute backends, config file parsing, command-line interface, etc.
+
+## Known Issues
+
+The 05/24 merge is too heavy. Code is not simple enough. Need to fix.
 
 ## Developer Team
 
