@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "AceCG"
-version = "0.26.4.20"
-description = "AceCG: A Comprehensive and Efficient Coarse-Graining Engine"
+version = "0.2.0"
+description = "AceCG: A Comprehensive Engine for Coarse-Graining"
 requires-python = ">=3.9"
 dependencies = [
     "MDAnalysis>=2.4",
