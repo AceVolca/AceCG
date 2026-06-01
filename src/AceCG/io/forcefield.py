@@ -339,14 +339,13 @@ def _select_lmpff_potential(
     value: BasePotential | List[BasePotential],
     style: str,
     key: InteractionKey,
+    occurrence: Optional[int] = None,
 ) -> BasePotential:
     pots = value if isinstance(value, list) else [value]
-    if len(pots) == 1:
+    if len(pots) == 1 and occurrence is None:
         return pots[0]
     style_norm = str(style).strip().lower()
     matches = [pot for pot in pots if style_norm in _lmpff_potential_style_labels(pot)]
-    if len(matches) == 1:
-        return matches[0]
     if not matches:
         available = sorted(
             {
@@ -359,6 +358,15 @@ def _select_lmpff_potential(
             f"No potential with style {style!r} found for {key.label()}. "
             f"Available styles: {available}"
         )
+    if occurrence is not None:
+        if occurrence < len(matches):
+            return matches[occurrence]
+        raise KeyError(
+            f"No occurrence {occurrence + 1} of style {style!r} found for {key.label()}. "
+            f"The template asks for at least {occurrence + 1}, but the forcefield has {len(matches)}."
+        )
+    if len(matches) == 1:
+        return matches[0]
     raise KeyError(
         f"Multiple potentials with style {style!r} found for {key.label()}; "
         "style-qualified LAMMPS writing is ambiguous."
@@ -558,6 +566,7 @@ def WriteLmpFF(
     with open(old_file, "r", encoding="utf-8") as f:
         lines = f.readlines()
 
+    pair_occurrences: Dict[Tuple[InteractionKey, str], int] = {}
     for i, line in enumerate(lines):
         if "pair_coeff" in line:
             tmp = line.split()
@@ -575,7 +584,15 @@ def WriteLmpFF(
 
             if pair_typ_sel is None or style in pair_typ_sel:
                 if lookup_key in forcefield:
-                    pot = _select_lmpff_potential(forcefield[lookup_key], style, lookup_key)
+                    occurrence_key = (lookup_key, str(style).strip().lower())
+                    occurrence = pair_occurrences.get(occurrence_key, 0)
+                    pair_occurrences[occurrence_key] = occurrence + 1
+                    pot = _select_lmpff_potential(
+                        forcefield[lookup_key],
+                        style,
+                        lookup_key,
+                        occurrence=occurrence,
+                    )
                     if style == "table":
                         table_token = tmp[param_offset]
                         source_table_file = table_token

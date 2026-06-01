@@ -45,10 +45,7 @@ class FMWorkflow(BaseWorkflow):
         logger.info("FM resource pool: %s", self.resource_pool)
         self._fm_runtime_specs: List[Dict[str, Any]] = []
         self.forcefield = self._build_fm_forcefield()
-        if self.config.system.forcefield_mask is not None:
-            self.forcefield.build_mask(init_mask=self._build_forcefield_mask(self.forcefield))
-        if self.config.system.forcefield_bounds is not None:
-            self._apply_forcefield_bounds(self.forcefield)
+        self._apply_forcefield_specs(self.forcefield)
         self._use_solver = self._should_use_solver()
         if self._use_solver:
             self.trainer_or_solver = self._build_solver()

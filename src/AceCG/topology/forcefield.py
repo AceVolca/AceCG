@@ -8,8 +8,8 @@ from __future__ import annotations
 import copy
 import fnmatch
 import re
-from collections.abc import Iterable, Mapping, MutableMapping
-from typing import Dict, Generator, Iterator, List, Optional, Tuple
+from collections.abc import Iterable, Mapping, MutableMapping, Sequence
+from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -665,6 +665,135 @@ class Forcefield(MutableMapping):
             lines.append("(no parameters to display)")
         return "\n".join(lines)
 
+    def apply_mask_spec(self, mask_spec: Any) -> np.ndarray:
+        """Apply a parsed forcefield mask spec to potential-local masks."""
+        param_mask = self.param_mask.copy()
+        if not mask_spec:
+            self.param_mask = param_mask
+            return param_mask
+
+        blocks = self._forcefield_style_blocks()
+        for entry in mask_spec.entries:
+            if len(entry) == 2:
+                key, payload = entry
+                potential_style = None
+            else:
+                key, potential_style, payload = entry
+
+            block_info = blocks.get(key)
+            if block_info is None:
+                raise KeyError(
+                    f"Mask entry for {key.label()} does not match any interaction "
+                    "in the current forcefield."
+                )
+
+            if potential_style is None:
+                block = block_info["slice"]
+                param_mask[block] = self._parse_local_mask_spec(
+                    payload,
+                    block.stop - block.start,
+                    key,
+                    potential_style,
+                )
+                continue
+
+            style_norm = str(potential_style).strip().lower()
+            matches = [
+                segment
+                for segment in block_info["segments"]
+                if style_norm in segment["styles"]
+            ]
+            if not matches:
+                self._raise_missing_style("Mask", key, potential_style, block_info)
+
+            local_size = sum(segment["slice"].stop - segment["slice"].start for segment in matches)
+            local_mask = self._parse_local_mask_spec(payload, local_size, key, potential_style)
+            local_offset = 0
+            for segment in matches:
+                sl = segment["slice"]
+                n_local = sl.stop - sl.start
+                param_mask[sl] = local_mask[local_offset:local_offset + n_local]
+                local_offset += n_local
+
+        self.param_mask = param_mask
+        return param_mask
+
+    def apply_bounds_spec(self, bounds_spec: Any, *, clamp: bool = True) -> Tuple[np.ndarray, np.ndarray]:
+        """Apply a parsed forcefield bounds spec to potential-local bounds."""
+        lb, ub = self.param_bounds
+        lb = lb.copy()
+        ub = ub.copy()
+        if not bounds_spec:
+            self.param_bounds = (lb, ub)
+            return lb, ub
+
+        blocks = self._forcefield_style_blocks()
+        for key, potential_style, lb_tokens, ub_tokens in bounds_spec.entries:
+            block_info = blocks.get(key)
+            if block_info is None:
+                raise KeyError(
+                    f"Bounds entry for {key.label()} does not match any interaction "
+                    "in the current forcefield."
+                )
+
+            if potential_style is None:
+                self._apply_bound_tokens_to_slices(
+                    [block_info["slice"]],
+                    lb,
+                    ub,
+                    key,
+                    None,
+                    lb_tokens,
+                    ub_tokens,
+                )
+                continue
+
+            style_norm = str(potential_style).strip().lower()
+            matches = [
+                segment
+                for segment in block_info["segments"]
+                if style_norm in segment["styles"]
+            ]
+            if not matches:
+                self._raise_missing_style("Bounds", key, potential_style, block_info)
+
+            self._apply_bound_tokens_to_slices(
+                [segment["slice"] for segment in matches],
+                lb,
+                ub,
+                key,
+                potential_style,
+                lb_tokens,
+                ub_tokens,
+            )
+
+        if np.any(lb > ub):
+            bad = int(np.flatnonzero(lb > ub)[0])
+            raise ValueError(
+                f"Forcefield bounds lower entry exceeds upper entry at parameter index {bad}: "
+                f"lb={lb[bad]}, ub={ub[bad]}."
+            )
+
+        self.param_bounds = (lb, ub)
+        if clamp:
+            self.update_params(self.apply_bounds(self.param_array()))
+        return lb, ub
+
+    def apply_specs(
+        self,
+        *,
+        mask_spec: Any = None,
+        bounds_spec: Any = None,
+        clamp_bounds: bool = True,
+    ) -> Dict[str, Any]:
+        """Apply parsed mask and bounds specs returned by the LAMMPS readers."""
+        result: Dict[str, Any] = {}
+        if mask_spec is not None:
+            result["mask"] = self.apply_mask_spec(mask_spec)
+        if bounds_spec is not None:
+            result["bounds"] = self.apply_bounds_spec(bounds_spec, clamp=clamp_bounds)
+        return result
+
     # ------------------------------------------------------------------
     # Deep copy
     # ------------------------------------------------------------------
@@ -809,6 +938,231 @@ class Forcefield(MutableMapping):
             offset += n
         signature = tuple(signature_parts) if signature_valid else None
         return signature, key_mask
+
+    def _forcefield_style_blocks(self) -> Dict[InteractionKey, Dict[str, Any]]:
+        blocks: Dict[InteractionKey, Dict[str, Any]] = {}
+        offset = 0
+        for key, val in self._data.items():
+            pots = val if isinstance(val, list) else [val]
+            block_start = offset
+            segments = []
+            for pot_index, pot in enumerate(pots):
+                n_local = pot.n_params()
+                segments.append(
+                    {
+                        "slice": slice(offset, offset + n_local),
+                        "styles": self._potential_style_labels(pot),
+                        "pot_index": pot_index,
+                    }
+                )
+                offset += n_local
+            blocks[key] = {"slice": slice(block_start, offset), "segments": segments}
+        return blocks
+
+    @staticmethod
+    def _potential_style_labels(potential: Any) -> set[str]:
+        def explicit_labels(obj: Any) -> set[str]:
+            labels: set[str] = set()
+            for attr in ("_acecg_lammps_style", "_acecg_style", "lammps_style"):
+                value = getattr(obj, attr, None)
+                if callable(value):
+                    value = value()
+                if value is None:
+                    continue
+                if isinstance(value, str):
+                    labels.add(value.strip().lower())
+                elif isinstance(value, Sequence):
+                    labels.update(str(item).strip().lower() for item in value)
+            return {label for label in labels if label}
+
+        labels = explicit_labels(potential)
+        wrapped = getattr(potential, "potential", None)
+        if wrapped is None:
+            wrapped = getattr(potential, "base", None)
+        if wrapped is not None and wrapped is not potential:
+            labels.update(explicit_labels(wrapped))
+        if labels:
+            return labels
+
+        from ..potentials import POTENTIAL_REGISTRY
+
+        targets = [potential]
+        if wrapped is not None and wrapped is not potential:
+            targets.insert(0, wrapped)
+        inferred: set[str] = set()
+        for target in targets:
+            for style, cls in POTENTIAL_REGISTRY.items():
+                if isinstance(target, cls):
+                    inferred.add(str(style).strip().lower())
+            if type(target).__name__ == "BSplinePotential":
+                inferred.add("table")
+        return inferred
+
+    @staticmethod
+    def _entry_label(key: Any, potential_style: Optional[str]) -> str:
+        label = key.label() if hasattr(key, "label") else str(key)
+        return f"{label} {potential_style}" if potential_style else label
+
+    def _raise_missing_style(
+        self,
+        label_kind: str,
+        key: Any,
+        potential_style: Optional[str],
+        block_info: Dict[str, Any],
+    ) -> None:
+        available = sorted(
+            {
+                style
+                for segment in block_info["segments"]
+                for style in segment["styles"]
+            }
+        )
+        raise KeyError(
+            f"{label_kind} entry for {key.label()} style {potential_style!r} "
+            f"does not match any potential in the current forcefield. "
+            f"Available styles: {available}"
+        )
+
+    def _parse_local_mask_spec(
+        self,
+        payload: tuple[str, ...],
+        size: int,
+        key: Any,
+        potential_style: Optional[str] = None,
+    ) -> np.ndarray:
+        if not payload:
+            return np.ones(size, dtype=bool)
+
+        true_tokens = {"1", "true", "yes", "on"}
+        false_tokens = {"0", "false", "no", "off"}
+
+        mode = payload[0].strip().lower()
+        if mode in {"mask", "unmask"}:
+            index_tokens = tuple(str(token).strip().lower() for token in payload[1:])
+            if not index_tokens:
+                raise ValueError(
+                    f"{self._entry_label(key, potential_style)} uses '{mode}' "
+                    "but provides no index range."
+                )
+            spec = ",".join(index_tokens).strip()
+            if spec == "all":
+                selected = np.ones(size, dtype=bool)
+            elif spec == "none":
+                selected = np.zeros(size, dtype=bool)
+            else:
+                selected = np.zeros(size, dtype=bool)
+                all_idx = np.arange(size, dtype=np.int64)
+                fields = []
+                for token in index_tokens:
+                    fields.extend(part.strip() for part in token.split(",") if part.strip())
+                for field in fields:
+                    if ":" in field:
+                        start_text, stop_text = field.split(":", 1)
+                        start = int(start_text) if start_text else None
+                        stop = int(stop_text) if stop_text else None
+                        selected[all_idx[slice(start, stop)]] = True
+                        continue
+                    idx = int(field)
+                    if idx < 0:
+                        idx += size
+                    if idx < 0 or idx >= size:
+                        raise IndexError(
+                            f"Mask index {field!r} is out of range for "
+                            f"{self._entry_label(key, potential_style)} with {size} parameters."
+                        )
+                    selected[idx] = True
+            local_mask = np.ones(size, dtype=bool) if mode == "mask" else np.zeros(size, dtype=bool)
+            local_mask[selected] = mode == "unmask"
+            return local_mask
+
+        values = []
+        for token in payload:
+            lowered = token.strip().lower()
+            if lowered in true_tokens:
+                values.append(True)
+                continue
+            if lowered in false_tokens:
+                values.append(False)
+                continue
+            raise ValueError(
+                f"Invalid mask payload for {self._entry_label(key, potential_style)}: {payload!r}"
+            )
+        local_mask = np.asarray(values, dtype=bool)
+        if local_mask.shape != (size,):
+            raise ValueError(
+                f"{self._entry_label(key, potential_style)} mask length {local_mask.size} "
+                f"does not match the current parameter block size {size}."
+            )
+        return local_mask
+
+    def _parse_bound_tokens(
+        self,
+        tokens: tuple[str, ...],
+        size: int,
+        *,
+        lower: bool,
+        key: Any,
+        potential_style: Optional[str],
+    ) -> Optional[np.ndarray]:
+        if not tokens:
+            return None
+        if len(tokens) != size:
+            side = "lb" if lower else "ub"
+            raise ValueError(
+                f"{self._entry_label(key, potential_style)} {side} length {len(tokens)} "
+                f"does not match the current parameter block size {size}."
+            )
+
+        none_tokens = {"none", "null", "na", "n/a", "*"}
+        values = []
+        for token in tokens:
+            lowered = str(token).strip().lower()
+            if lowered in none_tokens:
+                values.append(-np.inf if lower else np.inf)
+                continue
+            try:
+                values.append(float(token))
+            except ValueError as exc:
+                side = "lb" if lower else "ub"
+                raise ValueError(
+                    f"Invalid {side} token {token!r} for "
+                    f"{self._entry_label(key, potential_style)}."
+                ) from exc
+        return np.asarray(values, dtype=float)
+
+    def _apply_bound_tokens_to_slices(
+        self,
+        slices: list[slice],
+        lb: np.ndarray,
+        ub: np.ndarray,
+        key: Any,
+        potential_style: Optional[str],
+        lb_tokens: tuple[str, ...],
+        ub_tokens: tuple[str, ...],
+    ) -> None:
+        local_size = sum(sl.stop - sl.start for sl in slices)
+        local_lb = self._parse_bound_tokens(
+            lb_tokens,
+            local_size,
+            lower=True,
+            key=key,
+            potential_style=potential_style,
+        )
+        local_ub = self._parse_bound_tokens(
+            ub_tokens,
+            local_size,
+            lower=False,
+            key=key,
+            potential_style=potential_style,
+        )
+        local_offset = 0
+        for sl in slices:
+            n_local = sl.stop - sl.start
+            if local_lb is not None:
+                lb[sl] = local_lb[local_offset:local_offset + n_local]
+            if local_ub is not None:
+                ub[sl] = local_ub[local_offset:local_offset + n_local]
+            local_offset += n_local
 
     @staticmethod
     def _potential_bounds(pot: BasePotential) -> Tuple[np.ndarray, np.ndarray]:
