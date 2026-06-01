@@ -97,6 +97,7 @@ AceCG/	# Main package root
 │	│	├── cdfm.py	# Conditional force-matching trainer
 │	│	├── cdrem.py	# Conditional/latent relative-entropy trainer
 │	│	├── fm.py	# Force-matching gradient trainer
+│	│	├── l_zero.py	# Expected-L0 hard-concrete gate trainer
 │	│	├── mse.py	# PMF-matching MSE trainer
 │	│	├── multi.py	# Meta-trainer combining multiple trainers
 │	│	└── rem.py	# Relative entropy minimization trainer

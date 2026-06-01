@@ -16,7 +16,7 @@ The trainer layer sits above `compute/` and next to `solvers/`. It consumes work
 | `trainers/analytic/fm.py` | Iterative FM/DSM trainer consuming the standard FM reducer payload |
 | `trainers/analytic/cdrem.py` | Latent-variable CDREM trainer |
 | `trainers/analytic/cdfm.py` | CDFM gradient consumer with EM guardrail handling |
-| `trainers/analytic/l0.py` | First-order L0 gate trainer for `GatedPotential` forcefields |
+| `trainers/analytic/l_zero.py` | First-order L0 gate trainer for `GatedPotential` forcefields |
 | `trainers/analytic/multi.py` | Meta-trainer that combines multiple child trainers |
 | `trainers/autodiff/` | Placeholder package for future autodiff trainers |
 
