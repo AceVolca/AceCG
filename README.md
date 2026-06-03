@@ -26,7 +26,7 @@ Use a compute node for MPI, LAMMPS, production runs, and long test suites.
 ## Latest update
 
 - 06/02/2026, Weizhi: Source code cleanup, ready for pypi release
-- 06/01/2026, Ace: TODO here
+- 06/01/2026, Ace: bound & mask apply_spec() moved to forcefield class; WriteLmpFF supports multiple potentials of the same style for pairs
 - 05/24/2026, Weizhi: Merged several new functionalities, including on-the-fly validation simulations (Weizhi), L0 gate utilities (Ace), mask & bound utilities (Ace & Weizhi), coordinate masks for REM diagnostics (Zhikun), etc.
 - 05/06/2026, Ace: Added potential-local mask/bounds metadata (Ace, Weizhi), versioned Forcefield metadata caching (Weizhi), hard-concrete L0 gate utilities (Ace).
 - 05/05/2026, Weizhi: Added DSM, noisy FM, mixed noisy FM, noisy REM, batch compute backends, and gauge-free gradient support (Zhikun).
