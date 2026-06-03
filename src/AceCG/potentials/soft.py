@@ -59,6 +59,25 @@ class SoftPotential(BasePotential):
         values = A * (np.pi / cutoff) * np.sin(np.pi * r / cutoff)
         return np.where(r < cutoff, values, 0.0)
 
+    def force_grad(self, r):
+        """Return the explicit force Jacobian ``dF/d[A, r_c]``."""
+        r_arr = np.asarray(r, dtype=float)
+        A = float(self._params[0])
+        cutoff = self.cutoff
+        phase = np.pi * r_arr / cutoff
+        active = r_arr < cutoff
+        grad = np.empty(r_arr.shape + (2,), dtype=float)
+        grad[..., 0] = np.where(active, np.pi * np.sin(phase) / cutoff, 0.0)
+        grad[..., 1] = np.where(
+            active,
+            -A * np.pi * (
+                np.sin(phase) / cutoff**2
+                + np.pi * r_arr * np.cos(phase) / cutoff**3
+            ),
+            0.0,
+        )
+        return grad
+
     def dA(self, r):
         """Return ``dU/dA`` evaluated at ``r``."""
         r = np.asarray(r, dtype=float)

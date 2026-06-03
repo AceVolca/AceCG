@@ -9,7 +9,7 @@ import numpy as np
 
 from ..topology.forcefield import Forcefield
 from ..topology.types import InteractionKey
-from .frame_geometry import FrameGeometry, _min_image_batch
+from .frame_geometry import FrameGeometry, _geometry_sample_shape, _min_image_batch
 
 RAD2DEG = 180.0 / np.pi
 
@@ -83,13 +83,6 @@ def _slice_observed_force_batch(
             "reference_force batch does not match either the observed or full force-row shape."
         )
     return arr[:, rows]
-
-
-def _geometry_sample_shape(geom: FrameGeometry) -> tuple[int, ...]:
-    positions = np.asarray(geom.positions)
-    if positions.ndim < 2:
-        return ()
-    return tuple(positions.shape[:-2])
 
 
 def _flat_sample_count(sample_shape: tuple[int, ...]) -> int:

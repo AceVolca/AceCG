@@ -90,7 +90,6 @@ class LaunchSpec:
     argv: tuple[str, ...]
     env_add: dict[str, str] = field(default_factory=dict)
     env_strip_prefixes: tuple[str, ...] = ("PMI_",)
-    cwd: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -140,14 +139,6 @@ def _is_local(placement: Placement) -> bool:
         return False
     local = socket.gethostname().split(".")[0]
     return placement.slices[0].host in (local, "localhost", "127.0.0.1")
-
-
-def _cpu_mask_hex(cpu_ids: tuple[int, ...]) -> str:
-    """Build a hexadecimal CPU mask from core IDs for ``--cpu-bind``."""
-    mask = 0
-    for c in cpu_ids:
-        mask |= 1 << c
-    return f"0x{mask:x}"
 
 
 # ---------------------------------------------------------------------------
@@ -262,11 +253,6 @@ class IntelMpiBackend(MpiBackend):
         self._libpmi2_path: str | None = _find_libpmi2()
         self._srun_path: str | None = shutil.which("srun")
         self._slurm_conf: str = _find_slurm_conf()
-
-    @property
-    def _srun_bootstrap(self) -> bool:
-        """SSH bootstrap does not need whole-node placement."""
-        return False
 
     def realize(
         self,
@@ -429,11 +415,6 @@ class IntelMpiBackend(MpiBackend):
         return LaunchSpec(argv=argv, env_add={})
 
 
-# Backward-compat aliases.
-IntelSlurmBackend = IntelMpiBackend
-IntelHydraSlurmBackend = IntelMpiBackend
-
-
 # ---------------------------------------------------------------------------
 # OpenMPI
 # ---------------------------------------------------------------------------
@@ -574,10 +555,6 @@ class OpenMpiBackend(MpiBackend):
         return LaunchSpec(argv=argv, env_add={})
 
 
-# Backward-compat alias.
-OpenMPISlurmBackend = OpenMpiBackend
-
-
 # ---------------------------------------------------------------------------
 # MPICH
 # ---------------------------------------------------------------------------
@@ -713,10 +690,6 @@ class MpichBackend(MpiBackend):
             *payload_cmd,
         )
         return LaunchSpec(argv=argv, env_add={})
-
-
-# Backward-compat alias.
-MPICHSlurmBackend = MpichBackend
 
 
 # ---------------------------------------------------------------------------

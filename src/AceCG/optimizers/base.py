@@ -38,7 +38,7 @@ class BaseOptimizer(ABC):
         self.L = L.copy()
         self.mask = mask.copy()
         self.lr = lr
-    
+
     def set_params(self, L_new: np.ndarray):
         """
         Update the internal parameter vector L.

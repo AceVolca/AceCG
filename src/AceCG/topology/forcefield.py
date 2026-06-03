@@ -8,12 +8,17 @@ from __future__ import annotations
 import copy
 import fnmatch
 import re
-from collections.abc import Iterable, Mapping, MutableMapping, Sequence
+from collections.abc import Iterable, Mapping, MutableMapping
 from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple
 
 import numpy as np
 
-from ..potentials.base import BasePotential
+from ..potentials.base import (
+    BasePotential,
+    potential_bounds,
+    potential_mask,
+    potential_style_labels,
+)
 from .types import InteractionKey
 
 Pattern = str
@@ -894,21 +899,7 @@ class Forcefield(MutableMapping):
 
     def _collect_potential_masks(self) -> np.ndarray:
         """Concatenate potential-local trainability masks."""
-        parts: List[np.ndarray] = []
-        for _, pot in self.iter_potentials():
-            mask = getattr(pot, "param_mask", None)
-            if mask is None:
-                mask = np.ones(pot.n_params(), dtype=bool)
-            elif callable(mask):
-                mask = mask()
-            mask = np.asarray(mask, dtype=bool).reshape(-1)
-            n = pot.n_params()
-            if mask.shape != (n,):
-                raise ValueError(
-                    f"param_mask shape mismatch for {type(pot).__name__}: "
-                    f"expected {(n,)}, got {mask.shape}"
-                )
-            parts.append(mask)
+        parts = [potential_mask(pot) for _, pot in self.iter_potentials()]
         return np.concatenate(parts) if parts else np.empty(0, dtype=bool)
 
     def _assign_potential_masks(
@@ -951,52 +942,13 @@ class Forcefield(MutableMapping):
                 segments.append(
                     {
                         "slice": slice(offset, offset + n_local),
-                        "styles": self._potential_style_labels(pot),
+                        "styles": potential_style_labels(pot),
                         "pot_index": pot_index,
                     }
                 )
                 offset += n_local
             blocks[key] = {"slice": slice(block_start, offset), "segments": segments}
         return blocks
-
-    @staticmethod
-    def _potential_style_labels(potential: Any) -> set[str]:
-        def explicit_labels(obj: Any) -> set[str]:
-            labels: set[str] = set()
-            for attr in ("_acecg_lammps_style", "_acecg_style", "lammps_style"):
-                value = getattr(obj, attr, None)
-                if callable(value):
-                    value = value()
-                if value is None:
-                    continue
-                if isinstance(value, str):
-                    labels.add(value.strip().lower())
-                elif isinstance(value, Sequence):
-                    labels.update(str(item).strip().lower() for item in value)
-            return {label for label in labels if label}
-
-        labels = explicit_labels(potential)
-        wrapped = getattr(potential, "potential", None)
-        if wrapped is None:
-            wrapped = getattr(potential, "base", None)
-        if wrapped is not None and wrapped is not potential:
-            labels.update(explicit_labels(wrapped))
-        if labels:
-            return labels
-
-        from ..potentials import POTENTIAL_REGISTRY
-
-        targets = [potential]
-        if wrapped is not None and wrapped is not potential:
-            targets.insert(0, wrapped)
-        inferred: set[str] = set()
-        for target in targets:
-            for style, cls in POTENTIAL_REGISTRY.items():
-                if isinstance(target, cls):
-                    inferred.add(str(style).strip().lower())
-            if type(target).__name__ == "BSplinePotential":
-                inferred.add("table")
-        return inferred
 
     @staticmethod
     def _entry_label(key: Any, potential_style: Optional[str]) -> str:
@@ -1033,8 +985,7 @@ class Forcefield(MutableMapping):
         if not payload:
             return np.ones(size, dtype=bool)
 
-        true_tokens = {"1", "true", "yes", "on"}
-        false_tokens = {"0", "false", "no", "off"}
+        from ..configs.utils import parse_bool_token
 
         mode = payload[0].strip().lower()
         if mode in {"mask", "unmask"}:
@@ -1077,16 +1028,12 @@ class Forcefield(MutableMapping):
 
         values = []
         for token in payload:
-            lowered = token.strip().lower()
-            if lowered in true_tokens:
-                values.append(True)
-                continue
-            if lowered in false_tokens:
-                values.append(False)
-                continue
-            raise ValueError(
-                f"Invalid mask payload for {self._entry_label(key, potential_style)}: {payload!r}"
-            )
+            parsed = parse_bool_token(token)
+            if parsed is None:
+                raise ValueError(
+                    f"Invalid mask payload for {self._entry_label(key, potential_style)}: {payload!r}"
+                )
+            values.append(parsed)
         local_mask = np.asarray(values, dtype=bool)
         if local_mask.shape != (size,):
             raise ValueError(
@@ -1164,36 +1111,12 @@ class Forcefield(MutableMapping):
                 ub[sl] = local_ub[local_offset:local_offset + n_local]
             local_offset += n_local
 
-    @staticmethod
-    def _potential_bounds(pot: BasePotential) -> Tuple[np.ndarray, np.ndarray]:
-        """Return local bounds from either property-style or method-style APIs."""
-        bounds = getattr(pot, "param_bounds", None)
-        if bounds is None:
-            n = pot.n_params()
-            return np.full(n, -np.inf, dtype=float), np.full(n, np.inf, dtype=float)
-        if callable(bounds):
-            bounds = bounds()
-        lb, ub = bounds
-        lb = np.asarray(lb, dtype=float).reshape(-1)
-        ub = np.asarray(ub, dtype=float).reshape(-1)
-        n = pot.n_params()
-        if lb.shape != (n,) or ub.shape != (n,):
-            raise ValueError(
-                f"param_bounds shape mismatch for {type(pot).__name__}: "
-                f"expected {(n,)}, got lb={lb.shape}, ub={ub.shape}"
-            )
-        if np.any(lb > ub):
-            raise ValueError(
-                f"param_bounds lower entries cannot exceed upper entries for {type(pot).__name__}."
-            )
-        return lb, ub
-
     def _collect_potential_bounds(self) -> Tuple[np.ndarray, np.ndarray]:
         """Concatenate potential-local lower/upper bounds."""
         lb_parts: List[np.ndarray] = []
         ub_parts: List[np.ndarray] = []
         for _, pot in self.iter_potentials():
-            pot_lb, pot_ub = self._potential_bounds(pot)
+            pot_lb, pot_ub = potential_bounds(pot)
             lb_parts.append(pot_lb)
             ub_parts.append(pot_ub)
         if not lb_parts:

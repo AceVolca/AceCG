@@ -18,7 +18,6 @@ import random
 import re
 import shlex
 import shutil
-import warnings
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -28,7 +27,7 @@ import numpy as np
 
 from ..configs.models import ACGConfig
 from ..configs.parser import _parse_scalar_or_literal, parse_acg_file
-from ..configs.utils import parse_pair_style_options
+from ..configs.utils import parse_pair_style_options, resolve_config_path
 from ..io.forcefield import WriteLmpFF
 from ..optimizers import (
     AdamMaskedOptimizer,
@@ -210,12 +209,7 @@ class BaseWorkflow(ABC):
         return Path.cwd().resolve()
 
     def _resolve_config_path(self, value: Any) -> Optional[Path]:
-        if value is None:
-            return None
-        path = Path(value).expanduser()
-        if not path.is_absolute():
-            path = self._config_base_dir() / path
-        return path.resolve(strict=False)
+        return resolve_config_path(value, self._config_base_dir())
 
     def _glob_config_paths(self, pattern: Optional[str]) -> list[Path]:
         if pattern is None:
@@ -348,17 +342,16 @@ class BaseWorkflow(ABC):
     def _core_bounds_from_pool(
         resource_pool: ResourcePool,
         explicit_ncores: Optional[int],
-    ) -> tuple[int, int, int, int]:
+    ) -> tuple[int, int, int]:
         hosts = resource_pool.hosts
         if not hosts:
             raise RuntimeError("resource_pool has no hosts")
         if explicit_ncores is not None:
             n = int(explicit_ncores)
-            return n, n, n, n
+            return n, n, n
         max_host = max(h.n_cpus for h in hosts)
         min_host = min(h.n_cpus for h in hosts)
-        total = sum(h.n_cpus for h in hosts)
-        return max_host, min_host, max_host, total
+        return max_host, min_host, max_host
 
     def _build_validation_task(
         self,
@@ -400,7 +393,7 @@ class BaseWorkflow(ABC):
         plan = state.replica_plans[0]
         self._copy_forcefield_bundle_to_run(ff_dir, plan.run_dir)
 
-        cpu, min_cores, pref_cores, max_cores = self._core_bounds_from_pool(
+        cpu, min_cores, pref_cores = self._core_bounds_from_pool(
             scheduler_pool,
             self.config.validation.ncores,
         )
@@ -412,7 +405,6 @@ class BaseWorkflow(ABC):
             cpu_cores=cpu,
             min_cores=min_cores,
             preferred_cores=pref_cores,
-            max_cores=max_cores,
             sim_input=plan.input_script_path.name,
             sim_backend=self.config.validation.sim_backend,
             sim_var=dict(self.config.validation.sim_var),
@@ -568,13 +560,6 @@ class BaseWorkflow(ABC):
         if sim_cmd is None:
             cmd = cfg.sampling.engine_command
             sim_cmd = shlex.split(cmd) if cmd else []
-        if cfg.scheduler.launcher not in (None, ""):
-            warnings.warn(
-                "SchedulerConfig.launcher is deprecated and ignored. AceCG now "
-                "auto-detects the MPI backend from scheduler.mpirun_path or PATH.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         mpirun_path = cfg.scheduler.mpirun_path or None
         raw_hosts = cfg.scheduler.extras.get("explicit_hosts")
         explicit_hosts = [

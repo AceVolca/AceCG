@@ -1,4 +1,4 @@
-# AceCG/utils/ffio.py
+"""Shared math kernels for the Gaussian table fitters."""
 import numpy as np
 from scipy.optimize import lsq_linear
 from typing import Dict, Optional

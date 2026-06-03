@@ -12,7 +12,7 @@ import MDAnalysis as mda
 
 from ..configs.models import ACGConfig
 from ..configs.parser import parse_acg_file
-from ..configs.utils import parse_pair_style_options
+from ..configs.utils import parse_pair_style_options, resolve_config_path
 from ..io.forcefield import ReadLmpFF, WriteLmpFF
 from ..io.logger import get_screen_logger
 from ..potentials.boundary_prior import apply_boundary_prior
@@ -146,13 +146,8 @@ def _optional_markdown_float(value: str) -> float | None:
 
 
 def _resolve_config_path(config: ACGConfig, value: Any) -> Optional[Path]:
-    if value is None:
-        return None
-    path = Path(value).expanduser()
-    if not path.is_absolute():
-        base = config.path.parent if config.path is not None else Path.cwd()
-        path = base / path
-    return path.resolve(strict=False)
+    base = config.path.parent if config.path is not None else Path.cwd()
+    return resolve_config_path(value, base)
 
 
 if __name__ == "__main__":

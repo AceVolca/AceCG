@@ -153,13 +153,41 @@ def make_bead_positions_whole(positions_A: np.ndarray, dimensions: np.ndarray) -
     return ref + dr_mic
 
 
-def wrap_positions_in_box(coords_A: np.ndarray, box_A: np.ndarray) -> np.ndarray:
-    """
-    Wrap coordinates into the primary unit cell.
+def wrap_positions_in_box(positions: np.ndarray, box: np.ndarray) -> np.ndarray:
+    """Wrap positions into the primary unit cell.
 
-    Uses MDAnalysis apply_PBC which supports orthorhombic and triclinic boxes.
+    Accepts a single frame ``(n_atoms, 3)`` with box ``(6,)`` or a batch
+    ``(..., n_atoms, 3)`` with per-sample boxes ``(..., 6)`` in MDAnalysis
+    ``[lx, ly, lz, alpha, beta, gamma]`` (Å/deg) format. ``box`` may also be a
+    single ``(6,)`` broadcast across a batch.
+
+    Orthorhombic boxes (all angles 90°, or length-only boxes) take a fast
+    per-axis modulo that vectorizes over the whole batch; triclinic boxes fall
+    back to MDAnalysis ``apply_PBC`` (looped per frame). A box with any
+    non-positive length is treated as absent and the positions are returned
+    unchanged.
     """
-    return apply_PBC(coords_A.astype(float), box=box_A.astype(float))
+    pos = np.asarray(positions, dtype=np.float64)
+    box_arr = np.asarray(box, dtype=np.float64)
+    lengths = box_arr[..., :3]
+    if np.any(lengths <= 0.0):
+        return positions
+    orthorhombic = box_arr.shape[-1] < 6 or bool(np.allclose(box_arr[..., 3:6], 90.0))
+    if orthorhombic:
+        # Per-axis modulo; ``lengths[..., None, :]`` broadcasts the box over the
+        # atom axis for both single ``(n,3)`` and batched ``(...,n,3)`` inputs.
+        return np.mod(pos, lengths[..., None, :])
+    # Triclinic-correct path via MDAnalysis apply_PBC.
+    if pos.ndim <= 2:
+        return apply_PBC(pos, box=box_arr)
+    flat_pos = pos.reshape((-1,) + pos.shape[-2:])
+    flat_box = np.broadcast_to(
+        box_arr, pos.shape[:-2] + (box_arr.shape[-1],)
+    ).reshape((-1, box_arr.shape[-1]))
+    out = np.empty_like(flat_pos)
+    for i in range(flat_pos.shape[0]):
+        out[i] = apply_PBC(flat_pos[i], box=flat_box[i])
+    return out.reshape(pos.shape)
 
 def bead_position_and_mass(
     u: mda.Universe,

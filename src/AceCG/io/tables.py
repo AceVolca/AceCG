@@ -150,9 +150,6 @@ def parse_lammps_table(table_path: str | Path):
     return r, v, f
 
 
-parse_lmp_table = parse_lammps_table
-
-
 def write_lammps_table(
     filename: str | Path,
     r: np.ndarray,
@@ -731,7 +728,6 @@ def cap_table_forces(
 
 __all__ = [
     "parse_lammps_table",
-    "parse_lmp_table",
     "integrate_force_to_potential",
     "constant_force_extrapolate",
     "export_grid",

@@ -383,10 +383,6 @@ class BSplinePotential(BasePotential):
             return self.gauge_free_energy_grad_sum_by_sample(r_arr)
         return self._energy_grad_sum_1d(r_arr, include_gauge=False)
 
-    def is_gauge_free_energy_grad_cacheable(self) -> np.ndarray:
-        """Return an all-true mask for force-basis gauge-free channels."""
-        return np.ones(self.n_params(), dtype=bool)
-
     def energy_grad_sum_by_sample(
         self,
         r: np.ndarray,

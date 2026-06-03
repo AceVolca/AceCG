@@ -26,31 +26,26 @@ from AceCG.compute.frame_geometry import (
 )
 from AceCG.compute.mpi_engine import (
     FrameCache,
-    FrameObservables,
     MPIComputeEngine,
     TrajectoryCache,
-    TrajectoryObservablesCache,
     _write_rank_heartbeat,
+    build_default_engine,
 )
 from AceCG.compute.reducers import (
-    _REQUEST_FLAGS,
     consume_step_payload,
     finalize_step_root,
     init_step_state,
     local_step_partials,
     step_request,
 )
-from AceCG.compute.registry import build_default_engine
 from AceCG.potentials.bspline import BSplinePotential
 from AceCG.potentials.harmonic import HarmonicPotential
 from AceCG.topology.forcefield import Forcefield
 from AceCG.topology.types import InteractionKey
 
 
-def _request(**overrides):
-    request = {flag: False for flag in _REQUEST_FLAGS}
-    request.update(overrides)
-    return request
+def _request(*names):
+    return frozenset(names)
 
 
 class _DummyForcefield:
@@ -147,22 +142,22 @@ def test_compute_chunk_neighbor_mode_rebuilds_per_batch_chunk(monkeypatch):
 def test_dsm_reducer_requests_fm_stats_without_reference_force():
     request = step_request({"step_mode": "dsm"})
 
-    assert request["need_fm_stats"] is True
-    assert request["need_reference_force"] is False
+    assert "fm_stats" in request
+    assert "reference_force" not in request
 
 
 def test_rem_reducer_requests_gauge_free_gradient_but_cdrem_uses_physical():
     rem_request = step_request({"step_mode": "rem", "need_hessian": True})
     cdrem_request = step_request({"step_mode": "cdrem", "need_hessian": True})
 
-    assert rem_request["need_gauge_free_energy_grad"] is True
-    assert rem_request["need_gauge_free_energy_grad_outer"] is True
-    assert rem_request["need_energy_grad"] is False
-    assert rem_request["need_energy_grad_outer"] is False
+    assert "gauge_free_energy_grad" in rem_request
+    assert "gauge_free_energy_grad_outer" in rem_request
+    assert "energy_grad" not in rem_request
+    assert "energy_grad_outer" not in rem_request
 
-    assert cdrem_request["need_energy_grad"] is True
-    assert cdrem_request["need_energy_grad_outer"] is True
-    assert cdrem_request["need_gauge_free_energy_grad"] is False
+    assert "energy_grad" in cdrem_request
+    assert "energy_grad_outer" in cdrem_request
+    assert "gauge_free_energy_grad" not in cdrem_request
 
 
 def test_rem_reducer_consumes_gauge_free_payload_and_marks_convention():
@@ -905,7 +900,7 @@ class TestMPIComputeEngine:
         )
         ff = Forcefield({bond_key: [harmonic_bond]})
         result = engine.compute(
-            request=_request(need_force_value=True),
+            request=_request("force"),
             frame=(
                 0,
                 np.array([[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]], dtype=np.float64),
@@ -927,7 +922,7 @@ class TestMPIComputeEngine:
         )
         ff = Forcefield({bond_key: [harmonic_bond]})
         result = engine.compute(
-            request=_request(need_fm_stats=True),
+            request=_request("fm_stats"),
             frame=(
                 0,
                 np.array([[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]], dtype=np.float64),
@@ -944,7 +939,7 @@ class TestMPIComputeEngine:
         assert stats["n_frames"] == 1
         assert stats["weight_sum"] == pytest.approx(1.5)
 
-    def test_compute_need_frame_cache_uses_canonical_and_legacy_names(self, bond_key, harmonic_bond):
+    def test_compute_frame_cache_uses_canonical_and_observable_names(self, bond_key, harmonic_bond):
         engine = build_default_engine()
         topo = _bond_topo(
             bond_key,
@@ -954,7 +949,7 @@ class TestMPIComputeEngine:
         ff = Forcefield({bond_key: [harmonic_bond]})
 
         result = engine.compute(
-            request=_request(need_frame_cache=True),
+            request=_request("frame_cache"),
             frame=(
                 7,
                 np.array([[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]], dtype=np.float64),
@@ -966,64 +961,10 @@ class TestMPIComputeEngine:
             return_observables=True,
         )
 
-        assert FrameObservables is FrameCache
-        assert TrajectoryObservablesCache is TrajectoryCache
         assert result["frame_cache"] is result["frame_observables"]
         assert isinstance(result["frame_cache"], FrameCache)
         assert result["frame_cache"].frame_idx == 7
         np.testing.assert_allclose(result["frame_cache"].bond_distances[bond_key], [4.0])
-
-    def test_default_engine_has_registrations(self):
-        engine = build_default_engine()
-        for name in (
-            "fm_stats",
-            "fm_JtJ",
-            "fm_Jty",
-            "fm_y_sumsq",
-            "fm_Jtf",
-            "fm_f_sumsq",
-            "fm_fty",
-        ):
-            assert name in engine.registered_names
-        assert len(engine._registry) == 13
-
-    def test_fm_stat_registrations_match_fm_stats(self, bond_key, harmonic_bond):
-        engine = build_default_engine()
-        positions = np.array([[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]], dtype=np.float64)
-        box = np.array([100.0, 100.0, 100.0, 90.0, 90.0, 90.0], dtype=np.float64)
-        reference_force = np.array([1.0, 0.0, 0.0, -1.0, 0.0, 0.0], dtype=np.float64)
-        topo = _bond_topo(
-            bond_key,
-            bonds=np.array([[0, 1]], dtype=np.int64),
-            bond_key_index=np.array([0], dtype=np.int32),
-        )
-        ff = Forcefield({bond_key: [harmonic_bond]})
-        geom = compute_frame_geometry(positions, box, topo)
-        stats = force(
-            geom,
-            ff,
-            reference_force=reference_force,
-            frame_weight=2.0,
-            return_fm_stats=True,
-        )["fm_stats"]
-
-        for registered_name, raw_key in (
-            ("fm_JtJ", "JtJ"),
-            ("fm_Jty", "Jty"),
-            ("fm_y_sumsq", "yty"),
-            ("fm_Jtf", "Jtf"),
-            ("fm_f_sumsq", "ftf"),
-            ("fm_fty", "fTy"),
-        ):
-            np.testing.assert_allclose(
-                engine._registry[registered_name].fn(
-                    geom,
-                    ff,
-                    reference_force=reference_force,
-                    frame_weight=2.0,
-                ),
-                stats[raw_key],
-            )
 
     def test_engine_recomputes_geometry_each_call(self, bond_key, harmonic_bond, monkeypatch):
         engine = build_default_engine()
@@ -1045,13 +986,13 @@ class TestMPIComputeEngine:
 
         monkeypatch.setattr(mpi_engine_module, "compute_frame_geometry", counted)
         engine.compute(
-            request=_request(need_energy_grad=True),
+            request=_request("energy_grad"),
             frame=(frames[0][0], frames[0][1], frames[0][2], None),
             topology_arrays=topo,
             forcefield_snapshot=ff,
         )
         engine.compute(
-            request=_request(need_energy_grad=True),
+            request=_request("energy_grad"),
             frame=(frames[0][0], frames[0][1], frames[0][2], None),
             topology_arrays=topo,
             forcefield_snapshot=ff,
@@ -1074,11 +1015,7 @@ class TestMPIComputeEngine:
             bond_key_index=np.array([0], dtype=np.int32),
         )
         ff = Forcefield({bond_key: [harmonic_bond]})
-        request = _request(
-            need_energy_grad=True,
-            need_energy_hessian=True,
-            need_energy_grad_outer=True,
-        )
+        request = _request("energy_grad", "energy_hessian", "energy_grad_outer")
         weights = np.array([0.25, 0.75], dtype=np.float64)
 
         batch = engine.compute(
@@ -1129,10 +1066,7 @@ class TestMPIComputeEngine:
             bond_key_index=np.array([0], dtype=np.int32),
         )
         ff = Forcefield({bond_key: [_bonded_bspline()]})
-        request = _request(
-            need_gauge_free_energy_grad=True,
-            need_gauge_free_energy_grad_outer=True,
-        )
+        request = _request("gauge_free_energy_grad", "gauge_free_energy_grad_outer")
         weights = np.array([0.25, 0.75], dtype=np.float64)
 
         batch = engine.compute(
@@ -1183,7 +1117,7 @@ class TestMPIComputeEngine:
             bond_key_index=np.array([0], dtype=np.int32),
         )
         ff = Forcefield({bond_key: [harmonic_bond]})
-        request = _request(need_fm_stats=True, need_reference_force=True)
+        request = _request("fm_stats", "reference_force")
         reference_forces = np.array(
             [
                 [1.0, 0.0, 0.0, -1.0, 0.0, 0.0],
@@ -1294,7 +1228,7 @@ class TestMPIComputeEngine:
             bond_key_index=np.array([0], dtype=np.int32),
         )
         ff = Forcefield({bond_key: [harmonic_bond]})
-        request = _request(need_force_value=True, need_force_grad=True)
+        request = _request("force", "force_grad")
         weights = np.array([0.2, 0.3, 0.5], dtype=np.float64)
 
         batch = engine.compute(
@@ -1360,7 +1294,7 @@ class TestMPIComputeEngine:
         )
 
         engine.compute(
-            request=_request(need_energy_grad=True),
+            request=_request("energy_grad"),
             frame=(np.array([10, 10], dtype=np.int64), positions, box, None),
             topology_arrays=topo,
             forcefield_snapshot=ff,
@@ -1388,11 +1322,7 @@ class TestMPIComputeEngine:
             bond_key_index=np.array([0], dtype=np.int32),
         )
         ff = Forcefield({bond_key: [harmonic_bond]})
-        request = _request(
-            need_force_value=True,
-            need_force_grad=True,
-            need_energy_grad=True,
-        )
+        request = _request("force", "force_grad", "energy_grad")
         weights = np.array([0.2, 0.3, 0.5], dtype=np.float64)
         step = {
             "step_mode": "cdfm_zbx",
@@ -1455,7 +1385,7 @@ class TestMPIComputeEngine:
 
         with pytest.raises(ValueError, match="frame-cache"):
             engine.compute(
-                request=_request(need_frame_cache=True),
+                request=_request("frame_cache"),
                 frame=(np.array([0], dtype=np.int64), positions, box, None),
                 topology_arrays=topo,
                 forcefield_snapshot=ff,
@@ -1754,11 +1684,7 @@ class TestIntegration:
             payload = pickle.load(handle)
 
         expected = build_default_engine().compute(
-            request=_request(
-                need_energy_grad=True,
-                need_energy_hessian=True,
-                need_energy_grad_outer=True,
-            ),
+            request=_request("energy_grad", "energy_hessian", "energy_grad_outer"),
             frame=(0, positions, box, None),
             topology_arrays=topo,
             forcefield_snapshot=ff,
@@ -1846,7 +1772,7 @@ class TestIntegration:
             payload = pickle.load(handle)
 
         expected = build_default_engine().compute(
-            request=_request(need_fm_stats=True, need_reference_force=True),
+            request=_request("fm_stats", "reference_force"),
             frame=(0, positions, box, reference_forces),
             topology_arrays=topo,
             forcefield_snapshot=ff,

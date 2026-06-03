@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Dict, Generator, List, Tuple
+from collections.abc import Sequence
+from typing import Any, Dict, Generator, List, Tuple
 import copy as cp
 import numpy as np
 
@@ -26,6 +27,93 @@ def IteratePotentials(
                 yield key, pot
         else:
             yield key, val
+
+
+def potential_style_labels(pot: Any) -> set[str]:
+    """LAMMPS-style labels used to select one potential from an overlay stack.
+
+    Reads explicit ``_acecg_lammps_style`` / ``_acecg_style`` / ``lammps_style``
+    attributes (also on a wrapped ``.potential`` or ``.base``), then falls back
+    to ``POTENTIAL_REGISTRY`` membership; ``BSplinePotential`` maps to ``"table"``.
+    """
+
+    def explicit_labels(obj: Any) -> set[str]:
+        labels: set[str] = set()
+        for attr in ("_acecg_lammps_style", "_acecg_style", "lammps_style"):
+            value = getattr(obj, attr, None)
+            if callable(value):
+                value = value()
+            if value is None:
+                continue
+            if isinstance(value, str):
+                labels.add(value.strip().lower())
+            elif isinstance(value, Sequence):
+                labels.update(str(item).strip().lower() for item in value)
+        return {label for label in labels if label}
+
+    labels = explicit_labels(pot)
+    wrapped = getattr(pot, "potential", None)
+    if wrapped is None:
+        wrapped = getattr(pot, "base", None)
+    if wrapped is not None and wrapped is not pot:
+        labels.update(explicit_labels(wrapped))
+    if labels:
+        return labels
+
+    from . import POTENTIAL_REGISTRY
+
+    targets = [pot]
+    if wrapped is not None and wrapped is not pot:
+        targets.insert(0, wrapped)
+    inferred: set[str] = set()
+    for target in targets:
+        for style, cls in POTENTIAL_REGISTRY.items():
+            if isinstance(target, cls):
+                inferred.add(str(style).strip().lower())
+        if type(target).__name__ == "BSplinePotential":
+            inferred.add("table")
+    return inferred
+
+
+def potential_bounds(pot: Any) -> Tuple[np.ndarray, np.ndarray]:
+    """Local ``(lb, ub)`` from a property- or method-style potential bounds API."""
+    bounds = getattr(pot, "param_bounds", None)
+    if bounds is None:
+        n = pot.n_params()
+        return np.full(n, -np.inf, dtype=float), np.full(n, np.inf, dtype=float)
+    if callable(bounds):
+        bounds = bounds()
+    lb, ub = bounds
+    lb = np.asarray(lb, dtype=float).reshape(-1)
+    ub = np.asarray(ub, dtype=float).reshape(-1)
+    n = pot.n_params()
+    if lb.shape != (n,) or ub.shape != (n,):
+        raise ValueError(
+            f"param_bounds shape mismatch for {type(pot).__name__}: "
+            f"expected {(n,)}, got lb={lb.shape}, ub={ub.shape}"
+        )
+    if np.any(lb > ub):
+        raise ValueError(
+            f"param_bounds lower entries cannot exceed upper entries for {type(pot).__name__}."
+        )
+    return lb, ub
+
+
+def potential_mask(pot: Any) -> np.ndarray:
+    """Local trainability mask from a property- or method-style potential API."""
+    mask = getattr(pot, "param_mask", None)
+    if mask is None:
+        return np.ones(pot.n_params(), dtype=bool)
+    if callable(mask):
+        mask = mask()
+    mask = np.asarray(mask, dtype=bool).reshape(-1)
+    n = pot.n_params()
+    if mask.shape != (n,):
+        raise ValueError(
+            f"param_mask shape mismatch for {type(pot).__name__}: "
+            f"expected {(n,)}, got {mask.shape}"
+        )
+    return mask
 
 
 class BasePotential(ABC):
@@ -237,10 +325,11 @@ class BasePotential(ABC):
         return self._stack_named_channels(names, r_arr)
 
     def basis_derivatives(self, r: np.ndarray) -> np.ndarray:
-        """Return derivative of basis wrt r (finite-difference fallback)."""
-        r = np.asarray(r, dtype=float)
-        eps = 1.0e-6
-        return (self.basis_values(r + eps) - self.basis_values(r - eps)) / (2.0 * eps)
+        """Return ``d basis_values / dr`` for subclasses that support it."""
+        raise NotImplementedError(
+            f"{type(self).__name__}.basis_derivatives() must provide an explicit "
+            "implementation."
+        )
 
     def energy_grad(self, r: np.ndarray) -> np.ndarray:
         """Return dU/dtheta evaluated at r with shape ``r.shape + (n_params,)``."""
@@ -260,18 +349,17 @@ class BasePotential(ABC):
         summed = grad.sum(axis=-2)
         return np.asarray(summed, dtype=float)
 
-    def energy_grad_sum_by_sample(
+    def _grad_sum_by_sample(
         self,
         r: np.ndarray,
-        *,
-        active: np.ndarray | None = None,
+        reducer,
+        active: np.ndarray | None,
     ) -> np.ndarray:
-        """Return per-sample ``dU/dtheta`` sums without requiring term gradients.
+        """Apply a 1-D ``reducer(r) -> (n_params,)`` per sample over the last axis.
 
-        ``r`` is interpreted as ``sample_shape + (n_terms,)``. The output has
-        shape ``sample_shape + (n_params,)``. The optional ``active`` mask lets
-        callers exclude nonfinite or cutoff-filtered terms before dispatching
-        to a potential's optimized one-dimensional ``energy_grad_sum()``.
+        ``r`` is interpreted as ``sample_shape + (n_terms,)`` and the output as
+        ``sample_shape + (n_params,)``. The optional ``active`` mask excludes
+        nonfinite or cutoff-filtered terms before each reduction.
         """
         r_arr = np.asarray(r, dtype=float)
         n_params = int(self.n_params())
@@ -285,7 +373,7 @@ class BasePotential(ABC):
             rv = r_arr.reshape(-1)
             if active_arr is not None:
                 rv = r_arr[active_arr]
-            return np.asarray(self.energy_grad_sum(rv), dtype=float).reshape(n_params)
+            return np.asarray(reducer(rv), dtype=float).reshape(n_params)
 
         flat = r_arr.reshape((-1, r_arr.shape[-1]))
         flat_active = None if active_arr is None else active_arr.reshape(flat.shape)
@@ -293,11 +381,23 @@ class BasePotential(ABC):
         for i, row in enumerate(flat):
             rv = row if flat_active is None else row[flat_active[i]]
             if rv.size:
-                out[i] = np.asarray(
-                    self.energy_grad_sum(rv),
-                    dtype=float,
-                ).reshape(n_params)
+                out[i] = np.asarray(reducer(rv), dtype=float).reshape(n_params)
         return out.reshape(r_arr.shape[:-1] + (n_params,))
+
+    def energy_grad_sum_by_sample(
+        self,
+        r: np.ndarray,
+        *,
+        active: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Return per-sample ``dU/dtheta`` sums without requiring term gradients.
+
+        ``r`` is interpreted as ``sample_shape + (n_terms,)``. The output has
+        shape ``sample_shape + (n_params,)``. The optional ``active`` mask lets
+        callers exclude nonfinite or cutoff-filtered terms before dispatching
+        to a potential's optimized one-dimensional ``energy_grad_sum()``.
+        """
+        return self._grad_sum_by_sample(r, self.energy_grad_sum, active)
 
     def gauge_free_energy_grad_sum(self, r: np.ndarray) -> np.ndarray:
         """Return summed gradients with parameter-dependent gauge shifts removed.
@@ -314,34 +414,7 @@ class BasePotential(ABC):
         active: np.ndarray | None = None,
     ) -> np.ndarray:
         """Return per-sample gauge-free gradient sums."""
-        r_arr = np.asarray(r, dtype=float)
-        n_params = int(self.n_params())
-        active_arr = None
-        if active is not None:
-            active_arr = np.asarray(active, dtype=bool)
-            if active_arr.shape != r_arr.shape:
-                active_arr = np.broadcast_to(active_arr, r_arr.shape)
-
-        if r_arr.ndim <= 1:
-            rv = r_arr.reshape(-1)
-            if active_arr is not None:
-                rv = r_arr[active_arr]
-            return np.asarray(
-                self.gauge_free_energy_grad_sum(rv),
-                dtype=float,
-            ).reshape(n_params)
-
-        flat = r_arr.reshape((-1, r_arr.shape[-1]))
-        flat_active = None if active_arr is None else active_arr.reshape(flat.shape)
-        out = np.zeros((flat.shape[0], n_params), dtype=float)
-        for i, row in enumerate(flat):
-            rv = row if flat_active is None else row[flat_active[i]]
-            if rv.size:
-                out[i] = np.asarray(
-                    self.gauge_free_energy_grad_sum(rv),
-                    dtype=float,
-                ).reshape(n_params)
-        return out.reshape(r_arr.shape[:-1] + (n_params,))
+        return self._grad_sum_by_sample(r, self.gauge_free_energy_grad_sum, active)
 
     def force_grad(self, r: np.ndarray) -> np.ndarray:
         """Return dF/dtheta evaluated at r.
@@ -349,19 +422,15 @@ class BasePotential(ABC):
         Subclasses may return either a dense ``ndarray`` or a sparse matrix
         object when that materially improves performance.
         """
-        names = self.df_dparam_names()
-        if names:
-            return self._stack_named_channels(names, r)
-        return self._finite_difference_param_jacobian(self.force, r)
+        raise NotImplementedError(
+            f"{type(self).__name__}.force_grad() must provide an explicit "
+            "analytic, sparse, or otherwise vectorized implementation."
+        )
 
     @abstractmethod
     def is_param_linear(self) -> np.ndarray:
         """Return a per-parameter boolean mask for linear optimization channels."""
         raise NotImplementedError
-
-    def is_gauge_free_energy_grad_cacheable(self) -> np.ndarray:
-        """Return a per-parameter mask for AA-cacheable gauge-free channels."""
-        return np.asarray(self.is_param_linear(), dtype=bool)
 
     def _stack_named_channels(self, names: List[str], r: np.ndarray) -> np.ndarray:
         r_arr = np.asarray(r, dtype=float)
@@ -385,28 +454,6 @@ class BasePotential(ABC):
                 )
             cols.append(values)
         return np.stack(cols, axis=-1)
-
-    def _finite_difference_param_jacobian(self, fn, r: np.ndarray) -> np.ndarray:
-        r_arr = np.asarray(r, dtype=float)
-        r_flat = r_arr.reshape(-1)
-        params0 = self.get_params()
-        scale = np.maximum(1.0, np.abs(params0))
-        jac = np.empty((r_flat.size, params0.size), dtype=float)
-        try:
-            for idx in range(params0.size):
-                step = 1.0e-6 * scale[idx]
-                params_plus = params0.copy()
-                params_minus = params0.copy()
-                params_plus[idx] += step
-                params_minus[idx] -= step
-                self.set_params(params_plus)
-                values_plus = np.asarray(fn(r_flat), dtype=float).reshape(-1)
-                self.set_params(params_minus)
-                values_minus = np.asarray(fn(r_flat), dtype=float).reshape(-1)
-                jac[:, idx] = (values_plus - values_minus) / (2.0 * step)
-        finally:
-            self.set_params(params0)
-        return jac.reshape(r_arr.shape + (params0.size,))
 
     def get_scaled_potential(self, z):  # From Ace
         """Return a deep copy whose scalable params are multiplied by ``z``.

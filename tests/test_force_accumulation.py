@@ -1,9 +1,11 @@
 """Tests for force accumulation with real-sized duplicate-index topologies."""
 from __future__ import annotations
 
-import numpy as np
 import sys
 from types import SimpleNamespace
+
+import numpy as np
+import pytest
 
 from AceCG.compute.force import _valid_flat_terms, force
 from AceCG.compute.frame_geometry import compute_frame_geometry
@@ -130,6 +132,16 @@ def test_cdfm_mask_install_sets_training_key_mask():
     assert ff.key_mask[real_key] is False
     assert ff.key_mask[vp_key] is True
     assert not np.any(ff.param_mask[ff.real_mask])
+
+
+def test_cdfm_resume_ignores_legacy_pre_epoch_snapshot(tmp_path):
+    workflow = SimpleNamespace(output_dir=tmp_path)
+    current_ff_dir = tmp_path / "iter_0001" / "ff"
+    current_ff_dir.mkdir(parents=True)
+    (current_ff_dir / "forcefield_snapshot.pkl").write_bytes(b"legacy")
+
+    with pytest.raises(FileNotFoundError, match="workflow checkpoint"):
+        CDFMWorkflow._load_resume_state(workflow, 1)
 
 
 def test_cdfm_baseline_preprocess_temporarily_uses_real_key_mask(tmp_path, monkeypatch):

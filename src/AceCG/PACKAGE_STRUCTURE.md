@@ -14,9 +14,9 @@ AceCG/	# Main package root
 │	├── energy.py	# Energy, energy-gradient, Hessian, and gradient-outer computations
 │	├── force.py	# Force, force-gradient, and force-matching statistics
 │	├── frame_geometry.py	# Per-frame geometry extraction from topology and coordinates
-│	├── mpi_engine.py	# MPI-aware compute engine and registered observable execution
-│	├── reducers.py	# One-pass reducer helpers for FM, REM, RDF, cache, and CDFM batches
-│	├── registry.py	# Default compute-engine builder and observable registrations
+│	├── mpi_engine.py	# MPI-aware compute engine and default engine builder
+│	├── requests.py	# Canonical compute request names and kernel keyword mappings
+│	├── reducers.py	# One-pass reducer helpers and canonical compute request mapping
 │	└── vp_prepare.py	# Virtual-particle preparation helpers for compute workflows
 ├── configs/	# ACG and VP configuration parsing
 │	├── __init__.py	# Config package exports
@@ -37,6 +37,7 @@ AceCG/	# Main package root
 │	├── coordinates.py	# AA-to-CG coordinate builder from mapping YAML
 │	├── coordinates_writers.py	# GRO, PDB, and LAMMPS data writers
 │	├── forcefield.py	# LAMMPS forcefield read/write helpers
+│	├── lammps_input.py	# Lightweight LAMMPS input decomment/token/include utilities
 │	├── logger.py	# Small timestamped screen logger
 │	├── tables.py	# LAMMPS table parsing, writing, conversion, and comparison
 │	├── trajectory.py	# LAMMPS trajectory loading and splitting helpers

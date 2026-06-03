@@ -67,6 +67,18 @@ class LennardJones96Potential(BasePotential):
         sigma_over_r = sigma / r
         return 4 * epsilon / r * (9 * sigma_over_r**9 - 6 * sigma_over_r**6)
 
+    def force_grad(self, r: np.ndarray) -> np.ndarray:
+        """Return the explicit force Jacobian ``dF/d[epsilon, sigma]``."""
+        r_arr = np.asarray(r, dtype=float)
+        epsilon, sigma = self._params
+        sigma_over_r = sigma / r_arr
+        q6 = sigma_over_r**6
+        q9 = sigma_over_r**9
+        grad = np.empty(r_arr.shape + (2,), dtype=float)
+        grad[..., 0] = 4.0 / r_arr * (9.0 * q9 - 6.0 * q6)
+        grad[..., 1] = 4.0 * epsilon / (r_arr * sigma) * (81.0 * q9 - 36.0 * q6)
+        return grad
+
     def depsilon(self, r: float) -> float:
         """
         Compute the derivative of the Lennard-Jones 9-6 potential with respect to epsilon.

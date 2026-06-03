@@ -6,7 +6,7 @@ This module supports an optional light-weight per-frame geometry cache:
   requested / computed for the current force field selection.
 - ``TrajectoryCache`` stores a trajectory digest as
   ``{frame_idx: FrameCache}``.
-- ``compute(..., request={"need_frame_cache": True, ...})`` returns the sliced
+- ``compute(..., request={"frame_cache", ...})`` returns the sliced
   per-frame cache under ``results["frame_cache"]``.
 - ``compute(..., return_observables=True)`` keeps the legacy
   ``results["frame_observables"]`` spelling as a compatibility alias.
@@ -26,15 +26,14 @@ import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .energy import energy
-from .force import force
+from .force import _add_timing, force
 from .frame_geometry import FrameGeometry, compute_frame_geometry
 from .reducers import (
-    _REQUEST_FLAGS,
     accumulate_cdfm_zbx_stats,
     canonical_step_mode,
     consume_step_payload,
@@ -45,7 +44,9 @@ from .reducers import (
     step_reduce_plan,
     step_request,
 )
-from ..configs.energy_mask import normalize_energy_mask_spec
+from .requests import normalize_compute_request, request_kwargs
+from ..configs.energy_mask import accumulate_mask_diagnostics, normalize_energy_mask_spec
+from ..io.coordinates import wrap_positions_in_box
 from ..io.logger import get_screen_logger
 from ..topology.forcefield import Forcefield
 from ..topology.neighbor import compute_pairs_by_type
@@ -63,13 +64,6 @@ def _backup_existing_output(output_path: Path) -> None:
     if backup_path.exists():
         backup_path.unlink()
     output_path.replace(backup_path)
-
-
-@dataclass
-class _RegisteredFn:
-    fn: Callable
-    reduce: str
-    desc: str = ""
 
 
 @dataclass(frozen=True)
@@ -113,11 +107,6 @@ class TrajectoryCache:
     def merge(self, other: "TrajectoryCache") -> None:
         """Merge another trajectory cache into this one by frame index."""
         self.frames.update(other.frames)
-
-
-# Backward-compatible names used by older RDF/observables-cache code paths.
-FrameObservables = FrameCache
-TrajectoryObservablesCache = TrajectoryCache
 
 
 
@@ -371,10 +360,6 @@ def _trace(enabled: bool, rank: int, message: str, *, all_ranks: bool = False) -
     SCREEN_LOGGER.info(message, rank=rank)
 
 
-def _add_timing(bucket: Dict[str, Any], key: str, dt: float) -> None:
-    bucket[key] = float(bucket.get(key, 0.0)) + float(dt)
-
-
 def _int_spec_value(spec: Mapping[str, Any], key: str, default: int = 0) -> int:
     try:
         return int(spec.get(key, default))
@@ -558,29 +543,7 @@ def _merge_energy_mask_diagnostics(
     diagnostics: Mapping[str, Any],
 ) -> None:
     """Merge one energy-mask diagnostics payload into compute results."""
-    if "energy_mask_diagnostics" not in out:
-        out["energy_mask_diagnostics"] = {
-            "active": int(diagnostics.get("active", 0)),
-            "total": int(diagnostics.get("total", 0)),
-            "by_key": {
-                str(label): {
-                    "active": int(counts.get("active", 0)),
-                    "total": int(counts.get("total", 0)),
-                }
-                for label, counts in dict(diagnostics.get("by_key", {})).items()
-            },
-        }
-        return
-    current = out["energy_mask_diagnostics"]
-    current["active"] += int(diagnostics.get("active", 0))
-    current["total"] += int(diagnostics.get("total", 0))
-    by_key = current.setdefault("by_key", {})
-    for label, counts in dict(diagnostics.get("by_key", {})).items():
-        label = str(label)
-        if label not in by_key:
-            by_key[label] = {"active": 0, "total": 0}
-        by_key[label]["active"] += int(counts.get("active", 0))
-        by_key[label]["total"] += int(counts.get("total", 0))
+    accumulate_mask_diagnostics(out.setdefault("energy_mask_diagnostics", {}), diagnostics)
 
 
 def _shared_energy_mask_from_steps(
@@ -652,13 +615,6 @@ def _noise_selection_indices(
     if np.any(indices < 0) or np.any(indices >= int(n_atoms)):
         raise ValueError("noise selection indices are outside the atom range.")
     return indices
-
-
-def _wrap_positions_in_box(positions: np.ndarray, box: np.ndarray) -> np.ndarray:
-    lengths = np.asarray(box, dtype=np.float64)[..., :3]
-    if np.any(lengths <= 0.0):
-        return positions
-    return np.mod(positions, lengths[:, None, :])
 
 
 def _write_timing_report(
@@ -757,43 +713,12 @@ class MPIComputeEngine:
     """
 
     def __init__(self, serial_threshold: int = 10, *, comm=None) -> None:
-        self._registry: Dict[str, _RegisteredFn] = {}
         self._serial_threshold = serial_threshold
         self.comm = comm
 
-    def register(
-        self,
-        name: str,
-        fn: Callable,
-        reduce: str,
-        description: str = "",
-    ) -> None:
-        """Register one frame-level compute function.
-
-        Parameters
-        ----------
-        name : str
-            Observable name used in compute requests.
-        fn : Callable
-            Function called as ``fn(geometry, forcefield, **kwargs)`` for each
-            frame.
-        reduce : {"sum", "gather", "stack", "dict_sum"}
-            Reduction mode used across frames/ranks.
-        description : str, default=""
-            Human-readable description for diagnostics.
-        """
-        if reduce not in ("sum", "gather", "stack", "dict_sum"):
-            raise ValueError(f"Invalid reduce mode: {reduce!r}")
-        self._registry[name] = _RegisteredFn(fn=fn, reduce=reduce, desc=description)
-
-    @property
-    def registered_names(self) -> List[str]:
-        """Return names of observables currently registered on the engine."""
-        return list(self._registry.keys())
-
     def compute(
         self,
-        request: Dict[str, bool],
+        request: Iterable[str],
         frame: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]],
         topology_arrays: TopologyArrays,
         forcefield_snapshot: Forcefield,
@@ -821,8 +746,9 @@ class MPIComputeEngine:
         Parameters
         ----------
         request
-            Direct observable requests aggregated from all active trainers /
-            post-processing steps.
+            Canonical observable/input names aggregated from all active
+            trainers / post-processing steps. Legacy ``need_*`` boolean
+            mappings are normalized for compatibility.
         frame
             Frame tuple in the format ``(frame_id, positions, box,
             reference_forces)``. ``positions`` may have shape ``(n_atoms, 3)``
@@ -854,7 +780,15 @@ class MPIComputeEngine:
         ``interaction_mask`` defaults to ``forcefield_snapshot.key_mask`` when
         not provided.
         """
+
+        # Step 1. Standardize requests and results
+        request_names = normalize_compute_request(request)
+        energy_kwargs = request_kwargs("energy", request_names)
+        force_kwargs = request_kwargs("force", request_names)
+        geometry_kwargs = request_kwargs("geometry", request_names)
         results: Dict[str, Any] = {}
+        energy_result: Dict[str, Any] = {}
+        force_result: Dict[str, Any] = {}
 
         frame_id, positions, box, reference_forces = frame
         # Normalize both single frames and same-frame batches to one flat sample
@@ -933,10 +867,10 @@ class MPIComputeEngine:
             else None
         )
 
-        need_frame_cache = bool(request.get("need_frame_cache", False))
+        frame_cache_requested = geometry_kwargs["frame_cache"]
         # Current cache semantics are per real trajectory frame, not per noisy
         # same-frame sample. Noisy FM/REM therefore keep cache requests off.
-        if is_batch and (return_observables or need_frame_cache):
+        if is_batch and (return_observables or frame_cache_requested):
             raise ValueError("batched compute does not support frame-cache requests.")
 
         weights = _normalize_sample_weights(frame_weights, n_samples)
@@ -1037,49 +971,17 @@ class MPIComputeEngine:
             )
             if timing is not None:
                 _add_timing(timing, "geometry", time.monotonic() - t0)
-            if start == 0 and not is_batch and (return_observables or need_frame_cache):
+            if start == 0 and not is_batch and (return_observables or frame_cache_requested):
                 cache_geom = geom
 
             # Step 3: Compute energy-related observables if requested.
-            energy_result: Dict[str, Any] = {}
-            if (
-                bool(request.get("need_energy_value", False))
-                or bool(request.get("need_energy_grad", False))
-                or bool(request.get("need_energy_hessian", False))
-                or bool(request.get("need_energy_grad_outer", False))
-                or bool(request.get("need_gauge_free_energy_grad", False))
-                or bool(request.get("need_gauge_free_energy_grad_outer", False))
-                or bool(request.get("need_unmasked_energy_grad", False))
-                or bool(request.get("need_unmasked_energy_grad_outer", False))
-                or bool(request.get("need_unmasked_gauge_free_energy_grad", False))
-                or bool(request.get("need_unmasked_gauge_free_energy_grad_outer", False))
-            ):
+
+            if any(energy_kwargs.values()):
                 t0 = time.monotonic()
                 energy_result = energy(
                     geom,
                     forcefield_snapshot,
-                    return_value=bool(request.get("need_energy_value", False)),
-                    return_grad=bool(request.get("need_energy_grad", False)),
-                    return_hessian=bool(request.get("need_energy_hessian", False)),
-                    return_grad_outer=bool(request.get("need_energy_grad_outer", False)),
-                    return_gauge_free_energy_grad=bool(
-                        request.get("need_gauge_free_energy_grad", False)
-                    ),
-                    return_gauge_free_energy_grad_outer=bool(
-                        request.get("need_gauge_free_energy_grad_outer", False)
-                    ),
-                    return_unmasked_energy_grad=bool(
-                        request.get("need_unmasked_energy_grad", False)
-                    ),
-                    return_unmasked_energy_grad_outer=bool(
-                        request.get("need_unmasked_energy_grad_outer", False)
-                    ),
-                    return_unmasked_gauge_free_energy_grad=bool(
-                        request.get("need_unmasked_gauge_free_energy_grad", False)
-                    ),
-                    return_unmasked_gauge_free_energy_grad_outer=bool(
-                        request.get("need_unmasked_gauge_free_energy_grad_outer", False)
-                    ),
+                    **energy_kwargs,
                     coordinate_mask=coordinate_mask,
                 )
                 diagnostics = energy_result.pop("energy_mask_diagnostics", None)
@@ -1093,25 +995,18 @@ class MPIComputeEngine:
                     _add_timing(timing, "energy_kernel", time.monotonic() - t0)
 
             # Step 4: Compute force-related observables if requested.
-            force_result: Dict[str, Any] = {}
-            if (
-                bool(request.get("need_force_value", False))
-                or bool(request.get("need_force_grad", False))
-                or bool(request.get("need_fm_stats", False))
-            ):
+            if any(force_kwargs.values()):
                 t0 = time.monotonic()
                 force_result = force(
                     geom,
                     forcefield_snapshot,
-                    return_value=bool(request.get("need_force_value", False)),
-                    return_grad=bool(request.get("need_force_grad", False)),
+                    **force_kwargs,
                     reference_force=chunk_reference,
                     frame_weights=chunk_abs_weights
-                    if bool(request.get("need_fm_stats", False))
+                    if force_kwargs["return_fm_stats"]
                     else None,
-                    return_fm_stats=bool(request.get("need_fm_stats", False)),
                     timing=timing,
-                    )
+                )
                 for key in ("force", "force_grad", "force_hessian"):
                     if key in force_result:
                         # Force values/Jacobians follow the same reducer-facing
@@ -1156,7 +1051,7 @@ class MPIComputeEngine:
                 include_dihedral=build_dihedrals,
                 include_box=True,
             )
-            if need_frame_cache:
+            if frame_cache_requested:
                 results["frame_cache"] = frame_cache
             if return_observables:
                 results["frame_observables"] = frame_cache
@@ -1224,7 +1119,7 @@ class MPIComputeEngine:
 
         box_batch = _normalize_box_batch(box, total_samples)
         if bool(noise.get("wrap", False)):
-            positions_batch = _wrap_positions_in_box(positions_batch, box_batch)
+            positions_batch = wrap_positions_in_box(positions_batch, box_batch)
 
         force_mix_ratio = float(noise.get("force_mix_ratio", 0.0))
         if not 0.0 <= force_mix_ratio <= 1.0:
@@ -1284,16 +1179,11 @@ class MPIComputeEngine:
         weights = np.full(total_samples, 1.0 / float(total_samples), dtype=np.float64)
         return (frame_ids, positions_batch, box_batch, reference_force_batch), weights
 
-    def _shared_step_requests(self, steps: Sequence[dict]) -> Dict[str, bool]:
-        request = {flag: False for flag in _REQUEST_FLAGS}
+    def _shared_step_requests(self, steps: Sequence[dict]) -> frozenset[str]:
+        request: set[str] = set()
         for step in steps:
-            request.update(
-                {
-                    key: request[key] or value
-                    for key, value in step_request(step).items()
-                }
-            )
-        return request
+            request.update(step_request(step))
+        return frozenset(request)
 
     def _reduce_step_partials(
         self,
@@ -1476,8 +1366,7 @@ class MPIComputeEngine:
                 forcefield_snapshot.param_mask = cg_mask
                 forcefield_snapshot.key_mask = forcefield_snapshot.derive_l1_mask(cg_mask)
                 try:
-                    baseline_request = {flag: False for flag in _REQUEST_FLAGS}
-                    baseline_request["need_force_value"] = True
+                    baseline_request = {"force"}
                     baseline_result = self.compute(
                         request=baseline_request,
                         frame=init_frame_tuple,
@@ -1774,11 +1663,13 @@ class MPIComputeEngine:
         ]
         request = self._shared_step_requests(one_pass_steps)
         coordinate_mask = _shared_energy_mask_from_steps(one_pass_steps, shared_spec)
-        if noise_spec is not None and (collect_observables or request.get("need_frame_cache", False)):
+        geometry_kwargs = request_kwargs("geometry", request)
+        traj_reader_kwargs = request_kwargs("traj_reader", request)
+        if noise_spec is not None and (collect_observables or geometry_kwargs["frame_cache"]):
             raise ValueError(
                 "spec['noise'] batch processing does not support frame-cache or observables requests."
             )
-        need_reference_forces = bool(request["need_reference_force"])
+        include_reference_forces = traj_reader_kwargs["include_forces"]
 
         if local_ids is not None:
             _trace(
@@ -1790,7 +1681,7 @@ class MPIComputeEngine:
             frame_iter = iter_frames(
                 universe,
                 frame_ids=local_ids,
-                include_forces=need_reference_forces,
+                include_forces=include_reference_forces,
             )
         else:
             _trace(
@@ -1804,7 +1695,7 @@ class MPIComputeEngine:
                 start=local_start,
                 end=local_end,
                 every=every,
-                include_forces=need_reference_forces,
+                include_forces=include_reference_forces,
             )
 
         frame_iter_obj = iter(frame_iter)
@@ -2055,12 +1946,17 @@ class MPIComputeEngine:
                     metadata={
                         "size": size,
                         "n_steps": len(all_steps),
-                        "need_reference_forces": need_reference_forces,
+                        "include_reference_forces": include_reference_forces,
                     },
                 )
                 _trace(perf_trace, rank, f"wrote timing report {report}", all_ranks=trace_all_ranks)
 
         return None
+
+
+def build_default_engine(*, comm=None) -> MPIComputeEngine:
+    """Create the default one-pass compute engine."""
+    return MPIComputeEngine(serial_threshold=10, comm=comm)
 
 
 if __name__ == "__main__":
@@ -2091,8 +1987,6 @@ if __name__ == "__main__":
             stacklevel=1,
         )
         comm = None
-
-    from .registry import build_default_engine
 
     engine = build_default_engine(comm=comm)
     engine.run_post(spec)

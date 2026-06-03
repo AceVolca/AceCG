@@ -29,7 +29,7 @@ from typing import List, Optional
 from MDAnalysis.lib.nsgrid import FastNS
 import numpy as np
 
-from .topology_array import TopologyArrays
+from .topology_array import TopologyArrays, _encode_pairs
 from .types import InteractionKey
 
 VALID_EXCLUDE_OPTIONS = frozenset({"resid", "molid", "none"})
@@ -57,15 +57,6 @@ def parse_exclude_option(exclude_option: str) -> str:
     return token
 
 
-_parse_exclude_option = parse_exclude_option
-
-
-def _encode_pairs(pairs: np.ndarray, n: int) -> np.ndarray:
-    """Canonical int32 id for each (i, j) row: min*n + max."""
-    if pairs.size == 0:
-        return np.empty(0, dtype=np.int32)
-    sp = np.sort(np.asarray(pairs, dtype=np.int32), axis=1)
-    return sp[:, 0] * np.int32(n) + sp[:, 1]
 
 
 def _build_exclusion_mask(
@@ -85,7 +76,7 @@ def _build_exclusion_mask(
     if n == 0:
         return np.zeros(0, dtype=bool)
 
-    exclude_option = _parse_exclude_option(exclude_option)
+    exclude_option = parse_exclude_option(exclude_option)
     cached_mode = getattr(topo, "excluded_nb_mode", None)
     cached_all = bool(getattr(topo, "excluded_nb_all", False))
     cached_ids = getattr(topo, "excluded_nb", None)
@@ -149,7 +140,7 @@ def compute_neighbor_list(
     list[list[int]]
         Symmetric neighbor lists in global atom indices.
     """
-    exclude_option = _parse_exclude_option(exclude_option)
+    exclude_option = parse_exclude_option(exclude_option)
     pos = np.asarray(positions, dtype=np.float32)
     bx = np.asarray(box, dtype=np.float32)
     n_atoms = pos.shape[0]
@@ -229,7 +220,7 @@ def compute_pairs_by_type(
       atoms;
     - keep per-key masking and downstream observable logic out of this module.
     """
-    exclude_option = _parse_exclude_option(exclude_option)
+    exclude_option = parse_exclude_option(exclude_option)
     empty = (np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32))
     out: dict = {k: empty for k in pair_type_list}
 

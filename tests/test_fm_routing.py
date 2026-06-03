@@ -488,7 +488,7 @@ def test_fmworkflow_run_post_accumulation_forwards_noise_spec(monkeypatch, tmp_p
     _patch_fmworkflow_basics(monkeypatch, forcefield=_linear_forcefield())
     captured_specs = []
 
-    def _fake_run_post(spec, resource_pool, *, run_dir=None, python_exe=None, extra_launcher_args=None):
+    def _fake_run_post(spec, resource_pool, *, run_dir=None, python_exe=None):
         captured_specs.append(dict(spec))
         output_path = Path(spec["steps"][0]["output_file"])
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -544,7 +544,7 @@ def test_fmworkflow_run_post_accumulation_forwards_perf_trace(monkeypatch, tmp_p
     _patch_fmworkflow_basics(monkeypatch, forcefield=_linear_forcefield())
     captured_specs = []
 
-    def _fake_run_post(spec, resource_pool, *, run_dir=None, python_exe=None, extra_launcher_args=None):
+    def _fake_run_post(spec, resource_pool, *, run_dir=None, python_exe=None):
         captured_specs.append(dict(spec))
         output_path = Path(spec["steps"][0]["output_file"])
         output_path.parent.mkdir(parents=True, exist_ok=True)

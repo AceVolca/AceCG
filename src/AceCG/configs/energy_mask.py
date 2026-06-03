@@ -8,7 +8,7 @@ observed bond lengths contribute to REM/CDREM energy-gradient statistics.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -139,6 +139,34 @@ def summarize_energy_mask_counts(
             for label, counts in sorted(by_key.items())
         }
     return payload
+
+
+def accumulate_mask_diagnostics(
+    accumulator: MutableMapping[str, Any],
+    diagnostics: Mapping[str, Any],
+    *,
+    active_key: str = "active",
+    total_key: str = "total",
+    by_key_key: str = "by_key",
+) -> None:
+    """Accumulate one coordinate-mask diagnostics payload into *accumulator*.
+
+    Updates *accumulator* in place; its scalar/by-key slots may use custom key
+    names (e.g. a reducer's flat state) and missing entries count as zero/empty.
+    """
+    accumulator[active_key] = int(accumulator.get(active_key, 0)) + int(
+        diagnostics.get("active", 0)
+    )
+    accumulator[total_key] = int(accumulator.get(total_key, 0)) + int(
+        diagnostics.get("total", 0)
+    )
+    by_key = accumulator.setdefault(by_key_key, {})
+    for label, counts in dict(diagnostics.get("by_key", {})).items():
+        label = str(label)
+        if label not in by_key:
+            by_key[label] = {"active": 0, "total": 0}
+        by_key[label]["active"] += int(counts.get("active", 0))
+        by_key[label]["total"] += int(counts.get("total", 0))
 
 
 def _is_disabled(raw: Any) -> bool:

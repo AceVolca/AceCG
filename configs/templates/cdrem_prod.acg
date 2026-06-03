@@ -47,7 +47,6 @@ n_samples = 15
 ncores_per_task = 16
 
 [scheduler]
-launcher = mpirun
 python_exe = python
 
 [vp]

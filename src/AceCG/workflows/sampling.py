@@ -223,11 +223,9 @@ class SamplingWorkflow(BaseWorkflow):
         cache_path = self._resolve_config_path(self.config.aa_ref.all_atom_data_path)
         training_method = str(self.config.training.method).strip().lower()
         expected_gradient_convention = "gauge_free" if training_method == "rem" else "physical"
-        is_cacheable = (
-            self.trainer.is_gauge_free_energy_grad_cacheable()
-            if expected_gradient_convention == "gauge_free"
-            else self.trainer.is_optimization_linear()
-        )
+        # AA gauge-free and physical energy gradients are cacheable under the
+        # same condition (all active parameters enter their potentials linearly).
+        is_cacheable = self.trainer.is_optimization_linear()
         noise_enabled = bool(getattr(self.config.aa_ref.noise, "enabled", False))
 
         if noise_enabled:
@@ -429,15 +427,14 @@ class SamplingWorkflow(BaseWorkflow):
 
     def _elastic_core_bounds(
         self, explicit_ncores: Optional[int],
-    ) -> tuple[int, int, int, int]:
-        """Derive (cpu_cores, min_cores, preferred_cores, max_cores).
+    ) -> tuple[int, int, int]:
+        """Derive (cpu_cores, min_cores, preferred_cores).
 
-        When the user pins ``ncores`` in the config, all four collapse to the
+        When the user pins ``ncores`` in the config, all three collapse to the
         same value — fixed-width placement.  Otherwise the bounds span the
-        pool: ``min`` = smallest host, ``preferred`` = largest host,
-        ``max`` = total pool.  This lets the Placer scale a task across a
-        fragmented allocation instead of wedging at ``max(host.n_cpus)``,
-        which only fits the widest single node.
+        pool: ``min`` = smallest host, ``preferred`` = largest host.  This lets
+        the Placer shrink a task onto a smaller available host instead of
+        wedging at ``max(host.n_cpus)``.
 
         ``cpu_cores`` is the nominal default written into ``TaskSpec`` — the
         Placer overrides it at launch time with the actual allocation.

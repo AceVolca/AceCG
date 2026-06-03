@@ -229,10 +229,6 @@ n_samples = 12
 ncores_per_task = 16
 
 [scheduler]
-# Deprecated. The parser accepts it but emits a deprecation warning and the
-# current code ignores it. Prefer mpirun_path and/or mpi_family.
-# launcher = mpirun
-
 # Optional. Explicit MPI launcher path seen on the compute node.
 mpirun_path = /software/intel/oneapi_hpc_2023.1/mpi/2021.9.0/bin/mpirun
 

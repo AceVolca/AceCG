@@ -27,7 +27,6 @@ import subprocess
 import sys
 import threading
 import time
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,23 +34,6 @@ from typing import Any, Dict, List, Optional
 from ..io.logger import get_screen_logger
 from .mpi_backend import Placement
 from .resource_pool import ResourcePool, CpuLease, LeasePool, Placer, PlacementResult
-
-
-_MAX_CORES_UNUSED_WARNING_EMITTED = False
-
-
-def _warn_unused_max_cores_once() -> None:
-    """Warn once that ``TaskSpec.max_cores`` is not yet used by the Placer."""
-    global _MAX_CORES_UNUSED_WARNING_EMITTED
-    if _MAX_CORES_UNUSED_WARNING_EMITTED:
-        return
-    _MAX_CORES_UNUSED_WARNING_EMITTED = True
-    warnings.warn(
-        "TaskSpec.max_cores is currently unused by the scheduler placer; "
-        "allocations will not grow above preferred_cores yet.",
-        RuntimeWarning,
-        stacklevel=3,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -63,8 +45,8 @@ class TaskSpec:
     """Specification for one simulation + post-processing task.
 
     Workflows set ``cpu_cores`` for fixed-width tasks.  The Placer uses
-    ``min_cores`` / ``preferred_cores`` / ``max_cores`` to decide the
-    actual core count; when unset they all default to ``cpu_cores``.
+    ``min_cores`` / ``preferred_cores`` to decide the actual core count;
+    when unset they both default to ``cpu_cores``.
     """
 
     task_class: str                     # "xz" | "zbx"
@@ -86,7 +68,6 @@ class TaskSpec:
     metadata: Dict[str, Any] = field(default_factory=dict)
     min_cores: Optional[int] = None
     preferred_cores: Optional[int] = None
-    max_cores: Optional[int] = None
     single_host_only: bool = False
 
     def __post_init__(self) -> None:
@@ -94,10 +75,6 @@ class TaskSpec:
             self.min_cores = self.cpu_cores
         if self.preferred_cores is None:
             self.preferred_cores = self.cpu_cores
-        if self.max_cores is None:
-            self.max_cores = self.cpu_cores
-        if self.preferred_cores != self.max_cores:
-            _warn_unused_max_cores_once()
 
     def to_spec_dict(self, cpu_cores: Optional[int] = None) -> Dict[str, Any]:
         """Serialize to dict for task_spec.json.
@@ -359,7 +336,7 @@ class TaskScheduler:
             still_pending: List[TaskSpec] = []
             for task in pending:
                 pr = placer.place(
-                    task.min_cores, task.preferred_cores, task.max_cores,
+                    task.min_cores, task.preferred_cores,
                     single_host_only=task.single_host_only,
                 )
                 if pr is not None:
@@ -456,9 +433,9 @@ class TaskScheduler:
             required_pending = [t for t in pending if t.required]
             for task in optional_pending:
                 self._log(
-                    f"{task.task_class.upper()} UNSCHEDULED | "
-                    f"role={task.role} fid={task.frame_id} "
-                    f"cores={task.min_cores}-{task.max_cores}"
+                        f"{task.task_class.upper()} UNSCHEDULED | "
+                        f"role={task.role} fid={task.frame_id} "
+                        f"cores={task.min_cores}-{task.preferred_cores}"
                 )
                 results.append(TaskResult(
                     task=task,
@@ -472,7 +449,7 @@ class TaskScheduler:
                 f"{len(required_pending)} tasks were never scheduled: "
                 + ", ".join(
                     f"{t.task_class}(fid={t.frame_id}, "
-                    f"cores={t.min_cores}-{t.max_cores})"
+                    f"cores={t.min_cores}-{t.preferred_cores})"
                     for t in required_pending
                 )
             )

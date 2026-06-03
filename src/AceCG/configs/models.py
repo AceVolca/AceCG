@@ -189,7 +189,6 @@ class ValidationConfig:
 @dataclass(frozen=True)
 class SchedulerConfig:
     """Task-scheduler and MPI launcher configuration."""
-    launcher: Optional[str] = None
     mpirun_path: Optional[str] = None
     mpi_family: Optional[str] = None
     python_exe: str = "python"

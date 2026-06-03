@@ -260,17 +260,10 @@ class CDFMWorkflow(SamplingWorkflow):
 
     # ── batch collection ────────────────────────────────────────
 
-    def _load_resume_state(self, start_epoch: int) -> bool:
-        """Load CDFM resume state.
-
-        Returns ``True`` when the active epoch directory should be moved aside
-        before replaying ``start_epoch``.  Normal resumes load the completed
-        checkpoint from ``iter_{start_epoch - 1}``; legacy CDFM runs before
-        workflow checkpointing can only resume from the pre-epoch forcefield
-        snapshot in ``iter_{start_epoch}``.
-        """
+    def _load_resume_state(self, start_epoch: int) -> None:
+        """Load CDFM resume state from the completed workflow checkpoint."""
         if start_epoch <= 0:
-            return False
+            return
 
         prev_ff_dir = self.output_dir / f"iter_{start_epoch - 1:04d}" / "ff"
         prev_snapshot = prev_ff_dir / "workflow_checkpoint.pkl"
@@ -280,45 +273,11 @@ class CDFMWorkflow(SamplingWorkflow):
             logger.info(
                 "Resuming from epoch %d (loaded %s)", start_epoch, prev_snapshot,
             )
-            return False
-
-        current_ff_dir = self.output_dir / f"iter_{start_epoch:04d}" / "ff"
-        legacy_snapshot = current_ff_dir / "forcefield_snapshot.pkl"
-        if legacy_snapshot.exists():
-            with open(legacy_snapshot, "rb") as fh:
-                self.forcefield = pickle.load(fh)
-            self.optimizer = self._build_optimizer(self.forcefield)
-            self.trainer = self._build_trainer()
-            logger.warning(
-                "Resuming epoch %d from legacy pre-epoch forcefield snapshot %s. "
-                "No workflow checkpoint was present, so optimizer moments and "
-                "workflow RNG state are restarted from config seed.",
-                start_epoch,
-                legacy_snapshot,
-            )
-            return True
+            return
 
         raise FileNotFoundError(
-            f"Cannot resume CDFM from epoch {start_epoch}: neither completed "
-            f"checkpoint {prev_snapshot} nor legacy pre-epoch snapshot "
-            f"{legacy_snapshot} exists."
-        )
-
-    def _move_incomplete_iteration(self, iter_dir: Path) -> None:
-        """Move a partial iteration aside so replay cannot reuse stale results."""
-        if not iter_dir.exists():
-            return
-        stem = f"{iter_dir.name}_incomplete_before_resume"
-        backup = iter_dir.with_name(stem)
-        suffix = 1
-        while backup.exists():
-            backup = iter_dir.with_name(f"{stem}_{suffix:02d}")
-            suffix += 1
-        shutil.move(str(iter_dir), str(backup))
-        logger.warning(
-            "Moved incomplete iteration directory before replay: %s -> %s",
-            iter_dir,
-            backup,
+            f"Cannot resume CDFM from epoch {start_epoch}: completed workflow "
+            f"checkpoint {prev_snapshot} does not exist."
         )
 
     def _collect_cdfm_batch(
@@ -402,7 +361,7 @@ class CDFMWorkflow(SamplingWorkflow):
         results = []
         pending_validation_epoch: Optional[int] = None
 
-        clean_resume_epoch = self._load_resume_state(start_epoch)
+        self._load_resume_state(start_epoch)
         if (
             start_epoch > 0
             and self._validation_enabled()
@@ -413,9 +372,6 @@ class CDFMWorkflow(SamplingWorkflow):
 
         for epoch in range(start_epoch, n_epochs):
             iter_dir = self.output_dir / f"iter_{epoch:04d}"
-            if clean_resume_epoch and epoch == start_epoch:
-                self._move_incomplete_iteration(iter_dir)
-                clean_resume_epoch = False
             iter_dir.mkdir(parents=True, exist_ok=True)
 
             # ── Phase 1: write FF ────────────────────────────────

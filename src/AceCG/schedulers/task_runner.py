@@ -4,7 +4,7 @@ Each task runner:
 
 1. Reads a JSON task_spec from disk
 2. Runs the simulation via subprocess (backend-dispatched)
-3. Calls the post-processing function (via ``run_post(post_spec)``)
+3. Calls the post-processing function according to ``post_exec``
 4. Writes task_timing.json
 5. Optionally deletes the trajectory
 
@@ -20,8 +20,8 @@ cpu_cores : int
     Number of CPU cores allocated to this task.
 sim_backend : str
     Simulation engine identifier ("lammps"; others raise NotImplementedError).
-sim_cmd : list of str
-    Full mpirun + engine binary (without input/log/var args).
+sim_launch : dict
+    Serialized ``LaunchSpec`` for the simulation command.
 sim_input : str
     Input script filename (relative to run_dir).
 sim_log : str
@@ -38,9 +38,9 @@ trajectory_files : list of str
 extra_env : dict
     Additional environment variables.
 post_exec : dict, optional
-    If present and ``mode="mpi"``, post-processing runs via a
-    pre-built ``post_launch`` LaunchSpec.  Contains only launch metadata;
-    the compute payload comes from ``post_spec``.
+    Required when ``post_spec`` is present.  ``mode="mpi"`` runs
+    post-processing via ``post_launch``; ``mode="inproc"`` runs
+    ``MPIComputeEngine.run_post()`` in the task runner process.
     Keys: mode ("inproc"|"mpi"), n_ranks.
 """
 
@@ -54,7 +54,7 @@ import sys
 import time
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..io.logger import get_screen_logger
 
@@ -136,16 +136,15 @@ def run(spec_path: str) -> None:
 
     engine_args = _build_engine_args(sim_backend, sim_input, sim_log, sim_var)
 
-    # New path: full LaunchSpec in sim_launch.
-    # Legacy path: flat sim_cmd list (backward compat).
     task_extra_env: Dict[str, str] = spec.get("extra_env", {}) or {}
     sim_launch = spec.get("sim_launch")
-    if sim_launch is not None:
-        full_cmd = _merge_engine_args(list(sim_launch["argv"]), engine_args)
-        env = _make_launch_env(sim_launch, task_extra_env=task_extra_env)
-    else:
-        full_cmd = list(spec["sim_cmd"]) + engine_args
-        env = _make_task_env(spec)
+    if sim_launch is None:
+        raise RuntimeError(
+            "task_spec.json must contain 'sim_launch'.  Regenerate the spec "
+            "via TaskScheduler."
+        )
+    full_cmd = _merge_engine_args(list(sim_launch["argv"]), engine_args)
+    env = _make_launch_env(sim_launch, task_extra_env=task_extra_env)
 
     t0 = time.monotonic()
     stdout_path = run_dir / "sim_stdout.log"
@@ -176,20 +175,27 @@ def run(spec_path: str) -> None:
 
     try:
         if post_spec is not None:
-            if post_launch is not None:
+            mode = (post_exec or {}).get("mode")
+            if mode == "mpi":
+                if post_launch is None:
+                    raise RuntimeError(
+                        "post_exec requests MPI mode but no post_launch found in "
+                        "task_spec.json.  Regenerate the spec via the scheduler."
+                    )
                 _run_post_via_launch(
                     run_dir, post_spec, post_launch, timing,
                     task_extra_env=task_extra_env,
                 )
-            elif post_exec and post_exec.get("mode") == "mpi":
-                raise RuntimeError(
-                    "post_exec requests MPI mode but no post_launch found in "
-                    "task_spec.json.  Regenerate the spec via the scheduler."
-                )
-            else:
-                from AceCG.compute.registry import build_default_engine
+            elif mode == "inproc":
+                from AceCG.compute.mpi_engine import build_default_engine
 
                 build_default_engine().run_post(post_spec)
+            elif mode is None:
+                raise RuntimeError(
+                    "post_spec requires post_exec.mode ('mpi' or 'inproc')."
+                )
+            else:
+                raise ValueError(f"Unsupported post_exec mode {mode!r}.")
     except Exception as exc:
         timing["post_wall"] = time.monotonic() - t1
         timing["status"] = "post_failed"
@@ -280,28 +286,12 @@ def _run_post_via_launch(
         )
 
 
-def _make_task_env(spec: Dict[str, Any]) -> Dict[str, str]:
-    """Build environment for simulation subprocess.
-
-    Strips only ``PMI_*`` (any leftover from an outer MPI step); preserves
-    ``SLURM_*`` so Hydra's slurm bootstrap can see the allocation.
-    """
-    env = {
-        k: v for k, v in os.environ.items()
-        if not k.startswith("PMI_")
-    }
-    for key, value in spec.get("extra_env", {}).items():
-        env[str(key)] = str(value)
-    return env
-
-
 def run_post(
     post_spec: Dict[str, Any],
     resource_pool: Any,
     *,
     run_dir: Optional[Path] = None,
     python_exe: Optional[str] = None,
-    extra_launcher_args: Optional[List[str]] = None,
 ) -> None:
     """Run MPI post-processing using a discovered ``ResourcePool``.
 
@@ -326,8 +316,6 @@ def run_post(
     backend = resource_pool.backend
     py = python_exe or sys.executable
     payload = [py, "-m", "AceCG.compute.mpi_engine"]
-    if extra_launcher_args:
-        payload = list(extra_launcher_args) + payload
     launch = backend.realize(placement, payload, run_dir)
 
     post_launch = {

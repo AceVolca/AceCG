@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from ..potentials import POTENTIAL_REGISTRY
 
@@ -110,3 +110,35 @@ def parse_pair_style_options(
         ]
         return "hybrid", sel_styles or None
     return head, None
+
+
+def resolve_config_path(value: Any, base_dir: str | Path) -> Optional[Path]:
+    """Resolve a possibly-relative config path against *base_dir*.
+
+    Returns ``None`` for ``None``; otherwise expands ``~``, joins to *base_dir*
+    when the value is relative, and resolves it (non-strict).
+    """
+    if value is None:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path(base_dir) / path
+    return path.resolve(strict=False)
+
+
+_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def parse_bool_token(token: Any, default: Optional[bool] = None) -> Optional[bool]:
+    """Map a string token to ``True``/``False`` via the canonical token sets.
+
+    Recognizes ``1/true/yes/on`` and ``0/false/no/off`` (case-insensitive,
+    stripped); returns *default* for anything else.
+    """
+    lowered = str(token).strip().lower()
+    if lowered in _TRUE_TOKENS:
+        return True
+    if lowered in _FALSE_TOKENS:
+        return False
+    return default

@@ -59,13 +59,25 @@ class GaussianPotential(BasePotential):
         A, r0, sigma = self._params
         x = r - r0
         return A / (sigma * np.sqrt(2 * np.pi)) * np.exp(-x**2 / (2 * sigma**2))
-    
+
     def force(self, r):
         """Evaluate the scalar force ``-dU/dr`` for the Gaussian."""
         r = np.asarray(r, dtype=float)
         A, r0, sigma = self._params
         x = r - r0
         return A / (sigma**3 * np.sqrt(2*np.pi)) * x * np.exp(-x**2 / (2 * sigma**2))
+
+    def force_grad(self, r):
+        """Return the explicit force Jacobian ``dF/d[A, r0, sigma]``."""
+        r_arr = np.asarray(r, dtype=float)
+        A, r0, sigma = self._params
+        x = r_arr - r0
+        pref = np.exp(-x**2 / (2.0 * sigma**2)) / np.sqrt(2.0 * np.pi)
+        grad = np.empty(r_arr.shape + (3,), dtype=float)
+        grad[..., 0] = x * pref / sigma**3
+        grad[..., 1] = A * pref * (x**2 / sigma**2 - 1.0) / sigma**3
+        grad[..., 2] = A * x * pref * (x**2 - 3.0 * sigma**2) / sigma**6
+        return grad
 
     def dA(self, r):
         """Return ``dU/dA`` evaluated at ``r``."""
@@ -132,4 +144,3 @@ class GaussianPotential(BasePotential):
         x = r - r0
         phi = np.exp(-x**2 / (2 * sigma**2))
         return A / np.sqrt(2 * np.pi) * (x**4 - 5 * x**2 * sigma**2 + 2 * sigma**4) / sigma**7 * phi
-    

@@ -26,7 +26,7 @@ L5  Scheduler / Task Runner
     resource_pool.py, mpi_backend.py, profiler.py
 
 L4  Trainers / Solvers / Optimizers
-    trainers/analytic/{rem,mse,fm,cdrem,cdfm,l_zero,multi}.py
+    trainers/analytic/{rem,mse,fm,cdrem,cdfm,l0,multi}.py
     solvers/fm_matrix.py
     optimizers/{adam,adamW,rmsprop,newton_raphson}.py
 

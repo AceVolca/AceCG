@@ -25,10 +25,11 @@ from typing import Any, Dict, Iterable, Mapping, MutableMapping, Optional, Tuple
 
 from .parser import (
     ACGConfigError,
-    _load_dict_file,
     _parse_scalar_or_literal,
+    _parse_type_names,
     parse_acg_text,
 )
+from .utils import parse_bool_token
 from .vp_config import VPConfig, parse_vp_config
 
 
@@ -214,8 +215,10 @@ def _build_aa_ref(
     if ref_topo is None:
         raise ACGConfigError("[aa_ref] ref_topo is required.")
 
-    type_names = _parse_type_names_field(
-        aa_raw.pop("ref_topo_type_names", None), base_dir=base_dir,
+    type_names = _parse_type_names(
+        aa_raw.pop("ref_topo_type_names", None),
+        base_dir=base_dir,
+        field_label="[aa_ref] ref_topo_type_names",
     )
 
     return VPGrowthAARef(
@@ -281,36 +284,6 @@ def _apply_vp_topology_overrides(
 
 
 # ─── Field-level helpers ──────────────────────────────────────────────
-
-
-def _parse_type_names_field(
-    raw: Any, *, base_dir: Path
-) -> Optional[Dict[int, str]]:
-    """Parse ``[aa_ref] ref_topo_type_names`` into ``{int_id: name}``.
-
-    Mirrors ``parser._parse_type_names`` but dedicated to the VP Growth
-    ``aa_ref`` section so evolution of either side stays independent.
-    Accepts: ``None`` | dict | csv string ``"HG, MG, T1"`` | JSON file path.
-    """
-    if raw is None:
-        return None
-    if isinstance(raw, Mapping):
-        return {int(k): str(v) for k, v in raw.items()}
-    if not isinstance(raw, str):
-        raise ACGConfigError(
-            f"[aa_ref] ref_topo_type_names must be a dict, comma-separated "
-            f"string, or file path; got {type(raw).__name__}."
-        )
-    text = raw.strip()
-    if not text:
-        return None
-    loaded = _load_dict_file(text, base_dir=base_dir)
-    if loaded is not None:
-        return {int(k): str(v) for k, v in loaded.items()}
-    names = [n.strip() for n in text.split(",") if n.strip()]
-    if not names:
-        return None
-    return {i + 1: name for i, name in enumerate(names)}
 
 
 def _parse_frame_ids(raw: Any) -> Optional[Tuple[int, ...]]:
@@ -383,10 +356,10 @@ def _as_bool(raw: Any) -> bool:
     if isinstance(raw, (int, float)):
         return bool(raw)
     if isinstance(raw, str):
-        low = raw.strip().lower()
-        if low in {"true", "yes", "1", "on"}:
-            return True
-        if low in {"false", "no", "0", "off", ""}:
+        parsed = parse_bool_token(raw)
+        if parsed is not None:
+            return parsed
+        if raw.strip() == "":
             return False
     raise ACGConfigError(f"Cannot interpret {raw!r} as a boolean.")
 

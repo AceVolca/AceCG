@@ -189,43 +189,6 @@ class FMTrainerAnalytic(BaseTrainer):
         h[:, ~param_mask] = 0.0
         return g, h
 
-    def _optimizer_step_with_optional_hessian(
-        self,
-        grad: np.ndarray,
-        hessian: Optional[np.ndarray],
-        *,
-        apply_update: bool,
-    ) -> np.ndarray:
-        if not apply_update:
-            return np.zeros_like(grad)
-        try:
-            if self.optimizer_accepts_hessian():
-                if hessian is None:
-                    raise ValueError("Hessian is required for the configured optimizer.")
-                update = self.optimizer.step(grad, hessian=hessian)
-            else:
-                update = self.optimizer.step(grad)
-        except np.linalg.LinAlgError:
-            if hessian is None or (not hasattr(self.optimizer, "mask")) or (not hasattr(self.optimizer, "lr")):
-                raise
-            mask = np.asarray(self.optimizer.mask, dtype=bool)
-            grad_masked = np.asarray(grad, dtype=np.float64)[mask]
-            h_masked = np.asarray(hessian, dtype=np.float64)[np.ix_(mask, mask)]
-            step_masked, *_ = np.linalg.lstsq(h_masked, grad_masked, rcond=None)
-            step = np.zeros_like(grad, dtype=np.float64)
-            step[mask] = step_masked
-            lr = float(self.optimizer.lr)
-            self.optimizer.L = np.asarray(self.optimizer.L, dtype=np.float64) - lr * step
-            if hasattr(self.optimizer, "last_grad"):
-                self.optimizer.last_grad = np.asarray(grad, dtype=np.float64).copy()
-            if hasattr(self.optimizer, "last_hessian"):
-                self.optimizer.last_hessian = np.asarray(hessian, dtype=np.float64).copy()
-            if hasattr(self.optimizer, "last_update"):
-                self.optimizer.last_update = -lr * step
-            update = -lr * step
-        self.clamp_and_update()
-        return np.asarray(update, dtype=np.float64)
-
     def step(self, batch: Dict[str, Any], apply_update: bool = True) -> FMOut:
         """Run one FM optimizer step from normalized FM statistics.
 
@@ -267,7 +230,7 @@ class FMTrainerAnalytic(BaseTrainer):
 
         grad, hessian = self._apply_mask_to_grad_hessian(grad, hessian)
 
-        update = self._optimizer_step_with_optional_hessian(grad, hessian, apply_update=apply_update)
+        update = self._optimizer_step(grad, hessian, apply_update=apply_update)
 
         if self.logger is not None:
             self.logger.add_scalar("FM/loss", float(loss), step_index)

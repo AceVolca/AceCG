@@ -14,12 +14,6 @@ def user_timestamp() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
 
 
-def _coerce_message(message: str, args: tuple[object, ...]) -> str:
-    if not args:
-        return str(message)
-    return str(message) % args
-
-
 def format_screen_message(
     component: str,
     message: str,
@@ -86,7 +80,7 @@ class ScreenLogger:
         rank: int | None = None,
         stream: TextIO | None = None,
     ) -> None:
-        text = _coerce_message(message, args)
+        text = str(message) % args if args else str(message)
         if elapsed is None and self.start_time is not None:
             elapsed = time.monotonic() - self.start_time
         target = stream

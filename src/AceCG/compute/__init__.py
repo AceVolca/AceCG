@@ -31,7 +31,7 @@ def __getattr__(name: str):
         globals()[name] = MPIComputeEngine
         return MPIComputeEngine
     if name == "build_default_engine":
-        from .registry import build_default_engine
+        from .mpi_engine import build_default_engine
 
         globals()[name] = build_default_engine
         return build_default_engine

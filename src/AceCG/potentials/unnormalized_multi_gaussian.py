@@ -189,6 +189,33 @@ class UnnormalizedMultiGaussianPotential(BasePotential):
             out = np.where(np.asarray(r, dtype=float) <= self.cutoff, out, 0.0)
         return out
 
+    def force_grad(self, r: np.ndarray) -> np.ndarray:
+        """Return ``dF/dtheta`` for all Gaussian components in one matrix pass."""
+        r_arr = np.asarray(r, dtype=float)
+        r_flat = r_arr.reshape(-1)
+        x, phi = self._xr_phi(r_flat)
+        s = self.sigma
+
+        grad = np.empty((r_flat.size, 3 * self.n_gauss), dtype=float)
+        grad[:, 0::3] = 2.0 * x * phi / (s[None, :] ** 2)
+        grad[:, 1::3] = (
+            2.0
+            * self.A[None, :]
+            * phi
+            * (-1.0 / (s[None, :] ** 2) + 2.0 * x * x / (s[None, :] ** 4))
+        )
+        grad[:, 2::3] = (
+            4.0
+            * self.A[None, :]
+            * x
+            * phi
+            * (x * x - s[None, :] * s[None, :])
+            / (s[None, :] ** 5)
+        )
+        if np.isfinite(self.cutoff):
+            grad[r_flat > self.cutoff, :] = 0.0
+        return grad.reshape(r_arr.shape + (3 * self.n_gauss,))
+
     # -------- zeros for cross-terms --------
     def zero(self, r: np.ndarray) -> np.ndarray:
         """Return zeros shaped like ``r`` for cross-component second terms."""

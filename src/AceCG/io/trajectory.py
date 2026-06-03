@@ -677,7 +677,7 @@ def iter_frames(
 ):
     """
     Iterator for frame extraction from an MDAnalysis Universe trajectory.
-    Yield one engine frame at a time. 
+    Yield one engine frame at a time.
 
     This is the
     canonical source for one-pass post-processing. It never stores more than

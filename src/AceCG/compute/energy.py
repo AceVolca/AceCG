@@ -24,7 +24,7 @@ from ..configs.energy_mask import (
 )
 from ..topology.forcefield import Forcefield
 from ..topology.types import InteractionKey
-from .frame_geometry import FrameGeometry
+from .frame_geometry import FrameGeometry, _geometry_sample_shape
 
 
 def _interaction_values(frame_geometry: FrameGeometry, key):
@@ -37,13 +37,6 @@ def _interaction_values(frame_geometry: FrameGeometry, key):
     if key.style == "dihedral":
         return frame_geometry.dihedral_values.get(key)
     return None
-
-
-def _geometry_sample_shape(frame_geometry: FrameGeometry) -> tuple[int, ...]:
-    positions = np.asarray(frame_geometry.positions)
-    if positions.ndim < 2:
-        return ()
-    return tuple(positions.shape[:-2])
 
 
 def _sum_last_axis(values: np.ndarray) -> np.ndarray:

@@ -311,7 +311,7 @@ def test_parse_acg_file_requires_validation_forcefield_template_for_source_free_
         parse_acg_file(cfg_path)
 
 
-def test_parse_acg_file_warns_on_deprecated_scheduler_launcher(tmp_path):
+def test_parse_acg_file_warns_on_unknown_scheduler_launcher(tmp_path):
     forcefield_dir = tmp_path / "forcefield"
     forcefield_dir.mkdir()
     (forcefield_dir / "real.settings").write_text("", encoding="utf-8")
@@ -344,10 +344,10 @@ def test_parse_acg_file_warns_on_deprecated_scheduler_launcher(tmp_path):
         encoding="utf-8",
     )
 
-    with pytest.warns(DeprecationWarning, match=r"scheduler\.launcher"):
+    with pytest.warns(UserWarning, match=r"Unknown key 'launcher'"):
         cfg = parse_acg_file(cfg_path)
 
-    assert cfg.scheduler.launcher is None
+    assert cfg.scheduler.extras["launcher"] == "local"
 
 
 def test_parse_acg_file_accepts_scheduler_mpi_family_override(tmp_path):

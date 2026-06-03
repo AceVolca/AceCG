@@ -175,30 +175,6 @@ class CDFMTrainerAnalytic(BaseTrainer):
             batch["x_weight"] = np.asarray(x_weight, dtype=np.float64)
         return batch
 
-    def _optimizer_step(
-        self,
-        grad: np.ndarray,
-        *,
-        apply_update: bool,
-        mask_override: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
-        if not apply_update:
-            return np.zeros_like(grad)
-        original_mask = None
-        if mask_override is not None:
-            original_mask = np.asarray(self.optimizer.mask, dtype=bool).copy()
-            self.optimizer.mask = np.asarray(mask_override, dtype=bool).copy()
-        try:
-            if self.optimizer_accepts_hessian():
-                update = self.optimizer.step(grad, hessian=None)
-            else:
-                update = self.optimizer.step(grad)
-            self.clamp_and_update()
-            return np.asarray(update, dtype=np.float64)
-        finally:
-            if original_mask is not None:
-                self.optimizer.mask = original_mask
-
     def step(self, batch: Dict[str, Any], apply_update: bool = True) -> CDFMOut:
         """Aggregate a CDFM batch and optionally apply one optimizer update.
 

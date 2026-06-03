@@ -35,9 +35,9 @@ class MultiGaussianConfig:
 			Weight factor for cutoff value (V=0) constraints.
 		weight_c1 : float
 			Weight factor for cutoff slope (dV/dr=0) constraints.
-        use_repulsive : bool
-        	If True, fix a Gaussian component to be repulsive.
-        repulsive_index : int or None
+            use_repulsive : bool
+                If True, fix a Gaussian component to be repulsive.
+            repulsive_index : int or None
 			Index of the Gaussian component to force as repulsive.
 			If None, no repulsive constraint is applied.
 		repulsive_A_min : float
@@ -173,7 +173,7 @@ class MultiGaussianTableFitter(BaseTableFitter):
                     res_c1 = Da @ A   # dV/dr(anchors)
                     return np.concatenate([cfg.weight_data*res_data, cfg.weight_c0*res_c0, cfg.weight_c1*res_c1])
                 return cfg.weight_data * res_data
-            
+
             # bounds
             # build temporary forcefield entry for just this pair
             tmp_pair2pot = {
@@ -195,7 +195,7 @@ class MultiGaussianTableFitter(BaseTableFitter):
                 k = int(cfg.repulsive_index)
                 lb[3*k+0] = max(lb[3*k+0], cfg.repulsive_A_min)
                 ub[3*k+1] = min(ub[3*k+1], cfg.repulsive_r0_max)
-            
+
             # feasibility check
             viol = (p0 < lb) | (p0 > ub)
             if np.any(viol):

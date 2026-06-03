@@ -10,7 +10,7 @@ import numpy as np
 from ..configs.energy_mask import normalize_energy_mask_spec
 from ..topology.forcefield import Forcefield
 from ..topology.types import InteractionKey
-from .base import BasePotential
+from .base import BasePotential, potential_bounds, potential_mask
 
 
 class BoundaryPriorPotential(BasePotential):
@@ -71,15 +71,49 @@ class BoundaryPriorPotential(BasePotential):
     def is_param_linear(self) -> np.ndarray:
         return self.base.is_param_linear()
 
-    def is_gauge_free_energy_grad_cacheable(self) -> np.ndarray:
-        return self.base.is_gauge_free_energy_grad_cacheable()
+    @property
+    def metadata_version(self) -> int:
+        """Metadata version for wrapper-local state plus the owned base potential."""
+        return int(super().metadata_version) + int(self._base_metadata_version() or 0)
 
-    def param_bounds(self) -> tuple[np.ndarray, np.ndarray]:
-        if hasattr(self.base, "param_bounds"):
-            lb, ub = self.base.param_bounds()
-            return np.asarray(lb, dtype=float), np.asarray(ub, dtype=float)
+    @property
+    def param_mask(self) -> np.ndarray:
+        """Forward optimizer-active parameter mask to the wrapped potential."""
+        return potential_mask(self.base)
+
+    @param_mask.setter
+    def param_mask(self, mask: np.ndarray) -> None:
+        mask_arr = np.asarray(mask, dtype=bool).reshape(-1)
         n_params = self.n_params()
-        return np.full(n_params, -np.inf), np.full(n_params, np.inf)
+        if mask_arr.shape != (n_params,):
+            raise ValueError(f"param_mask shape must be ({n_params},), got {mask_arr.shape}")
+        before = self._base_metadata_version()
+        self.base.param_mask = mask_arr.copy()
+        self._bump_base_metadata_version_if_unchanged(before)
+        self._bump_metadata_version()
+
+    @property
+    def param_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        """Forward parameter bounds to the wrapped potential."""
+        return potential_bounds(self.base)
+
+    @param_bounds.setter
+    def param_bounds(self, bounds: tuple[np.ndarray, np.ndarray]) -> None:
+        lb, ub = bounds
+        lb_arr = np.asarray(lb, dtype=float).reshape(-1)
+        ub_arr = np.asarray(ub, dtype=float).reshape(-1)
+        n_params = self.n_params()
+        if lb_arr.shape != (n_params,) or ub_arr.shape != (n_params,):
+            raise ValueError(
+                f"param_bounds shape must be ({n_params},), "
+                f"got lb={lb_arr.shape}, ub={ub_arr.shape}"
+            )
+        if np.any(lb_arr > ub_arr):
+            raise ValueError("param_bounds lower entries cannot exceed upper entries.")
+        before = self._base_metadata_version()
+        self.base.param_bounds = (lb_arr.copy(), ub_arr.copy())
+        self._bump_base_metadata_version_if_unchanged(before)
+        self._bump_metadata_version()
 
     def value(self, r: np.ndarray) -> np.ndarray:
         raw = np.asarray(r, dtype=float)
@@ -235,6 +269,24 @@ class BoundaryPriorPotential(BasePotential):
 
     def _base_force_at(self, coord: float) -> float:
         return float(np.asarray(self.base.force(np.asarray([coord], dtype=float))).reshape(-1)[0])
+
+    def _base_metadata_version(self) -> int | None:
+        version = getattr(self.base, "metadata_version", None)
+        if callable(version):
+            version = version()
+        if version is None:
+            version = getattr(self.base, "_metadata_version", None)
+        return None if version is None else int(version)
+
+    def _bump_base_metadata_version_if_unchanged(self, before: int | None) -> None:
+        if before is None:
+            return
+        after = self._base_metadata_version()
+        if after != before:
+            return
+        bump = getattr(self.base, "_bump_metadata_version", None)
+        if callable(bump):
+            bump()
 
 
 def apply_boundary_prior(

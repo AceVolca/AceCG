@@ -143,6 +143,30 @@ class LennardJonesSoftPotential(BasePotential):
         # Force is negative gradient
         return -dEdr
 
+    def force_grad(self, r: np.ndarray) -> np.ndarray:
+        """Return the explicit force Jacobian ``dF/d[epsilon, sigma, lambda]``."""
+        r_arr = np.asarray(r, dtype=float)
+        epsilon, sigma, lam = self._params
+        alpha_LJ = self.alpha_LJ
+        _, _, _, _, _, _, gA, gAA, r6_over_sig6 = self._core_quantities(r_arr)
+
+        h = lam**self.n
+        h1 = self.n * lam ** (self.n - 1)
+        A_r = 6.0 * r6_over_sig6 / r_arr
+        A_sigma = -6.0 * r6_over_sig6 / sigma
+        A_r_sigma = -6.0 * A_r / sigma
+        A_lambda = -2.0 * alpha_LJ * (1.0 - lam)
+
+        grad = np.empty(r_arr.shape + (3,), dtype=float)
+        grad[..., 0] = -4.0 * h * gA * A_r
+        grad[..., 1] = -4.0 * epsilon * h * (
+            gAA * A_sigma * A_r + gA * A_r_sigma
+        )
+        grad[..., 2] = -4.0 * epsilon * (
+            h1 * gA * A_r + h * gAA * A_lambda * A_r
+        )
+        return grad
+
     # ------------------------------------------------------------------
     # First derivatives with respect to parameters
     # ------------------------------------------------------------------

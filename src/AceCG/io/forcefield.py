@@ -11,10 +11,11 @@ import numpy as np
 
 from ..fitters import TABLE_FITTERS
 from ..potentials import POTENTIAL_REGISTRY
-from ..potentials.base import BasePotential
+from ..potentials.base import BasePotential, potential_style_labels
 from ..topology.forcefield import Forcefield
 from ..topology.topology_array import TopologyArrays
 from ..topology.types import InteractionKey
+from .lammps_input import iter_commands, tokenize_line
 from .tables import (
     cap_table_forces,
     estimate_table_fp,
@@ -22,22 +23,18 @@ from .tables import (
     parse_lammps_table,
     write_lammps_table,
 )
-_TRUE_MASK_TOKENS = frozenset({"1", "true", "yes", "on"})
-_FALSE_MASK_TOKENS = frozenset({"0", "false", "no", "off"})
 _BOUND_SECTION_TOKENS = frozenset({"lb", "ub"})
 
 
 def _parse_bool_mask_tokens(tokens: Sequence[str]) -> Optional[np.ndarray]:
+    from ..configs.utils import parse_bool_token
+
     values: list[bool] = []
     for token in tokens:
-        lowered = str(token).strip().lower()
-        if lowered in _TRUE_MASK_TOKENS:
-            values.append(True)
-            continue
-        if lowered in _FALSE_MASK_TOKENS:
-            values.append(False)
-            continue
-        return None
+        parsed = parse_bool_token(token)
+        if parsed is None:
+            return None
+        values.append(parsed)
     return np.asarray(values, dtype=bool)
 
 
@@ -146,34 +143,26 @@ def _read_lmpffmask_spec(
     entries: list[tuple[InteractionKey, Optional[str], tuple[str, ...]]] = []
     seen: set[tuple[InteractionKey, Optional[str]]] = set()
 
-    with open(file, "r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            body = raw_line.split("#", 1)[0].strip()
-            if not body:
-                continue
-            tokens = body.split()
-            if not tokens:
-                continue
+    for tokens in iter_commands(file):
+        parsed = _parse_pair_mask_spec(
+            tokens,
+            pair_style=pair_style,
+            pair_typ_sel=pair_typ_sel,
+        )
+        if parsed is None:
+            parsed = _parse_bonded_mask_spec(tokens, topology_arrays=topology_arrays)
+        if parsed is None:
+            continue
 
-            parsed = _parse_pair_mask_spec(
-                tokens,
-                pair_style=pair_style,
-                pair_typ_sel=pair_typ_sel,
-            )
-            if parsed is None:
-                parsed = _parse_bonded_mask_spec(tokens, topology_arrays=topology_arrays)
-            if parsed is None:
-                continue
-
-            key, potential_style, payload = parsed
-            if not _looks_like_mask_payload(payload):
-                continue
-            seen_key = (key, potential_style)
-            if seen_key in seen:
-                style_label = f" {potential_style}" if potential_style else ""
-                raise ValueError(f"Duplicate mask entry for {key.label()}{style_label} in {file!r}.")
-            seen.add(seen_key)
-            entries.append((key, potential_style, tuple(payload)))
+        key, potential_style, payload = parsed
+        if not _looks_like_mask_payload(payload):
+            continue
+        seen_key = (key, potential_style)
+        if seen_key in seen:
+            style_label = f" {potential_style}" if potential_style else ""
+            raise ValueError(f"Duplicate mask entry for {key.label()}{style_label} in {file!r}.")
+        seen.add(seen_key)
+        entries.append((key, potential_style, tuple(payload)))
 
     return tuple(entries)
 
@@ -188,36 +177,28 @@ def _read_lmpffbounds_spec(
     entries: list[tuple[InteractionKey, Optional[str], tuple[str, ...], tuple[str, ...]]] = []
     seen: set[tuple[InteractionKey, Optional[str]]] = set()
 
-    with open(file, "r", encoding="utf-8") as handle:
-        for raw_line in handle:
-            body = raw_line.split("#", 1)[0].strip()
-            if not body:
-                continue
-            tokens = body.split()
-            if not tokens:
-                continue
+    for tokens in iter_commands(file):
+        parsed = _parse_pair_mask_spec(
+            tokens,
+            pair_style=pair_style,
+            pair_typ_sel=pair_typ_sel,
+        )
+        if parsed is None:
+            parsed = _parse_bonded_mask_spec(tokens, topology_arrays=topology_arrays)
+        if parsed is None:
+            continue
 
-            parsed = _parse_pair_mask_spec(
-                tokens,
-                pair_style=pair_style,
-                pair_typ_sel=pair_typ_sel,
-            )
-            if parsed is None:
-                parsed = _parse_bonded_mask_spec(tokens, topology_arrays=topology_arrays)
-            if parsed is None:
-                continue
-
-            key, potential_style, payload = parsed
-            bounds_payload = _parse_bounds_payload(payload)
-            if bounds_payload is None:
-                continue
-            seen_key = (key, potential_style)
-            if seen_key in seen:
-                style_label = f" {potential_style}" if potential_style else ""
-                raise ValueError(f"Duplicate bounds entry for {key.label()}{style_label} in {file!r}.")
-            seen.add(seen_key)
-            lb_tokens, ub_tokens = bounds_payload
-            entries.append((key, potential_style, lb_tokens, ub_tokens))
+        key, potential_style, payload = parsed
+        bounds_payload = _parse_bounds_payload(payload)
+        if bounds_payload is None:
+            continue
+        seen_key = (key, potential_style)
+        if seen_key in seen:
+            style_label = f" {potential_style}" if potential_style else ""
+            raise ValueError(f"Duplicate bounds entry for {key.label()}{style_label} in {file!r}.")
+        seen.add(seen_key)
+        lb_tokens, ub_tokens = bounds_payload
+        entries.append((key, potential_style, lb_tokens, ub_tokens))
 
     return tuple(entries)
 
@@ -300,41 +281,6 @@ def _append_lmpff_potential(
     forcefield.setdefault(key, []).append(_set_lmpff_potential_style(pot, style))
 
 
-def _lmpff_potential_style_labels(pot: BasePotential) -> set[str]:
-    """Return LAMMPS-style labels for selecting one potential from an overlay."""
-
-    def explicit_labels(obj: Any) -> set[str]:
-        labels: set[str] = set()
-        for attr in ("_acecg_lammps_style", "_acecg_style", "lammps_style"):
-            value = getattr(obj, attr, None)
-            if callable(value):
-                value = value()
-            if value is None:
-                continue
-            if isinstance(value, str):
-                labels.add(value.strip().lower())
-            elif isinstance(value, Sequence):
-                labels.update(str(item).strip().lower() for item in value)
-        return {label for label in labels if label}
-
-    labels = explicit_labels(pot)
-    wrapped = getattr(pot, "potential", None)
-    if wrapped is not None and wrapped is not pot:
-        labels.update(explicit_labels(wrapped))
-    if labels:
-        return labels
-
-    targets = [pot]
-    if wrapped is not None and wrapped is not pot:
-        targets.insert(0, wrapped)
-    inferred: set[str] = set()
-    for target in targets:
-        for candidate_style, cls in POTENTIAL_REGISTRY.items():
-            if isinstance(target, cls):
-                inferred.add(str(candidate_style).strip().lower())
-    return inferred
-
-
 def _select_lmpff_potential(
     value: BasePotential | List[BasePotential],
     style: str,
@@ -342,16 +288,21 @@ def _select_lmpff_potential(
     occurrence: Optional[int] = None,
 ) -> BasePotential:
     pots = value if isinstance(value, list) else [value]
-    if len(pots) == 1 and occurrence is None:
-        return pots[0]
+    if len(pots) == 1:
+        if occurrence is None or occurrence == 0:
+            return pots[0]
+        raise KeyError(
+            f"No occurrence {occurrence + 1} of style {style!r} found for {key.label()}. "
+            "The forcefield has only one potential for this interaction."
+        )
     style_norm = str(style).strip().lower()
-    matches = [pot for pot in pots if style_norm in _lmpff_potential_style_labels(pot)]
+    matches = [pot for pot in pots if style_norm in potential_style_labels(pot)]
     if not matches:
         available = sorted(
             {
                 label
                 for pot in pots
-                for label in _lmpff_potential_style_labels(pot)
+                for label in potential_style_labels(pot)
             }
         )
         raise KeyError(
@@ -429,12 +380,11 @@ def ReadLmpFF(
     base_dir = os.path.dirname(os.path.abspath(file))
     forcefield: Dict[InteractionKey, List[BasePotential]] = {}
 
-    with open(file, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-
-    for line in lines:
-        if "pair_coeff" in line:
-            tmp = line.split()
+    for tmp in iter_commands(file):
+        keyword = tmp[0]
+        if keyword == "pair_coeff":
+            if len(tmp) <= param_offset:
+                continue
             if pair_style == "hybrid":
                 style = tmp[3]
             else:
@@ -482,42 +432,42 @@ def ReadLmpFF(
                         pot = constructor(pair.types[0], pair.types[1], *params)
                     _append_lmpff_potential(forcefield, pair, pot, style)
 
-        else:
-            for coeff_kw, kind in (("bond_coeff", "bond"), ("angle_coeff", "angle")):
-                if coeff_kw not in line:
-                    continue
-                tmp = line.split()
-                if not tmp or tmp[0] != coeff_kw or len(tmp) < 4:
-                    continue
-                type_num = tmp[1]
-                bonded_style = tmp[2]
-                bonded_type_id_to_key = getattr(topology_arrays, f"{kind}_type_id_to_key", None)
-                key = InteractionKey(style=kind, types=(type_num,))
-                if bonded_type_id_to_key is not None and str(type_num).isdigit():
-                    key = bonded_type_id_to_key.get(int(type_num) - 1, key)
+        elif keyword in {"bond_coeff", "angle_coeff"}:
+            if len(tmp) < 4:
+                continue
+            kind = keyword.split("_", 1)[0]
+            type_num = tmp[1]
+            bonded_style = tmp[2]
+            bonded_type_id_to_key = getattr(topology_arrays, f"{kind}_type_id_to_key", None)
+            key = InteractionKey(style=kind, types=(type_num,))
+            if bonded_type_id_to_key is not None and str(type_num).isdigit():
+                key = bonded_type_id_to_key.get(int(type_num) - 1, key)
 
-                if bonded_style == "table" and len(tmp) >= 5:
-                    table_file = tmp[3]
-                    if not os.path.isabs(table_file):
-                        table_file = os.path.join(base_dir, table_file)
-                    fitter_overrides = dict(table_fit_overrides or {})
-                    if table_fit == "bspline":
-                        fitter_overrides["bonded"] = True
-                    fitter = TABLE_FITTERS.create(table_fit, **fitter_overrides)
-                    pot = fitter.fit(table_file, typ1=key.types[0], typ2=key.types[-1])
-                    forcefield[key] = [_set_lmpff_potential_style(pot, bonded_style)]
+            if bonded_style == "table" and len(tmp) >= 5:
+                table_file = tmp[3]
+                if not os.path.isabs(table_file):
+                    table_file = os.path.join(base_dir, table_file)
+                fitter_overrides = dict(table_fit_overrides or {})
+                if table_fit == "bspline":
+                    fitter_overrides["bonded"] = True
+                    # Bonded tables often rely on their outer padding as a
+                    # restoring tail; do not flatten them at the table edge.
+                    fitter_overrides["anchor_to_cutoff"] = False
+                fitter = TABLE_FITTERS.create(table_fit, **fitter_overrides)
+                pot = fitter.fit(table_file, typ1=key.types[0], typ2=key.types[-1])
+                forcefield[key] = [_set_lmpff_potential_style(pot, bonded_style)]
 
-                elif bonded_style == "harmonic" and len(tmp) >= 5:
-                    from ..potentials.harmonic import HarmonicPotential
+            elif bonded_style == "harmonic" and len(tmp) >= 5:
+                from ..potentials.harmonic import HarmonicPotential
 
-                    k_val = float(tmp[3])
-                    r0_val = float(tmp[4])
-                    scale = (np.pi / 180.0) ** 2 if kind == "angle" else 1.0
-                    typ1 = key.types[0]
-                    typ2 = key.types[-1]
-                    typ3 = key.types[1] if kind == "angle" and len(key.types) == 3 else None
-                    pot = HarmonicPotential(typ1, typ2, k_val, r0_val, typ3=typ3, scale=scale)
-                    forcefield[key] = [_set_lmpff_potential_style(pot, bonded_style)]
+                k_val = float(tmp[3])
+                r0_val = float(tmp[4])
+                scale = (np.pi / 180.0) ** 2 if kind == "angle" else 1.0
+                typ1 = key.types[0]
+                typ2 = key.types[-1]
+                typ3 = key.types[1] if kind == "angle" and len(key.types) == 3 else None
+                pot = HarmonicPotential(typ1, typ2, k_val, r0_val, typ3=typ3, scale=scale)
+                forcefield[key] = [_set_lmpff_potential_style(pot, bonded_style)]
 
     return Forcefield(forcefield)
 
@@ -568,8 +518,13 @@ def WriteLmpFF(
 
     pair_occurrences: Dict[Tuple[InteractionKey, str], int] = {}
     for i, line in enumerate(lines):
-        if "pair_coeff" in line:
-            tmp = line.split()
+        tmp = list(tokenize_line(line))
+        if not tmp:
+            continue
+        keyword = tmp[0]
+        if keyword == "pair_coeff":
+            if len(tmp) <= param_offset:
+                continue
             if pair_style == "hybrid":
                 style = tmp[3]
             else:
@@ -594,6 +549,8 @@ def WriteLmpFF(
                         occurrence=occurrence,
                     )
                     if style == "table":
+                        if len(tmp) <= param_offset + 1:
+                            continue
                         table_token = tmp[param_offset]
                         source_table_file = table_token
                         dest_table_file = table_token
@@ -621,52 +578,50 @@ def WriteLmpFF(
                         tmp[param_offset : param_offset + n_param] = map(str, params)
                         lines[i] = "   ".join(tmp) + "\n"
 
-        else:
-            for coeff_keyword in ("bond_coeff", "angle_coeff"):
-                if coeff_keyword not in line:
+        elif keyword in {"bond_coeff", "angle_coeff"}:
+            if len(tmp) < 3:
+                continue
+            kind = keyword.split("_", 1)[0]
+            type_num = tmp[1]
+            lookup_key = InteractionKey(style=kind, types=(type_num,))
+            bonded_type_id_to_key = getattr(topology_arrays, f"{kind}_type_id_to_key", None)
+            if bonded_type_id_to_key is not None and type_num.isdigit():
+                lookup_key = bonded_type_id_to_key.get(int(type_num) - 1, lookup_key)
+            if lookup_key not in forcefield:
+                continue
+            bonded_style = tmp[2]
+            pot = _select_lmpff_potential(forcefield[lookup_key], bonded_style, lookup_key)
+            if bonded_style == "table":
+                if len(tmp) < 4:
                     continue
-                tmp = line.split()
-                if tmp[0] != coeff_keyword:
-                    continue
-                kind = coeff_keyword.split("_")[0]
-                type_num = tmp[1]
-                lookup_key = InteractionKey(style=kind, types=(type_num,))
-                bonded_type_id_to_key = getattr(topology_arrays, f"{kind}_type_id_to_key", None)
-                if bonded_type_id_to_key is not None and type_num.isdigit():
-                    lookup_key = bonded_type_id_to_key.get(int(type_num) - 1, lookup_key)
-                if lookup_key not in forcefield:
-                    continue
-                bonded_style = tmp[2] if len(tmp) > 2 else ""
-                pot = _select_lmpff_potential(forcefield[lookup_key], bonded_style, lookup_key)
-                if bonded_style == "table":
-                    table_token = tmp[3]
-                    source_table_file = table_token
-                    dest_table_file = table_token
-                    if not os.path.isabs(table_token):
-                        source_table_file = os.path.join(old_base_dir, table_token)
-                        dest_table_file = os.path.join(new_base_dir, table_token)
-                    Path(dest_table_file).parent.mkdir(parents=True, exist_ok=True)
-                    r, _, _ = parse_lammps_table(source_table_file)
-                    V = pot.value(r)
-                    F = pot.force(r)
-                    table_name = tmp[4] if len(tmp) > 4 else Path(dest_table_file).stem
-                    eq = find_equilibrium(r, F)
-                    fp = estimate_table_fp(r, F)
-                    write_lammps_table(
-                        filename=dest_table_file,
-                        r=r,
-                        V=V,
-                        F=F,
-                        comment=f"AceCG updated {kind} {table_name}",
-                        table_name=table_name,
-                        table_style=kind,
-                        eq=eq,
-                        fp=fp,
-                    )
-                elif bonded_style == "harmonic":
-                    params = list(pot.lammps_params() if hasattr(pot, "lammps_params") else pot.get_params())
-                    tmp[3:] = [f"{p:.8g}" for p in params]
-                    lines[i] = "   ".join(tmp) + "\n"
+                table_token = tmp[3]
+                source_table_file = table_token
+                dest_table_file = table_token
+                if not os.path.isabs(table_token):
+                    source_table_file = os.path.join(old_base_dir, table_token)
+                    dest_table_file = os.path.join(new_base_dir, table_token)
+                Path(dest_table_file).parent.mkdir(parents=True, exist_ok=True)
+                r, _, _ = parse_lammps_table(source_table_file)
+                V = pot.value(r)
+                F = pot.force(r)
+                table_name = tmp[4] if len(tmp) > 4 else Path(dest_table_file).stem
+                eq = find_equilibrium(r, F)
+                fp = estimate_table_fp(r, F)
+                write_lammps_table(
+                    filename=dest_table_file,
+                    r=r,
+                    V=V,
+                    F=F,
+                    comment=f"AceCG updated {kind} {table_name}",
+                    table_name=table_name,
+                    table_style=kind,
+                    eq=eq,
+                    fp=fp,
+                )
+            elif bonded_style == "harmonic":
+                params = list(pot.lammps_params() if hasattr(pot, "lammps_params") else pot.get_params())
+                tmp[3:] = [f"{p:.8g}" for p in params]
+                lines[i] = "   ".join(tmp) + "\n"
 
     Path(new_file).parent.mkdir(parents=True, exist_ok=True)
     with open(new_file, "w", encoding="utf-8") as f:
@@ -686,14 +641,7 @@ def resolve_source_table_entries(
     settings_path = Path(source_forcefield_path).resolve()
     entries: Dict[InteractionKey, Dict[str, str]] = {}
 
-    for raw_line in settings_path.read_text(encoding="utf-8").splitlines():
-        body = raw_line.split("#", 1)[0].strip()
-        if not body:
-            continue
-        tokens = body.split()
-        if not tokens:
-            continue
-
+    for tokens in iter_commands(settings_path):
         keyword = tokens[0].lower()
         if keyword == "pair_coeff":
             if pair_style == "hybrid":
@@ -748,8 +696,6 @@ def _resolve_table_path(settings_path: Path, table_token: str) -> Path:
 
 
 __all__ = [
-    "FFParamArray",
-    "FFParamIndexMap",
     "ReadLmpFF",
     "ReadLmpFFBounds",
     "ReadLmpFFMask",

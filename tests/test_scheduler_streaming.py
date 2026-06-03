@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import sys
-import warnings
 from pathlib import Path
 
 import pytest
@@ -224,49 +223,6 @@ def test_launch_injects_expected_mpi_size_for_mpi_post(monkeypatch, tmp_path):
 
     spec = json.loads((Path(task.run_dir) / "task_spec.json").read_text(encoding="utf-8"))
     assert spec["post_spec"]["expected_mpi_size"] == 4
-
-
-def test_taskspec_warns_once_when_max_cores_differs(monkeypatch, tmp_path):
-    import AceCG.schedulers.task_scheduler as scheduler_module
-
-    monkeypatch.setattr(
-        scheduler_module,
-        "_MAX_CORES_UNUSED_WARNING_EMITTED",
-        False,
-    )
-
-    run_dir = tmp_path / "warn_once"
-    run_dir.mkdir()
-    (run_dir / "test.in").write_text("# dummy\n", encoding="utf-8")
-
-    with pytest.warns(
-        RuntimeWarning,
-        match=r"TaskSpec\.max_cores is currently unused",
-    ):
-        scheduler_module.TaskSpec(
-            task_class="xz",
-            frame_id=None,
-            run_dir=str(run_dir),
-            cpu_cores=4,
-            min_cores=2,
-            preferred_cores=4,
-            max_cores=8,
-            sim_input="test.in",
-        )
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        scheduler_module.TaskSpec(
-            task_class="zbx",
-            frame_id=0,
-            run_dir=str(run_dir),
-            cpu_cores=4,
-            min_cores=2,
-            preferred_cores=4,
-            max_cores=8,
-            sim_input="test.in",
-        )
-    assert not caught
 
 
 def test_scheduler_sim_var_rng_state_roundtrips(tmp_path):

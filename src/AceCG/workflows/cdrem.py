@@ -101,7 +101,7 @@ class CDREMWorkflow(SamplingWorkflow):
     ) -> TaskSpec:
         """Build a ``TaskSpec`` for the single free-CG xz replica."""
         cfg = self.config
-        xz_cpu, xz_min, xz_pref, xz_max = self._elastic_core_bounds(
+        xz_cpu, xz_min, xz_pref = self._elastic_core_bounds(
             cfg.sampling.ncores,
         )
         need_hessian = bool(
@@ -138,7 +138,6 @@ class CDREMWorkflow(SamplingWorkflow):
             cpu_cores=xz_cpu,
             min_cores=xz_min,
             preferred_cores=xz_pref,
-            max_cores=xz_max,
             sim_input=plan.input_script_path.name,
             sim_backend=cfg.sampling.sim_backend,
             sim_log="sim.log",                     # default LAMMPS log name
@@ -157,7 +156,7 @@ class CDREMWorkflow(SamplingWorkflow):
     ) -> TaskSpec:
         """Build a ``TaskSpec`` for one conditioned zbx replica."""
         cfg = self.config
-        zbx_cpu, zbx_min, zbx_pref, zbx_max = self._elastic_core_bounds(
+        zbx_cpu, zbx_min, zbx_pref = self._elastic_core_bounds(
             cfg.conditioning.ncores_per_task,
         )
         need_hessian = bool(
@@ -194,7 +193,6 @@ class CDREMWorkflow(SamplingWorkflow):
             cpu_cores=zbx_cpu,
             min_cores=zbx_min,
             preferred_cores=zbx_pref,
-            max_cores=zbx_max,
             sim_input=plan.input_script_path.name,
             sim_backend=cfg.sampling.sim_backend,
             sim_log="sim.log",                     # default LAMMPS log name

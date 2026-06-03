@@ -136,7 +136,9 @@ def _allocate_contiguous(free: list[int], n: int) -> list[int]:
     """
     s = sorted(free)
     if len(s) < n:
-        return s[:n]  # caller validated len; just in case.
+        raise ValueError(
+            f"Cannot allocate {n} CPUs from only {len(s)} free CPU IDs."
+        )
     best_window: list[int] | None = None
     best_span: int | None = None
     for i in range(len(s) - n + 1):
@@ -187,7 +189,6 @@ class Placer:
         self,
         min_cores: int,
         preferred_cores: int,
-        max_cores: int,
         *,
         single_host_only: bool = True,
     ) -> PlacementResult | None:
@@ -218,64 +219,21 @@ class Placer:
         target = min(preferred_cores, total_free)
         leases: list[CpuLease] = []
         collected = 0
-        # Snapshot host free counts, descending
         host_free = sorted(
             self.pool._free.items(),
             key=lambda x: len(x[1]),
             reverse=True,
         )
-        # Intel MPI (Hydra srun bootstrap) requires whole-node
-        # assignment: each mpirun creates one srun step, and SLURM
-        # distributes ranks by filling nodes to their cgroup CPU limit.
-        # If two tasks share a node, each mpirun's srun step sees the
-        # full cgroup and fills it, causing oversubscription.  Taking
-        # whole nodes prevents this.
-        #
-        # Two-phase strategy to minimise overshoot:
-        #   Phase 1 – greedily take whole nodes that fit within the
-        #             remaining need (avail <= target - collected).
-        #   Phase 2 – if still short, take the smallest remaining nodes
-        #             first to minimise wasted cores.
-        whole_node = getattr(self.backend, "_srun_bootstrap", False)
-        if whole_node:
-            taken_hosts: set[str] = set()
-            # Phase 1: nodes that fit without overshooting
-            for hostname, free_cpus in host_free:
-                if collected >= target:
-                    break
-                avail = len(free_cpus)
-                if avail == 0:
-                    continue
-                if avail <= target - collected:
-                    lease = self.pool.acquire(avail, prefer_host=hostname)
-                    leases.append(lease)
-                    collected += avail
-                    taken_hosts.add(hostname)
-            # Phase 2: still short → take smallest remaining nodes first
-            if collected < min_cores:
-                remaining = [
-                    (h, cpus) for h, cpus in host_free
-                    if h not in taken_hosts and len(cpus) > 0
-                ]
-                remaining.sort(key=lambda x: len(x[1]))
-                for hostname, free_cpus in remaining:
-                    if collected >= min_cores:
-                        break
-                    avail = len(free_cpus)
-                    lease = self.pool.acquire(avail, prefer_host=hostname)
-                    leases.append(lease)
-                    collected += avail
-        else:
-            for hostname, free_cpus in host_free:
-                if collected >= target:
-                    break
-                avail = len(free_cpus)
-                if avail == 0:
-                    continue
-                take = min(avail, target - collected)
-                lease = self.pool.acquire(take, prefer_host=hostname)
-                leases.append(lease)
-                collected += take
+        for hostname, free_cpus in host_free:
+            if collected >= target:
+                break
+            avail = len(free_cpus)
+            if avail == 0:
+                continue
+            take = min(avail, target - collected)
+            lease = self.pool.acquire(take, prefer_host=hostname)
+            leases.append(lease)
+            collected += take
 
         if collected < min_cores:
             # Not enough even across hosts; release what we took
@@ -323,7 +281,6 @@ class ResourcePool:
         *,
         sim_cmd: list[str],
         explicit_hosts: list[tuple[str, tuple[int, ...]]] | None = None,
-        launcher: str | None = None,
         mpirun_path: str | None = None,
         mpi_family: str | None = None,
         extra_env: dict[str, str] | None = None,
@@ -347,15 +304,6 @@ class ResourcePool:
         if not hosts:
             raise RuntimeError("No compute hosts discovered")
 
-        if launcher not in (None, ""):
-            warnings.warn(
-                "ResourcePool.discover(..., launcher=...) is deprecated and ignored. "
-                "AceCG now auto-detects the MPI backend from mpirun_path or PATH; "
-                "pass mpi_family to override when needed.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         mpirun = (
             mpirun_path
             or shutil.which("mpirun")
@@ -366,8 +314,12 @@ class ResourcePool:
             remote = [h for h in hosts if h.hostname != local_hostname]
             if remote:
                 warnings.warn(
-                    f"mpirun not found; dropping {len(remote)} remote "
-                    f"host(s).  Install mpirun or pass mpirun_path.",
+                    "MPI launcher not found on PATH and scheduler.mpirun_path "
+                    "was not set.  Dropping "
+                    f"{len(remote)} remote host(s) and continuing with local "
+                    "host only; this can silently reduce a multi-node "
+                    "allocation to one node.  Load the MPI/LAMMPS module or "
+                    "set scheduler.mpirun_path to use the full allocation.",
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -634,12 +586,6 @@ def _discover_remote_cpus(hostname: str) -> tuple[int, ...] | None:
     except Exception:
         pass
     return None
-
-
-def _shell_quote(s: str) -> str:
-    """Shell-quote for SSH remote command."""
-    return "'" + s.replace("'", "'\"'\"'") + "'"
-
 
 # ---------------------------------------------------------------------------
 # SLURM_NODELIST parser

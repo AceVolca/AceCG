@@ -21,7 +21,7 @@ Every reducer mode conforms to the same uniform operator bundle, exposed via
 ``MODE_OPS`` and the top-level dispatch helpers below:
 
 - ``init(step, ff, topo) -> state``
-- ``request(step) -> Dict[str, bool]``
+- ``request(step) -> frozenset[str]``
 - ``consume(state, payload, *, frame_weight, reference_force) -> None``
 - ``local_partials(state) -> Dict[str, Any]``
 - ``reduce_plan(step) -> Dict[str, tuple[str, ...]]``
@@ -36,36 +36,22 @@ quantities (``frame_weight``, ``reference_force``, and the frame payload).
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, Sequence, Tuple
 
 import numpy as np
 
-from ..configs.energy_mask import summarize_energy_mask_counts
+from ..configs.energy_mask import (
+    accumulate_mask_diagnostics,
+    summarize_energy_mask_counts,
+)
+from .requests import normalize_compute_request
 
 
 if TYPE_CHECKING:
     from ..topology.forcefield import Forcefield
     from ..topology.topology_array import TopologyArrays
-
-
-_REQUEST_FLAGS: Tuple[str, ...] = (
-    "need_energy_value",
-    "need_energy_grad",
-    "need_energy_hessian",
-    "need_energy_grad_outer",
-    "need_gauge_free_energy_grad",
-    "need_gauge_free_energy_grad_outer",
-    "need_unmasked_energy_grad",
-    "need_unmasked_energy_grad_outer",
-    "need_unmasked_gauge_free_energy_grad",
-    "need_unmasked_gauge_free_energy_grad_outer",
-    "need_force_value",
-    "need_force_grad",
-    "need_fm_stats",
-    "need_reference_force",
-    "need_frame_cache",
-)
 
 
 def canonical_step_mode(step_or_mode: Dict[str, Any] | str) -> str:
@@ -89,7 +75,7 @@ class ReducerOps:
     """Uniform contract each step_mode must implement."""
 
     init: Callable[[Dict[str, Any], "Forcefield", "TopologyArrays"], Dict[str, Any]]
-    request: Callable[[Dict[str, Any]], Dict[str, bool]]
+    request: Callable[[Dict[str, Any]], Iterable[str]]
     consume: Callable[..., None]
     local_partials: Callable[[Dict[str, Any]], Dict[str, Any]]
     reduce_plan: Callable[[Dict[str, Any]], Dict[str, Tuple[str, ...]]]
@@ -105,11 +91,9 @@ def _ops(step: Dict[str, Any]) -> ReducerOps:
     return ops
 
 
-def step_request(step: Dict[str, Any]) -> Dict[str, bool]:
-    """Return the compute request flags needed by ``step``."""
-    request: Dict[str, bool] = {flag: False for flag in _REQUEST_FLAGS}
-    request.update(_ops(step).request(step))
-    return request
+def step_request(step: Dict[str, Any]) -> frozenset[str]:
+    """Return the canonical compute request names needed by ``step``."""
+    return normalize_compute_request(_ops(step).request(step))
 
 
 def init_step_state(
@@ -188,6 +172,25 @@ def slice_observed_rows(A_or_f: np.ndarray, real_site_indices: Sequence[int]) ->
     raise ValueError("A_or_f must be at least one-dimensional")
 
 
+def _stack_frames_2d(arrs: Sequence[np.ndarray], n_params: int) -> np.ndarray:
+    """Stack per-frame ``(n_params, n_params)`` arrays into ``(n_frames, P, P)``."""
+    if arrs:
+        return np.stack(arrs, axis=0).astype(np.float32, copy=False)
+    return np.empty((0, n_params, n_params), dtype=np.float32)
+
+
+def _stack_frames_1d(arrs: Sequence[np.ndarray], n_params: int) -> np.ndarray:
+    """Stack per-frame ``(n_params,)`` arrays into ``(n_frames, n_params)``."""
+    if arrs:
+        return np.stack(arrs, axis=0).astype(np.float32, copy=False)
+    return np.empty((0, n_params), dtype=np.float32)
+
+
+def _stack_frames_scalar(arrs: Sequence[float]) -> np.ndarray:
+    """Stack per-frame scalars into a ``(n_frames,)`` float32 array."""
+    return np.asarray(arrs, dtype=np.float32) if arrs else np.empty((0,), dtype=np.float32)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FM
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,14 +235,14 @@ def init_fm_state(
     return state
 
 
-def request_fm(step: Dict[str, Any]) -> Dict[str, bool]:
+def request_fm(step: Dict[str, Any]) -> set[str]:
     del step
-    return {"need_fm_stats": True, "need_reference_force": True}
+    return {"fm_stats", "reference_force"}
 
 
-def request_dsm(step: Dict[str, Any]) -> Dict[str, bool]:
+def request_dsm(step: Dict[str, Any]) -> set[str]:
     del step
-    return {"need_fm_stats": True, "need_reference_force": False}
+    return {"fm_stats"}
 
 
 def _require_fm_partial(payload: Dict[str, Any], key: str, label: str) -> Dict[str, Any]:
@@ -292,30 +295,15 @@ def consume_fm_frame(
 def local_partials_fm(state: Dict[str, Any]) -> Dict[str, Any]:
     if state["reduce_stack"]:
         n_params = int(state["n_params"])
-        stack_2d = lambda arrs: (
-            np.stack(arrs, axis=0).astype(np.float32, copy=False)
-            if arrs
-            else np.empty((0, n_params, n_params), dtype=np.float32)
-        )
-        stack_1d = lambda arrs: (
-            np.stack(arrs, axis=0).astype(np.float32, copy=False)
-            if arrs
-            else np.empty((0, n_params), dtype=np.float32)
-        )
-        stack_scalar = lambda arrs: (
-            np.asarray(arrs, dtype=np.float32)
-            if arrs
-            else np.empty((0,), dtype=np.float32)
-        )
         return {
             "reduce_stack": True,
-            "JtJ_frames": stack_2d(state["JtJ_frames"]),
-            "Jty_frames": stack_1d(state["Jty_frames"]),
-            "y_sumsq_frames": stack_scalar(state["y_sumsq_frames"]),
-            "Jtf_frames": stack_1d(state["Jtf_frames"]),
-            "f_sumsq_frames": stack_scalar(state["f_sumsq_frames"]),
-            "fty_frames": stack_scalar(state["fty_frames"]),
-            "weight_frames": stack_scalar(state["weight_frames"]),
+            "JtJ_frames": _stack_frames_2d(state["JtJ_frames"], n_params),
+            "Jty_frames": _stack_frames_1d(state["Jty_frames"], n_params),
+            "y_sumsq_frames": _stack_frames_scalar(state["y_sumsq_frames"]),
+            "Jtf_frames": _stack_frames_1d(state["Jtf_frames"], n_params),
+            "f_sumsq_frames": _stack_frames_scalar(state["f_sumsq_frames"]),
+            "fty_frames": _stack_frames_scalar(state["fty_frames"]),
+            "weight_frames": _stack_frames_scalar(state["weight_frames"]),
             "frame_ids": np.asarray(state["frame_ids"], dtype=np.int64),
             "n_atoms_obs": int(state["n_atoms_obs"]),
         }
@@ -435,14 +423,13 @@ def _merge_energy_mask_diagnostics(
     diagnostics: Dict[str, Any],
 ) -> None:
     """Accumulate per-frame coordinate-mask diagnostics into reducer state."""
-    state["energy_mask_active"] += int(diagnostics.get("active", 0))
-    state["energy_mask_total"] += int(diagnostics.get("total", 0))
-    by_key = state["energy_mask_by_key"]
-    for label, counts in dict(diagnostics.get("by_key", {})).items():
-        if label not in by_key:
-            by_key[label] = {"active": 0, "total": 0}
-        by_key[label]["active"] += int(counts.get("active", 0))
-        by_key[label]["total"] += int(counts.get("total", 0))
+    accumulate_mask_diagnostics(
+        state,
+        diagnostics,
+        active_key="energy_mask_active",
+        total_key="energy_mask_total",
+        by_key_key="energy_mask_by_key",
+    )
 
 
 def init_rem_state(
@@ -493,21 +480,27 @@ def init_rem_state(
     return state
 
 
-def request_rem(step: Dict[str, Any]) -> Dict[str, bool]:
+def request_rem(step: Dict[str, Any]) -> set[str]:
     """Return observable requests required by the REM reducer."""
     need_hessian = bool(step.get("need_hessian", False))
     gradient_convention = _rem_gradient_convention(step)
     use_gauge_free_gradient = gradient_convention == "gauge_free"
     use_aux_unmasked = _rem_needs_aux_unmasked_energy_grad(step)
-    return {
-        "need_energy_grad": not use_gauge_free_gradient,
-        "need_energy_hessian": need_hessian,
-        "need_energy_grad_outer": need_hessian and not use_gauge_free_gradient,
-        "need_gauge_free_energy_grad": use_gauge_free_gradient,
-        "need_gauge_free_energy_grad_outer": need_hessian and use_gauge_free_gradient,
-        "need_unmasked_energy_grad": use_aux_unmasked and not use_gauge_free_gradient,
-        "need_unmasked_gauge_free_energy_grad": use_aux_unmasked and use_gauge_free_gradient,
-    }
+    request = {"gauge_free_energy_grad"} if use_gauge_free_gradient else {"energy_grad"}
+    if need_hessian:
+        request.add("energy_hessian")
+        request.add(
+            "gauge_free_energy_grad_outer"
+            if use_gauge_free_gradient
+            else "energy_grad_outer"
+        )
+    if use_aux_unmasked:
+        request.add(
+            "unmasked_gauge_free_energy_grad"
+            if use_gauge_free_gradient
+            else "unmasked_energy_grad"
+        )
+    return request
 
 
 def consume_rem_frame(
@@ -587,35 +580,25 @@ def local_partials_rem(state: Dict[str, Any]) -> Dict[str, Any]:
         "has_energy_mask": bool(state.get("has_energy_mask", False)),
     }
     if state["reduce_stack"]:
-        stack_1d = lambda arrs: (
-            np.stack(arrs, axis=0).astype(np.float32, copy=False)
-            if arrs
-            else np.empty((0, n_params), dtype=np.float32)
-        )
-        stack_2d = lambda arrs: (
-            np.stack(arrs, axis=0).astype(np.float32, copy=False)
-            if arrs
-            else np.empty((0, n_params, n_params), dtype=np.float32)
-        )
         out = {
             "reduce_stack": True,
             "need_hessian": need_hessian,
             "metadata": metadata,
-            "energy_grad_frames": stack_1d(state["energy_grad_frames"]),
+            "energy_grad_frames": _stack_frames_1d(state["energy_grad_frames"], n_params),
             "weight_frames": np.asarray(state["weight_frames"], dtype=np.float32),
             "frame_ids": np.asarray(state["frame_ids"], dtype=np.int64),
         }
         if use_aux_unmasked:
-            out["unmasked_energy_grad_frames"] = stack_1d(
-                state["unmasked_energy_grad_frames"]
+            out["unmasked_energy_grad_frames"] = _stack_frames_1d(
+                state["unmasked_energy_grad_frames"], n_params
             )
         if state.get("has_energy_mask"):
             out["energy_mask_active"] = int(state["energy_mask_active"])
             out["energy_mask_total"] = int(state["energy_mask_total"])
             out["energy_mask_by_key"] = dict(state["energy_mask_by_key"])
         if need_hessian:
-            out["d2U_frames"] = stack_2d(state["d2U_frames"])
-            out["grad_outer_frames"] = stack_2d(state["grad_outer_frames"])
+            out["d2U_frames"] = _stack_frames_2d(state["d2U_frames"], n_params)
+            out["grad_outer_frames"] = _stack_frames_2d(state["grad_outer_frames"], n_params)
         return out
     out = {
         "need_hessian": need_hessian,
@@ -758,9 +741,9 @@ def finalize_rem_root(state: Dict[str, Any]) -> Dict[str, Any]:
 # rdf  (From Ace — entire quintet)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def request_rdf(step: Dict[str, Any]) -> Dict[str, bool]:
+def request_rdf(step: Dict[str, Any]) -> set[str]:
     del step
-    return {"need_frame_cache": True}
+    return {"frame_cache"}
 
 
 def init_rdf_state(
@@ -814,7 +797,7 @@ def consume_rdf_frame(
 
     frame_cache = payload.get("frame_cache")
     if frame_cache is None:
-        raise ValueError("rdf step requires payload['frame_cache']; enable need_frame_cache in compute().")
+        raise ValueError("rdf step requires payload['frame_cache']; request frame_cache in compute().")
     accumulate_distribution_frame(state, frame_cache, frame_weight=float(frame_weight))
 
 
@@ -880,9 +863,9 @@ def finalize_rdf_root(state: Dict[str, Any]) -> Dict[str, Any]:
 # cache  (From Ace — entire quintet; builds a TrajectoryCache on rank 0)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def request_cache(step: Dict[str, Any]) -> Dict[str, bool]:
+def request_cache(step: Dict[str, Any]) -> set[str]:
     del step
-    return {"need_frame_cache": True}
+    return {"frame_cache"}
 
 
 def init_cache_state(
@@ -904,7 +887,7 @@ def consume_cache_frame(
     del frame_weight, reference_force
     frame_cache = payload.get("frame_cache")
     if frame_cache is None:
-        raise ValueError("cache step requires payload['frame_cache']; enable need_frame_cache in compute().")
+        raise ValueError("cache step requires payload['frame_cache']; request frame_cache in compute().")
     state["frames"][int(payload["frame_idx"])] = frame_cache
 
 
@@ -965,13 +948,9 @@ def init_cdfm_zbx_state(
     }
 
 
-def request_cdfm_zbx(step: Dict[str, Any]) -> Dict[str, bool]:
+def request_cdfm_zbx(step: Dict[str, Any]) -> set[str]:
     del step
-    return {
-        "need_force_value": True,
-        "need_force_grad": True,
-        "need_energy_grad": True,
-    }
+    return {"force", "force_grad", "energy_grad"}
 
 
 def accumulate_cdfm_zbx_stats(

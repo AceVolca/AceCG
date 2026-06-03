@@ -17,6 +17,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from ..io.lammps_input import (
+    resolve_include_path,
+    resolve_lines,
+    strip_lines,
+    tokenize_line,
+    tokenize_lines,
+)
+
 
 @dataclass(frozen=True)
 class LammpsScriptInfo:
@@ -59,64 +67,6 @@ def _is_table_style(name: str) -> bool:
     return low == "table" or low.startswith("table/") or low.startswith("table_")
 
 
-def _strip_comments_and_continuations(text: str) -> list[str]:
-    """Strip trailing ``#`` comments and join ``&`` continuations."""
-    raw: list[str] = []
-    for line in text.splitlines():
-        idx = line.find("#")
-        if idx >= 0:
-            line = line[:idx]
-        raw.append(line.rstrip())
-
-    joined: list[str] = []
-    buf = ""
-    for line in raw:
-        if line.endswith("&"):
-            buf += line[:-1] + " "
-        else:
-            buf += line
-            s = buf.strip()
-            if s:
-                joined.append(s)
-            buf = ""
-    if buf.strip():
-        joined.append(buf.strip())
-    return joined
-
-
-def _resolve_include_path(include_token: str, base_dir: Path) -> Path:
-    """Resolve one include path or fail fast if it needs runtime substitution."""
-    if "$" in include_token:
-        raise ValueError(
-            f"Unsupported variable-expanded include path {include_token!r}. "
-            "Sampler-side script inspection requires a literal include path."
-        )
-    inc_path = Path(include_token)
-    if not inc_path.is_absolute():
-        inc_path = base_dir / inc_path
-    if not inc_path.exists():
-        raise FileNotFoundError(f"Included LAMMPS file does not exist: {inc_path}")
-    return inc_path.resolve()
-
-
-def _resolve_lines(script_path: Path) -> list[str]:
-    """Read *script_path*, recursively inlining ``include`` directives."""
-    if not script_path.exists():
-        raise FileNotFoundError(f"LAMMPS script not found: {script_path}")
-    text = script_path.read_text(encoding="utf-8")
-    raw_lines = _strip_comments_and_continuations(text)
-    base_dir = script_path.parent
-
-    merged: list[str] = []
-    for line in raw_lines:
-        tokens = line.split()
-        if tokens and tokens[0] == "include" and len(tokens) >= 2:
-            merged.extend(_resolve_lines(_resolve_include_path(tokens[1], base_dir)))
-        else:
-            merged.append(line)
-    return merged
-
-
 def _collect_input_tree(script_path: Path) -> list[Path]:
     """Return the script plus all recursively included files.
 
@@ -137,24 +87,22 @@ def _collect_input_tree(script_path: Path) -> list[Path]:
         files.append(resolved)
 
         text = resolved.read_text(encoding="utf-8")
-        for line in _strip_comments_and_continuations(text):
-            tokens = line.split()
+        for line in strip_lines(text):
+            tokens = tokenize_line(line)
             if tokens and tokens[0] == "include" and len(tokens) >= 2:
-                _visit(_resolve_include_path(tokens[1], resolved.parent))
+                _visit(resolve_include_path(tokens[1], resolved.parent))
 
     _visit(script_path)
 
     root_dir = script_path.resolve().parent
-    resolved_lines = _resolve_lines(script_path)
+    resolved_lines = resolve_lines(script_path)
 
     style_map: dict[str, str] = {}
-    for line in resolved_lines:
-        tokens = line.split()
+    for tokens in tokenize_lines(resolved_lines):
         if tokens and tokens[0] in _STYLE_CMDS and len(tokens) >= 2:
             style_map[tokens[0].split("_")[0]] = tokens[1]
 
-    for line in resolved_lines:
-        tokens = line.split()
+    for tokens in tokenize_lines(resolved_lines):
         if not tokens or tokens[0] not in _COEFF_CMDS:
             continue
         kind = tokens[0].split("_")[0]
@@ -217,15 +165,14 @@ def _has_coordinate_triplet(fields: list[str]) -> bool:
 
 def parse_lammps_script(script_path: Path) -> LammpsScriptInfo:
     """Parse a LAMMPS input script and extract sampler-relevant metadata."""
-    lines = _resolve_lines(script_path)
+    command_tokens = tokenize_lines(resolve_lines(script_path))
 
     read_data_paths: list[str] = []
     has_read_restart = False
     dumps: list[tuple[str, str]] = []
     write_data_paths: list[str] = []
 
-    for line in lines:
-        tokens = line.split()
+    for tokens in command_tokens:
         if not tokens:
             continue
         cmd = tokens[0]

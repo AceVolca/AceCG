@@ -13,7 +13,7 @@ from typing import Iterable, Iterator, Optional, Tuple
 
 import numpy as np
 
-from .base import BasePotential
+from .base import BasePotential, potential_bounds, potential_mask
 
 
 def _sigmoid(x):
@@ -26,32 +26,6 @@ def _sigmoid(x):
     if np.isscalar(x):
         return float(out)
     return out
-
-
-def _potential_bounds(potential: BasePotential) -> Tuple[np.ndarray, np.ndarray]:
-    bounds = getattr(potential, "param_bounds", None)
-    if bounds is None:
-        n = potential.n_params()
-        return np.full(n, -np.inf, dtype=float), np.full(n, np.inf, dtype=float)
-    if callable(bounds):
-        bounds = bounds()
-    lb, ub = bounds
-    return np.asarray(lb, dtype=float).reshape(-1), np.asarray(ub, dtype=float).reshape(-1)
-
-
-def _potential_mask(potential: BasePotential) -> np.ndarray:
-    mask = getattr(potential, "param_mask", None)
-    if mask is None:
-        return np.ones(potential.n_params(), dtype=bool)
-    if callable(mask):
-        mask = mask()
-    mask = np.asarray(mask, dtype=bool).reshape(-1)
-    if mask.shape != (potential.n_params(),):
-        raise ValueError(
-            f"param_mask shape mismatch for {type(potential).__name__}: "
-            f"expected {(potential.n_params(),)}, got {mask.shape}"
-        )
-    return mask
 
 
 class GatedPotential(BasePotential):
@@ -113,13 +87,13 @@ class GatedPotential(BasePotential):
         )
         self._params_to_scale = None
         self._refresh_metadata()
-        lb_inner, ub_inner = _potential_bounds(self.potential)
+        lb_inner, ub_inner = potential_bounds(self.potential)
         self.param_bounds = (
             np.concatenate([lb_inner, [self.log_alpha_bounds[0]]]),
             np.concatenate([ub_inner, [self.log_alpha_bounds[1]]]),
         )
         self.param_mask = np.concatenate(
-            [_potential_mask(self.potential), np.array([True], dtype=bool)]
+            [potential_mask(self.potential), np.array([True], dtype=bool)]
         )
 
     def _refresh_metadata(self) -> None:

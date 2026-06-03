@@ -109,7 +109,7 @@ class REMWorkflow(SamplingWorkflow):
                 shutil.copy2(src, dst)
 
             # ── Phase 3: build task spec ─────────────────────────
-            xz_cpu, xz_min, xz_pref, xz_max = self._elastic_core_bounds(
+            xz_cpu, xz_min, xz_pref = self._elastic_core_bounds(
                 self.config.sampling.ncores,
             )
             trajectory_relpath = str(plan.trajectory_path.relative_to(plan.run_dir))
@@ -142,7 +142,6 @@ class REMWorkflow(SamplingWorkflow):
                 cpu_cores=xz_cpu,
                 min_cores=xz_min,
                 preferred_cores=xz_pref,
-                max_cores=xz_max,
                 sim_input=plan.input_script_path.name,
                 sim_backend=cfg.sampling.sim_backend,
                 sim_var=dict(cfg.sampling.sim_var),

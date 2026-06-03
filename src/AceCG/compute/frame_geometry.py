@@ -48,6 +48,14 @@ class FrameGeometry:
     real_site_indices: Optional[np.ndarray]
 
 
+def _geometry_sample_shape(geom: "FrameGeometry") -> Tuple[int, ...]:
+    """Leading sample dims of a frame geometry (``()`` for a single frame)."""
+    positions = np.asarray(geom.positions)
+    if positions.ndim < 2:
+        return ()
+    return tuple(positions.shape[:-2])
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

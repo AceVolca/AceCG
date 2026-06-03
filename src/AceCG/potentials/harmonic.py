@@ -111,16 +111,31 @@ class HarmonicPotential(BasePotential):
         k, _ = self._params
         return np.full_like(np.asarray(r, dtype=float), 2.0 * k * self.scale)
 
+    def force_grad(self, r):
+        """Return the explicit force Jacobian ``[dF/dk, dF/dr0]``."""
+        r_arr = np.asarray(r, dtype=float)
+        k, r0 = self._params
+        out = np.empty(r_arr.shape + (2,), dtype=float)
+        out[..., 0] = -2.0 * self.scale * (r_arr - r0)
+        out[..., 1] = 2.0 * k * self.scale
+        return out
+
     # --- Parameter bounds ---
 
+    @property
     def param_bounds(self):
         """Return (lower_bounds, upper_bounds) arrays for [k, r0].
 
         k must be non-negative (physical constraint).
         """
-        lb = np.array([0.0, -np.inf])
-        ub = np.array([np.inf, np.inf])
+        base_lb, base_ub = super().param_bounds
+        lb = np.maximum(base_lb, np.array([0.0, -np.inf], dtype=float))
+        ub = base_ub
         return lb, ub
+
+    @param_bounds.setter
+    def param_bounds(self, bounds):
+        BasePotential.param_bounds.fset(self, bounds)
 
     # --- Force basis (for FM/CDFM design matrix) ---
 
@@ -131,13 +146,7 @@ class HarmonicPotential(BasePotential):
         dF/dk  = -2*scale*(r - r0),
         dF/dr0 =  2*k*scale.
         """
-        r = np.asarray(r, dtype=float).ravel()
-        k, r0 = self._params
-        s = self.scale
-        out = np.empty((r.size, 2), dtype=float)
-        out[:, 0] = -2.0 * s * (r - r0)
-        out[:, 1] = 2.0 * k * s
-        return out
+        return self.force_grad(r)
 
     def basis_integrals(self, r):
         """Integrated force basis I_i(r) = integral from r0 to r of B_i(xi) dxi.

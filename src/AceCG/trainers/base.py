@@ -94,6 +94,62 @@ class BaseTrainer(ABC):
             self.optimizer.set_params(Lc)
         self.update_forcefield(self.optimizer.L)
 
+    def _optimizer_step(
+        self,
+        grad: np.ndarray,
+        hessian: Optional[np.ndarray] = None,
+        *,
+        apply_update: bool,
+        mask_override: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Apply one optimizer update and re-sync the forcefield to its bounds.
+
+        Returns a zero vector when ``apply_update`` is False. ``hessian`` is
+        forwarded to optimizers that accept one; on a Hessian ``LinAlgError``
+        the step falls back to a masked least-squares Newton solve.
+        ``mask_override`` temporarily swaps the optimizer's active mask for the
+        duration of the step (restored afterwards).
+        """
+        if not apply_update:
+            return np.zeros_like(grad)
+        original_mask = None
+        if mask_override is not None:
+            original_mask = np.asarray(self.optimizer.mask, dtype=bool).copy()
+            self.optimizer.mask = np.asarray(mask_override, dtype=bool).copy()
+        try:
+            try:
+                if self.optimizer_accepts_hessian():
+                    update = self.optimizer.step(grad, hessian=hessian)
+                else:
+                    update = self.optimizer.step(grad)
+            except np.linalg.LinAlgError:
+                if (
+                    hessian is None
+                    or not hasattr(self.optimizer, "mask")
+                    or not hasattr(self.optimizer, "lr")
+                ):
+                    raise
+                mask = np.asarray(self.optimizer.mask, dtype=bool)
+                grad_masked = np.asarray(grad, dtype=np.float64)[mask]
+                h_masked = np.asarray(hessian, dtype=np.float64)[np.ix_(mask, mask)]
+                step_masked, *_ = np.linalg.lstsq(h_masked, grad_masked, rcond=None)
+                step = np.zeros_like(grad, dtype=np.float64)
+                step[mask] = step_masked
+                lr = float(self.optimizer.lr)
+                self.optimizer.L = np.asarray(self.optimizer.L, dtype=np.float64) - lr * step
+                if hasattr(self.optimizer, "last_grad"):
+                    self.optimizer.last_grad = np.asarray(grad, dtype=np.float64).copy()
+                if hasattr(self.optimizer, "last_hessian"):
+                    self.optimizer.last_hessian = np.asarray(hessian, dtype=np.float64).copy()
+                if hasattr(self.optimizer, "last_update"):
+                    self.optimizer.last_update = -lr * step
+                update = -lr * step
+            self.clamp_and_update()
+            return np.asarray(update, dtype=np.float64)
+        finally:
+            if original_mask is not None:
+                self.optimizer.mask = original_mask
+
     def select_optimizer_gradient(
         self,
         masked_grad: np.ndarray,
@@ -242,40 +298,6 @@ class BaseTrainer(ABC):
         if offset != n_params:
             raise ValueError(
                 f"Linear scan mismatch: consumed {offset} params from a {n_params}-parameter container"
-            )
-        return True
-
-    def is_gauge_free_energy_grad_cacheable(self) -> bool:
-        """Report whether active gauge-free energy gradients are AA-cacheable."""
-        n_params = self.forcefield.n_params()
-
-        mask = getattr(self.optimizer, "mask", None)
-        active_mask = np.asarray(mask, dtype=bool) if mask is not None else np.ones(n_params, dtype=bool)
-        if active_mask.shape != (n_params,):
-            raise ValueError(
-                f"Active parameter mask shape mismatch: expected {(n_params,)}, got {active_mask.shape}"
-            )
-
-        offset = 0
-        for _, pot in IteratePotentials(self.forcefield):
-            cacheable_mask = np.asarray(
-                pot.is_gauge_free_energy_grad_cacheable(),
-                dtype=bool,
-            )
-            n_local = pot.n_params()
-            if cacheable_mask.shape != (n_local,):
-                raise ValueError(
-                    f"Gauge-free cacheable mask shape mismatch for {type(pot).__name__}: "
-                    f"expected {(n_local,)}, got {cacheable_mask.shape}"
-                )
-            submask = active_mask[offset:offset + n_local]
-            if np.any(submask & ~cacheable_mask):
-                return False
-            offset += n_local
-
-        if offset != n_params:
-            raise ValueError(
-                f"Gauge-free cacheability scan mismatch: consumed {offset} params from a {n_params}-parameter container"
             )
         return True
 

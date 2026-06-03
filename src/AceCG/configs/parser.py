@@ -139,7 +139,6 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
     ),
     "scheduler": frozenset(
         {
-            "launcher",
             "mpirun_path",
             "mpi_family",
             "python_exe",
@@ -376,7 +375,7 @@ def build_acg_config(
     exclude_bonded, exclude_option = parse_exclude_setting(exclude_raw)
 
     type_names_raw = system_raw.pop("type_names", None)
-    type_names = _parse_type_names(type_names_raw, path=path)
+    type_names = _parse_type_names(type_names_raw, base_dir=path.parent)
 
     topology_file = _pop_optional_str(system_raw, "topology_file")
     forcefield_path = _pop_optional_str(system_raw, "forcefield_path")
@@ -527,20 +526,9 @@ def build_acg_config(
         extras=validation_raw,
     )
 
-    _launcher_raw = scheduler_raw.pop("launcher", None)
-    if _launcher_raw is not None:
-        warnings.warn(
-            "scheduler.launcher is deprecated and ignored. AceCG now "
-            "auto-detects the MPI backend from scheduler.mpirun_path or PATH; "
-            "use scheduler.mpi_family to override when needed.",
-            DeprecationWarning,
-            stacklevel=4,
-        )
-
     _mpirun_path_raw = scheduler_raw.pop("mpirun_path", None)
     _mpi_family_raw = scheduler_raw.pop("mpi_family", None)
     scheduler = SchedulerConfig(
-        launcher=None,
         mpirun_path=str(_mpirun_path_raw).strip() if _mpirun_path_raw is not None else None,
         mpi_family=(str(_mpi_family_raw).strip() or None) if _mpi_family_raw is not None else None,
         python_exe=str(
@@ -1026,19 +1014,33 @@ def _parse_scalar_or_literal(value: str) -> Any:
 
 # ─── Section-level helpers ────────────────────────────────────────────
 
-def _warn_unknown_keys(section_name: str, mapping: Mapping[str, Any]) -> None:
-    allowed_keys = _SECTION_ALLOWED_KEYS[section_name]
+def _warn_unknown_section_keys(
+    section_label: str,
+    allowed_keys: frozenset,
+    mapping: Mapping[str, Any],
+    *,
+    preserved: str,
+) -> None:
+    """Warn, with a close-match hint, for each key not in ``allowed_keys``."""
     for key in mapping:
         if key in allowed_keys:
             continue
         hint = get_close_matches(key, sorted(allowed_keys), n=1, cutoff=0.6)
         hint_text = f" Did you mean '{hint[0]}'?" if hint else ""
         warnings.warn(
-            f"Unknown key '{key}' in section [{section_name}]; "
-            f"preserving it in `.extras`.{hint_text}",
+            f"Unknown key '{key}' in section [{section_label}]; {preserved}.{hint_text}",
             UserWarning,
-            stacklevel=3,
+            stacklevel=4,
         )
+
+
+def _warn_unknown_keys(section_name: str, mapping: Mapping[str, Any]) -> None:
+    _warn_unknown_section_keys(
+        section_name,
+        _SECTION_ALLOWED_KEYS[section_name],
+        mapping,
+        preserved="preserving it in `.extras`",
+    )
 
 
 def _validate_conditioning_init_config_pool(config: ACGConfig) -> None:
@@ -1079,15 +1081,18 @@ def _validate_conditioning_init_config_pool(config: ACGConfig) -> None:
 
 
 def _parse_type_names(
-    raw: Any, *, path: Path
+    raw: Any, *, base_dir: Path, field_label: str = "system.type_names"
 ) -> Optional[Dict[int, str]]:
-    """Parse ``system.type_names`` into ``{int_id: str_name}`` or ``None``.
+    """Parse a type-names field into ``{int_id: str_name}`` or ``None``.
 
     Accepted formats:
       - ``None`` → ``None``
       - dict ``{1: "HG", 2: "MG"}`` → pass through with int keys
       - comma string ``"HG, MG, TL"`` → ``{1: "HG", 2: "MG", 3: "TL"}``
-      - file path (relative to config) → loaded via ``_pop_dict_or_file``
+      - file path (relative to *base_dir*) → loaded via ``_load_dict_file``
+
+    *field_label* names the field in error messages so callers (e.g. the VP
+    Growth ``[aa_ref]`` section) get section-specific diagnostics.
     """
     if raw is None:
         return None
@@ -1095,14 +1100,14 @@ def _parse_type_names(
         return {int(k): str(v) for k, v in raw.items()}
     if not isinstance(raw, str):
         raise ACGConfigError(
-            f"system.type_names must be a dict, comma-separated string, "
+            f"{field_label} must be a dict, comma-separated string, "
             f"or file path; got {type(raw).__name__}."
         )
     text = raw.strip()
     if not text:
         return None
-    # Try as file path (relative to config directory)
-    result = _load_dict_file(text, base_dir=path.parent)
+    # Try as file path (relative to the config directory)
+    result = _load_dict_file(text, base_dir=base_dir)
     if result is not None:
         return {int(k): str(v) for k, v in result.items()}
     # Comma-separated list: "HG, MG, TL" → {1: "HG", 2: "MG", 3: "TL"}
@@ -1449,22 +1454,13 @@ def _build_fm_training_specs(
     )
 
 
-def _warn_unknown_nested_fm_spec_keys(
-    mapping: Mapping[str, Any],
-) -> None:
-    for key in mapping:
-        if key in _FM_SPEC_ALLOWED_KEYS:
-            continue
-        hint = get_close_matches(
-            key, sorted(_FM_SPEC_ALLOWED_KEYS), n=1, cutoff=0.6
-        )
-        hint_text = f" Did you mean '{hint[0]}'?" if hint else ""
-        warnings.warn(
-            f"Unknown key '{key}' in section [training.fm_specs]; "
-            f"preserving it nowhere.{hint_text}",
-            UserWarning,
-            stacklevel=3,
-        )
+def _warn_unknown_nested_fm_spec_keys(mapping: Mapping[str, Any]) -> None:
+    _warn_unknown_section_keys(
+        "training.fm_specs",
+        _FM_SPEC_ALLOWED_KEYS,
+        mapping,
+        preserved="preserving it nowhere",
+    )
 
 
 def _parse_fm_spec_group(

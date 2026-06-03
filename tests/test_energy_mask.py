@@ -4,7 +4,6 @@ import numpy as np
 
 from AceCG.compute.energy import energy
 from AceCG.compute.mpi_engine import MPIComputeEngine
-from AceCG.compute.reducers import _REQUEST_FLAGS
 from AceCG.optimizers.adam import AdamMaskedOptimizer
 from AceCG.potentials.harmonic import HarmonicPotential
 from AceCG.topology.forcefield import Forcefield
@@ -12,10 +11,8 @@ from AceCG.topology.types import InteractionKey
 from AceCG.trainers.analytic.rem import REMTrainerAnalytic
 
 
-def _request(**overrides):
-    request = {flag: False for flag in _REQUEST_FLAGS}
-    request.update(overrides)
-    return request
+def _request(*names):
+    return frozenset(names)
 
 
 def _bond_topo(bond_key: InteractionKey) -> SimpleNamespace:
@@ -80,10 +77,7 @@ def test_mpi_compute_weighted_batch_energy_mask_diagnostics():
     weights = np.array([0.25, 0.75], dtype=np.float64)
 
     result = engine.compute(
-        request=_request(
-            need_gauge_free_energy_grad=True,
-            need_unmasked_gauge_free_energy_grad=True,
-        ),
+        request=_request("gauge_free_energy_grad", "unmasked_gauge_free_energy_grad"),
         frame=(np.array([0, 0], dtype=np.int64), positions, box, None),
         topology_arrays=_bond_topo(key),
         forcefield_snapshot=ff,

@@ -18,7 +18,6 @@ from AceCG.potentials.bspline import BSplinePotential
 from AceCG.potentials.harmonic import HarmonicPotential
 from AceCG.topology.forcefield import Forcefield
 from AceCG.topology.types import InteractionKey
-from AceCG.workflows.base import BaseWorkflow
 
 # Fitters self-register on import.  ReadLmpFF requires the desired fitter
 # to be registered before it is called.  Import here to register bspline.
@@ -119,30 +118,12 @@ def _make_alias_bonded_topology(bond_key, angle_key):
     )
 
 
-class _MaskWorkflow(BaseWorkflow):
-    def _build_trainer(self):
-        raise NotImplementedError
-
-    def run(self):
-        raise NotImplementedError
+def _materialize_mask_from_spec(spec, forcefield: Forcefield) -> np.ndarray:
+    return forcefield.apply_mask_spec(spec)
 
 
-def _materialize_mask_from_spec(spec, forcefield: Forcefield, topology=None) -> np.ndarray:
-    workflow = object.__new__(_MaskWorkflow)
-    workflow.config = SimpleNamespace(
-        system=SimpleNamespace(forcefield_mask=spec)
-    )
-    workflow.topology = topology if topology is not None else EMPTY_TOPOLOGY_ARRAYS
-    return workflow._build_forcefield_mask(forcefield)
-
-
-def _materialize_bounds_from_spec(spec, forcefield: Forcefield, topology=None):
-    workflow = object.__new__(_MaskWorkflow)
-    workflow.config = SimpleNamespace(
-        system=SimpleNamespace(forcefield_bounds=spec)
-    )
-    workflow.topology = topology if topology is not None else EMPTY_TOPOLOGY_ARRAYS
-    return workflow._build_forcefield_bounds(forcefield)
+def _materialize_bounds_from_spec(spec, forcefield: Forcefield):
+    return forcefield.apply_bounds_spec(spec, clamp=False)
 
 
 EMPTY_TOPOLOGY_ARRAYS = SimpleNamespace(
@@ -452,6 +433,40 @@ def test_readlmpff_bspline_bond_table_uses_minimum_gauge(tmp_path):
     assert pot.bonded is True
 
 
+def test_readlmpff_bspline_bond_table_ignores_cutoff_anchor(tmp_path):
+    table_file = tmp_path / "AB_bond.table"
+    settings_file = tmp_path / "settings_bond_table.lmp"
+    output_settings = tmp_path / "roundtrip" / "settings_bond_table.lmp"
+    _write_bond_table(table_file, k=10.0, r0=2.0, n=120)
+    _write_bond_settings_file(settings_file, "AB_bond.table", "BOND_AB")
+
+    topology_arrays = SimpleNamespace(
+        atom_type_code_to_name={},
+        bond_type_id_to_key={0: InteractionKey.bond("A", "B")},
+        angle_type_id_to_key={},
+        dihedral_type_id_to_key={},
+        key_to_bonded_type_id={InteractionKey.bond("A", "B"): 0},
+    )
+
+    result = ReadLmpFF(
+        str(settings_file),
+        "table",
+        table_fit="bspline",
+        table_fit_overrides={"n_coeffs": 8, "anchor_to_cutoff": True},
+        topology_arrays=topology_arrays,
+    )
+    WriteLmpFF(
+        str(settings_file),
+        str(output_settings),
+        result,
+        "table",
+        topology_arrays=topology_arrays,
+    )
+
+    _, _, force = parse_lammps_table(str(output_settings.parent / "AB_bond.table"))
+    assert force[-1] < -8.0
+
+
 def test_readlmpff_translates_numeric_pair_codes_with_gaps(tmp_path):
     table_file = tmp_path / "AB_pair.table"
     settings_file = tmp_path / "settings_numeric_pair.lmp"
@@ -474,6 +489,48 @@ def test_readlmpff_translates_numeric_pair_codes_with_gaps(tmp_path):
     )
 
     assert InteractionKey.pair("2", "4") in result
+
+
+def test_readlmpff_ignores_non_command_pair_coeff_substrings(tmp_path):
+    table_file = tmp_path / "AB_pair.table"
+    settings_file = tmp_path / "settings_substring.lmp"
+    _write_pair_table(table_file, k=10.0, r0=3.0, n=80)
+    settings_file.write_text(
+        "# pair_coeff A B AB_pair.table PAIR_AB\n"
+        "not_pair_coeff A B AB_pair.table PAIR_AB\n",
+        encoding="utf-8",
+    )
+
+    result = ReadLmpFF(
+        str(settings_file),
+        "table",
+        table_fit="bspline",
+        topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
+    )
+
+    assert len(result) == 0
+
+
+def test_readlmpff_reads_coefficients_from_included_lammps_file(tmp_path):
+    table_file = tmp_path / "AB_pair.table"
+    settings_file = tmp_path / "settings_include.lmp"
+    coeff_file = tmp_path / "coeffs.in"
+    _write_pair_table(table_file, k=10.0, r0=3.0, n=80)
+    coeff_file.write_text(
+        "pair_coeff A B & # split command\n"
+        "  AB_pair.table PAIR_AB # trailing comment\n",
+        encoding="utf-8",
+    )
+    settings_file.write_text("include coeffs.in\n", encoding="utf-8")
+
+    result = ReadLmpFF(
+        str(settings_file),
+        "table",
+        table_fit="bspline",
+        topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
+    )
+
+    assert InteractionKey.pair("A", "B") in result
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +556,33 @@ def test_writelmpff_with_interactionkey_keyed_container(ff_setup):
     r, V, F = parse_lammps_table(str(ff_setup["table_file"]))
     assert np.allclose(V, pot.value(r), atol=1e-6)
     assert np.allclose(F, pot.force(r), atol=1e-6)
+
+
+def test_writelmpff_ignores_non_command_pair_coeff_substrings(tmp_path):
+    table_file = tmp_path / "AB_pair.table"
+    settings_file = tmp_path / "settings_substring.lmp"
+    output_file = tmp_path / "settings_substring_new.lmp"
+    _write_pair_table(table_file, k=10.0, r0=3.0, n=50)
+    r_before, V_before, F_before = parse_lammps_table(table_file)
+    settings_file.write_text(
+        "not_pair_coeff A B AB_pair.table PAIR_AB\n",
+        encoding="utf-8",
+    )
+    pot = HarmonicPotential("A", "B", k=18.0, r0=3.4)
+
+    WriteLmpFF(
+        str(settings_file),
+        str(output_file),
+        {InteractionKey.pair("A", "B"): [pot]},
+        "table",
+        topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
+    )
+
+    r_after, V_after, F_after = parse_lammps_table(table_file)
+    assert output_file.read_text(encoding="utf-8") == settings_file.read_text(encoding="utf-8")
+    assert np.allclose(r_after, r_before)
+    assert np.allclose(V_after, V_before)
+    assert np.allclose(F_after, F_before)
 
 
 def test_writelmpff_updates_harmonic_bond_coeff_from_unified_forcefield(tmp_path):

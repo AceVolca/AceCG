@@ -85,6 +85,20 @@ class SRLRGaussianPotential(BasePotential):
         dUdr = -(term1 + term2)  # derivative of full potential
         return -dUdr              # force = -dU/dr
 
+    def force_grad(self, r):
+        """Return the explicit force Jacobian ``dF/d[A, B, C, D]``."""
+        r_arr = np.asarray(r, dtype=float)
+        A, B, C, D = self._params
+        r2 = r_arr * r_arr
+        exp_b = np.exp(-B * r2)
+        exp_d = np.exp(-D * r2)
+        grad = np.empty(r_arr.shape + (4,), dtype=float)
+        grad[..., 0] = -2.0 * B * r_arr * exp_b
+        grad[..., 1] = -2.0 * A * r_arr * exp_b * (1.0 - B * r2)
+        grad[..., 2] = -2.0 * D * r_arr * exp_d
+        grad[..., 3] = -2.0 * C * r_arr * exp_d * (1.0 - D * r2)
+        return grad
+
     # ----------------------------------------------------------------------
     # First derivatives w.r.t parameters
     # ----------------------------------------------------------------------
