@@ -8,8 +8,8 @@ Currently, we support:
 - Force-Matching (FM)
 - Denoising Score Matching (DSM)
 - Relative Entropy Minimization (REM)
-- Conditioned Dual-Sampling REM (CDREM)
-- Conditioned Direct Force Matching (CDFM)
+- Conditional-Derivative REM (CDREM)
+- Conditional-Derivative Force Matching (CDFM)
 - Virtual Particle workflows
 - Boundary-prior force-field post-processing
 
@@ -52,7 +52,7 @@ acg-boundary-prior
 
 ## Latest update
 
-- 06/15/2026, Weizhi: Updated sampling workflow and trajectory handling:
+- 06/15/2026, Weizhi: Fixed some known issues in sampling workflow and trajectory handling:
   - Added `sampling.trajectory_format` for REM/CDREM/CDFM sampled trajectory post-processing.
   - Added automatic format inference for common LAMMPS `dump xtc`, `dump dcd`, and `dump h5md` scripts.
   - Added `sampling.archive_trajectory` for REM runs that need to retain sampled CG trajectories.
@@ -66,15 +66,13 @@ acg-boundary-prior
 - 05/05/2026, Weizhi: Added DSM, noisy FM, mixed noisy FM, noisy REM, batch compute backends, and gauge-free gradient support (Zhikun).
 - 04/24/2026, Weizhi: Synced all architectural updates to the current repo. See the developer guide for all details. AceCG is now with MPI CPU support, multitask scheduling, unified topology management, parallelized compute backends, config file parsing, command-line interface, etc.
 
-## Documentation updates
+## Developer Documentation
 
-- Public developer guide chapters were refreshed for the current module names and runtime behavior.
-- Scheduler documentation now describes Slurm-first OpenMPI/MPICH realization inside active allocations.
-- Workflow documentation now covers sampled trajectory format forwarding, replay/init-pool exclusivity, and REM trajectory archiving.
+See `./documentation`. Last updated 06/15/2026 to reflect current changes.
 
 ## Known Issues
 
-The 05/24 merge is too heavy. Code is not simple enough. Need to fix.
+To be reported. No known issues for this 06/15/2026 release yet. Please feel free to test the code and raise issues.
 
 ## Developer Team
 
