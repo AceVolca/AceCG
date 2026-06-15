@@ -36,8 +36,16 @@ class _SamplingHarness(SamplingWorkflow):
 
 
 class _DummySampler:
-    def __init__(self, base_dir: Path):
+    def __init__(
+        self,
+        base_dir: Path,
+        *,
+        trajectory_name: str = "traj.lammpstrj",
+        trajectory_format=None,
+    ):
         self.base_dir = base_dir
+        self.trajectory_name = trajectory_name
+        self.trajectory_format = trajectory_format
         self.cleaned = False
         self.state_counter = 0
         self.loaded_state = None
@@ -48,12 +56,13 @@ class _DummySampler:
         run_dir.mkdir(parents=True, exist_ok=True)
         input_script = run_dir / "in.rem.lmp"
         input_script.write_text("# dummy rem input\n", encoding="utf-8")
-        trajectory_path = run_dir / "traj.lammpstrj"
+        trajectory_path = run_dir / self.trajectory_name
         plan = SimpleNamespace(
             run_id=0,
             run_dir=run_dir,
             input_script_path=input_script,
             trajectory_path=trajectory_path,
+            trajectory_format=self.trajectory_format,
             frame_id=None,
             write_data_path=None,
         )
@@ -562,6 +571,7 @@ def test_rem_run_builds_canonical_xz_taskspec_and_sets_need_hessian(monkeypatch,
     assert Path(task.run_dir).is_absolute()
     assert task.sim_backend == "lammps"
     assert task.post_exec == {"mode": "mpi"}
+    assert task.archive_trajectory is False
     assert task.trajectory_files == ["traj.lammpstrj"]
     assert "trajectory_format" not in task.post_spec
     assert "post_mode" not in task.post_spec
@@ -571,6 +581,106 @@ def test_rem_run_builds_canonical_xz_taskspec_and_sets_need_hessian(monkeypatch,
     assert task.post_spec["steps"][0]["need_hessian"] is True
     assert task.post_spec["steps"][0]["output_file"] == "result.pkl"
     assert sampler.cleaned is True
+
+
+def test_rem_run_can_archive_training_trajectory(monkeypatch, tmp_path):
+    config_path = tmp_path / "config" / "test.acg"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("# config\n", encoding="utf-8")
+
+    cache_path = config_path.parent / "cache" / "aa.pkl"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "wb") as fh:
+        pickle.dump(
+            {
+                "energy_grad_AA": np.array([0.0, 0.0]),
+                "d2U_AA": np.eye(2, dtype=np.float64),
+                "gradient_convention": "gauge_free",
+            },
+            fh,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+
+    scheduler = _CapturingScheduler()
+    sampler = _DummySampler(tmp_path)
+    _patch_workflow_basics(monkeypatch, _linear_forcefield(), scheduler=scheduler, sampler=sampler)
+
+    def _fake_write_forcefield(self, ff_dir):
+        ff_dir.mkdir(parents=True, exist_ok=True)
+        target = ff_dir / "runtime.settings"
+        target.write_text("# ff\n", encoding="utf-8")
+        return target
+
+    monkeypatch.setattr(SamplingWorkflow, "_write_forcefield", _fake_write_forcefield)
+
+    cfg = _make_config(
+        config_path,
+        optimizer=None,
+        all_atom_data_path="cache/aa.pkl",
+    )
+    cfg = dataclasses.replace(
+        cfg,
+        sampling=dataclasses.replace(cfg.sampling, archive_trajectory=True),
+    )
+
+    REMWorkflow(cfg).run()
+
+    task = scheduler.last_xz_tasks[0]
+    assert task.archive_trajectory is True
+    assert task.trajectory_files == ["traj.lammpstrj"]
+
+
+def test_rem_run_forwards_mdanalysis_sampling_format_to_cg_post_spec(monkeypatch, tmp_path):
+    config_path = tmp_path / "config" / "test.acg"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("# config\n", encoding="utf-8")
+
+    cache_path = config_path.parent / "cache" / "aa.pkl"
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(cache_path, "wb") as fh:
+        pickle.dump(
+            {
+                "energy_grad_AA": np.array([0.0, 0.0]),
+                "d2U_AA": np.eye(2, dtype=np.float64),
+                "gradient_convention": "gauge_free",
+            },
+            fh,
+            protocol=pickle.HIGHEST_PROTOCOL,
+        )
+
+    scheduler = _CapturingScheduler()
+    sampler = _DummySampler(
+        tmp_path,
+        trajectory_name="traj.dcd",
+        trajectory_format="dcd",
+    )
+    _patch_workflow_basics(monkeypatch, _linear_forcefield(), scheduler=scheduler, sampler=sampler)
+
+    def _fake_write_forcefield(self, ff_dir):
+        ff_dir.mkdir(parents=True, exist_ok=True)
+        target = ff_dir / "runtime.settings"
+        target.write_text("# ff\n", encoding="utf-8")
+        return target
+
+    monkeypatch.setattr(
+        SamplingWorkflow,
+        "_write_forcefield",
+        _fake_write_forcefield,
+    )
+
+    workflow = REMWorkflow(
+        _make_config(
+            config_path,
+            optimizer=None,
+            all_atom_data_path="cache/aa.pkl",
+        )
+    )
+    workflow.run()
+
+    task = scheduler.last_xz_tasks[0]
+    assert task.trajectory_files == ["traj.dcd"]
+    assert task.post_spec["trajectory"] == str(Path(task.run_dir) / "traj.dcd")
+    assert task.post_spec["trajectory_format"] == "DCD"
 
 
 def test_rem_run_forwards_perf_trace_to_cg_post_spec(monkeypatch, tmp_path):

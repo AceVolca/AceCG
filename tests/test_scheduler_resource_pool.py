@@ -270,6 +270,24 @@ def test_openmpi_backend_single(tmp_path):
     assert "-np" in spec.argv
 
 
+def test_openmpi_backend_prefers_slurm_for_local_host_in_allocation(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
+    b = OpenMpiBackend("/usr/bin/mpirun")
+    b._srun_path = "/usr/bin/srun"
+    p = Placement.from_host_cores("localhost", tuple(range(4)))
+
+    spec = b.realize(p, ["lmp"], tmp_path)
+
+    assert spec.argv[0] == "/usr/bin/srun"
+    assert "--mpi=pmi2" in spec.argv
+    assert "--cpu-bind=map_cpu:0,1,2,3" in spec.argv
+    assert "--mca" not in spec.argv
+    assert spec.env_strip_prefixes == ("PMI_", "SLURM_")
+
+
 def test_openmpi_backend_multi(tmp_path, monkeypatch):
     monkeypatch.setenv("SLURM_JOB_ID", "12345")
     b = OpenMpiBackend("/usr/bin/mpirun")
@@ -342,6 +360,24 @@ def test_mpich_backend_single(tmp_path):
     assert "fork" in spec.argv
     assert "-bind-to" in spec.argv
     assert "user:0,1,2,3" in spec.argv
+
+
+def test_mpich_backend_prefers_slurm_for_local_host_in_allocation(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("SLURM_JOB_ID", "12345")
+    b = MpichBackend("/usr/bin/mpirun")
+    b._srun_path = "/usr/bin/srun"
+    p = Placement.from_host_cores("localhost", tuple(range(4)))
+
+    spec = b.realize(p, ["lmp"], tmp_path)
+
+    assert spec.argv[0] == "/usr/bin/srun"
+    assert "--mpi=pmi2" in spec.argv
+    assert "--cpu-bind=map_cpu:0,1,2,3" in spec.argv
+    assert "-launcher" not in spec.argv
+    assert spec.env_strip_prefixes == ("PMI_", "SLURM_")
 
 
 def test_mpich_backend_multi(tmp_path, monkeypatch):

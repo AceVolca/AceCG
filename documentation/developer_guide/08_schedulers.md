@@ -1,6 +1,6 @@
 # 08 AceCG `schedulers/` Developer Reference
 
-*Updated: 2026-04-23. Merged from the older scheduler design document.*
+*Updated: 2026-06-15. Merged from the older scheduler design document.*
 
 > Audience: developers who need to understand, debug, or extend the AceCG scheduler subsystem.
 
@@ -96,12 +96,16 @@ Inputs and outputs are plain data classes: `HostInventory`, `Placement`, and `La
 
 ### Three Launch Environments
 
-Each backend dispatches inside `realize()` based on `SLURM_JOB_ID` and `_is_local(placement)`:
+Each backend dispatches inside `realize()` based on `SLURM_JOB_ID` and
+`_is_local(placement)`. OpenMPI and MPICH prefer the Slurm path whenever
+`SLURM_JOB_ID` is present, even for local-host placements inside a Slurm
+allocation. Intel MPI also uses Slurm realization inside allocations according
+to its configured launch mode.
 
 | Environment | Trigger | Typical use |
 |---|---|---|
-| local | all cores are on the local host | login-node smoke tests, single-node `sinteractive` |
-| multi-host SLURM | `SLURM_JOB_ID` exists and placement spans nodes | production `sbatch` / multi-node `sinteractive` |
+| local | all cores are on the local host and no Slurm allocation is active | login-node smoke tests |
+| SLURM | `SLURM_JOB_ID` exists | production `sbatch`, multi-node `sinteractive`, and local-host placements inside an allocation |
 | multi-host SSH | no `SLURM_JOB_ID` and placement spans nodes | small clusters or private machines with passwordless SSH |
 
 ### `scontrol` Discovery Optimization
@@ -466,10 +470,10 @@ print(type(b).__name__, b.supports_multi_host)
            self._slurm_conf = _find_slurm_conf()
 
        def realize(self, placement, payload_cmd, run_dir) -> LaunchSpec:
-           if _is_local(placement):
-               return self._realize_local(placement, payload_cmd)
            if os.environ.get("SLURM_JOB_ID"):
                return self._realize_slurm(placement, payload_cmd, run_dir)
+           if _is_local(placement):
+               return self._realize_local(placement, payload_cmd)
            return self._realize_ssh(placement, payload_cmd, run_dir)
    ```
 

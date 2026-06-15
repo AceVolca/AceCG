@@ -202,6 +202,43 @@ class SamplingWorkflow(BaseWorkflow):
             rng=self.workflow_rng,
         )
 
+    def _sampling_trajectory_format(self, plan: Any) -> Optional[str]:
+        """Return configured or script-inferred sampling trajectory format."""
+        configured = self.config.sampling.trajectory_format
+        inferred = getattr(plan, "trajectory_format", None)
+        fmt = configured if configured is not None else inferred
+        if fmt is None:
+            return None
+        text = str(fmt).strip()
+        if not text:
+            return None
+        aliases = {
+            "lammpstrj": "LAMMPSDUMP",
+            "lammpsdump": "LAMMPSDUMP",
+            "lammps_dump": "LAMMPSDUMP",
+            "dump": "LAMMPSDUMP",
+            "xtc": "XTC",
+            "dcd": "DCD",
+            "h5md": "H5MD",
+            "trr": "TRR",
+            "xyz": "XYZ",
+        }
+        lowered = text.lower()
+        if lowered in aliases:
+            return aliases[lowered]
+        if all(char.isalnum() or char in {"_", "-"} for char in text):
+            return text.upper().replace("-", "_")
+        return text
+
+    def _apply_sampling_trajectory_format(
+        self,
+        post_spec: Dict[str, Any],
+        plan: Any,
+    ) -> None:
+        fmt = self._sampling_trajectory_format(plan)
+        if fmt is not None and fmt.upper() != "LAMMPSDUMP":
+            post_spec["trajectory_format"] = fmt
+
     def _derive_beta(self) -> float:
         """Derive β = 1/(kB·T) from config.training.temperature."""
         T = self.config.training.temperature

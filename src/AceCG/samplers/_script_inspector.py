@@ -29,6 +29,11 @@ class ScriptInfo(Protocol):
         ...
 
     @property
+    def trajectory_format(self) -> Optional[str]:
+        """Return the MDAnalysis format token for the produced trajectory."""
+        ...
+
+    @property
     def checkpoint_path(self) -> Optional[Path]:
         """Return the optional checkpoint/replay output path."""
         ...

@@ -178,12 +178,21 @@ input = cd/system/in.xz.lmp
 # sampling-based workflows so the resource pool can discover the runtime.
 engine_command = lmp
 
+# Optional MDAnalysis format token for sampled CG trajectories. Omit for
+# default LAMMPS dump output. For REM/CDREM/CDFM non-dump sampling, set any
+# MDAnalysis-supported format token here. Common LAMMPS binary dump styles such
+# as `dump ... xtc ...`, `dump ... dcd ...`, and `dump ... h5md ...` are
+# detected automatically.
+# trajectory_format = DCD
+
 # Optional pool for free xz initial configurations.
 # If omitted for a sampling workflow that uses BaseSampler, the script's own
 # read_data target becomes the implicit default init config.
 init_config_pool = ../../data/reference/ini_config/system_*.data
 
 # Optional replay policy for free xz sampling.
+# Replay modes other than off are mutually exclusive with init_config_pool:
+# remove init_config_pool before setting replay_mode to latest or random.
 # Accepted values in BaseSampler:
 #   off    -> always draw from init_config_pool / script default
 #   latest -> reuse the latest checkpoint written by a previous xz run
@@ -276,7 +285,10 @@ trajectory_files = [
   "../../data/reference/traj/cg6_2.lammpstrj"
 ]
 
-# MDAnalysis trajectory format token.
+# MDAnalysis trajectory format token. REM/CDREM can use any supported
+# coordinate format here with a matching aa_ref.ref_topo/system.topology_file.
+# FM requires force-bearing trajectories, so coordinate-only formats such as XTC
+# or DCD are not accepted for FM reference data.
 trajectory_format = LAMMPSDUMP
 
 # Frame-window controls for AA reference reading.
@@ -474,7 +486,8 @@ ref_type_names = ../../data/reference/topo/cg6_aliases.json
 # input = cd/system/in.xz.lmp
 # engine_command = lmp
 # init_config_pool = ../../data/reference/ini_config_vp/ini_config/system_*.data
-# replay_mode = latest
+# # For replay restarts, remove init_config_pool before using latest/random.
+# replay_mode = off
 # ncores = 48
 # sim_var = {"SEED_VEL": "{RANDOM}", "SEED_LANG": "{RANDOM}"}
 #

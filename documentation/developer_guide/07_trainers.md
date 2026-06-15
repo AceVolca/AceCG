@@ -1,6 +1,6 @@
 # 07 Trainer Module Developer Reference
 
-*Updated: 2026-05-24.*
+*Updated: 2026-06-15.*
 
 The trainer layer sits above `compute/` and next to `solvers/`. It consumes workflow-built batch statistics and produces gradients, Hessians, update steps, and diagnostics. It does not own MPI execution, trajectory extraction, or reducer runtime state.
 
@@ -18,7 +18,6 @@ The trainer layer sits above `compute/` and next to `solvers/`. It consumes work
 | `trainers/analytic/cdfm.py` | CDFM gradient consumer with EM guardrail handling |
 | `trainers/analytic/l_zero.py` | First-order L0 gate trainer for `GatedPotential` forcefields |
 | `trainers/analytic/multi.py` | Meta-trainer that combines multiple child trainers |
-| `trainers/autodiff/` | Placeholder package for future autodiff trainers |
 
 `AceCG.trainers` currently re-exports analytic trainers only.
 

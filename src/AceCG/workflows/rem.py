@@ -134,6 +134,7 @@ class REMWorkflow(SamplingWorkflow):
                 post_spec["atom_type_name_aliases"] = cfg.system.type_names
             if cfg.vp is not None:
                 post_spec["vp_names"] = list(cfg.vp.vp_names)
+            self._apply_sampling_trajectory_format(post_spec, plan)
             self._apply_post_runtime_options(post_spec)
             xz_task = TaskSpec(
                 task_class="xz",
@@ -147,7 +148,7 @@ class REMWorkflow(SamplingWorkflow):
                 sim_var=dict(cfg.sampling.sim_var),
                 post_spec=post_spec,
                 post_exec={"mode": "mpi"},
-                archive_trajectory=False,
+                archive_trajectory=cfg.sampling.archive_trajectory,
                 trajectory_files=[trajectory_relpath],
                 single_host_only=False,
             )

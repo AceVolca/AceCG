@@ -35,7 +35,9 @@ sim_backend = lammps
 input = cd/system/in.xz.lmp
 engine_command = lmp
 init_config_pool = ../../data/reference/ini_config_vp/ini_config/system_*.data
-replay_mode = latest
+# Keep replay_mode=off when init_config_pool is set. For replay restarts,
+# remove init_config_pool and set replay_mode to latest or random.
+replay_mode = off
 ncores = 48
 sim_var = {"SEED_VEL": "{RANDOM}", "SEED_LANG": "{RANDOM}"}
 

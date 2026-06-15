@@ -158,9 +158,11 @@ class SamplingConfig:
     sim_backend: str = "lammps"
     input: Optional[str] = None
     engine_command: Optional[str] = None
+    trajectory_format: Optional[str] = None
     init_config_pool: Optional[str] = None
     replay_mode: str = "off"
     ncores: Optional[int] = None
+    archive_trajectory: bool = False
     perf_trace: bool = False
     sim_var: Dict[str, str] = field(default_factory=dict)
     extras: Dict[str, Any] = field(default_factory=dict)

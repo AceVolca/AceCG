@@ -25,5 +25,5 @@ examples.
   force pools
 - `templates/tutorial.acg`: parser reference and commented workflow examples
 
-Some templates still contain paths inherited from the old `workspace/results`
-layout. Treat them as starting points and normalize paths in run-local copies.
+Some templates and commented examples contain placeholder input/output paths.
+Treat them as starting points and normalize paths in run-local copies.

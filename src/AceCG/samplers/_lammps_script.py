@@ -47,12 +47,24 @@ class LammpsScriptInfo:
         return self.last_dump_path
 
     @property
+    def trajectory_format(self) -> Optional[str]:
+        """Return the inferred MDAnalysis format token for the trajectory dump."""
+        return _INFERRED_TRAJECTORY_FORMAT_BY_DUMP_STYLE.get(self.last_dump_style)
+
+    @property
     def checkpoint_path(self) -> Optional[Path]:
         """Return the replay/checkpoint data path produced by ``write_data``."""
         return self.write_data_path
 
 
-_COORD_DUMP_STYLES = {"atom", "custom"}
+_INFERRED_TRAJECTORY_FORMAT_BY_DUMP_STYLE = {
+    "atom": "LAMMPSDUMP",
+    "custom": "LAMMPSDUMP",
+    "dcd": "DCD",
+    "h5md": "H5MD",
+    "xtc": "XTC",
+    "xyz": "XYZ",
+}
 _COORD_FIELD_TRIPLETS = (
     {"x", "y", "z"},
     {"xu", "yu", "zu"},
@@ -183,7 +195,7 @@ def parse_lammps_script(script_path: Path) -> LammpsScriptInfo:
             has_read_restart = True
         elif cmd == "dump" and len(tokens) >= 6:
             style, fpath = tokens[3], tokens[5]
-            if style in _COORD_DUMP_STYLES:
+            if style in _INFERRED_TRAJECTORY_FORMAT_BY_DUMP_STYLE:
                 if style == "custom":
                     if _has_coordinate_triplet(tokens[6:]):
                         dumps.append((style, fpath))

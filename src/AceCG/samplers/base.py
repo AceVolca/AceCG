@@ -46,6 +46,7 @@ class ReplicaPlan:
     read_data_target: Path
     trajectory_path: Path
     write_data_path: Optional[Path]
+    trajectory_format: Optional[str] = None
     init_force_path: Optional[Path] = None
 
 
@@ -90,6 +91,18 @@ class BaseSampler:
         replay_mode: Literal["off", "latest", "random"] = "off",
         rng: random.Random | None = None,
     ) -> None:
+        if replay_mode not in {"off", "latest", "random"}:
+            raise ValueError(
+                "replay_mode must be one of 'off', 'latest', or "
+                f"'random', got {replay_mode!r}."
+            )
+        if init_config_pool is not None and replay_mode != "off":
+            raise ValueError(
+                "init_config_pool and replay_mode are mutually exclusive. "
+                "Replay modes initialize from prior checkpoint data; use "
+                "replay_mode='off' to draw from init_config_pool."
+            )
+
         self._sim_input = Path(sim_input)
         self._sim_backend = sim_backend
         self._replay_mode = replay_mode
@@ -258,6 +271,7 @@ class BaseSampler:
             read_data_target=run_dir / Path(si.init_data_path),
             trajectory_path=run_dir / Path(si.trajectory_path),
             write_data_path=(run_dir / Path(si.checkpoint_path)) if si.checkpoint_path else None,
+            trajectory_format=getattr(si, "trajectory_format", None),
             init_force_path=force_path,
         )
 

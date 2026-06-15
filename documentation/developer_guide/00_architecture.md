@@ -1,6 +1,6 @@
 # 00 AceCG Software Architecture
 
-*Updated: 2026-05-06. Merged and expanded from draw.md (2026-04-03).*
+*Updated: 2026-06-15. Merged and expanded from draw.md (2026-04-03).*
 
 > This is the top-level architecture document for AceCG and is the recommended first document to read before diving into the code.
 
@@ -26,19 +26,19 @@ L5  Scheduler / Task Runner
     resource_pool.py, mpi_backend.py, profiler.py
 
 L4  Trainers / Solvers / Optimizers
-    trainers/analytic/{rem,mse,fm,cdrem,cdfm,l0,multi}.py
+    trainers/analytic/{rem,mse,fm,cdrem,cdfm,l_zero,multi}.py
     solvers/fm_matrix.py
     optimizers/{adam,adamW,rmsprop,newton_raphson}.py
 
 L3  Compute Runtime
     compute/mpi_engine.py
     compute/frame_geometry.py, energy.py, force.py
-    compute/reducers.py, registry.py
+    compute/reducers.py, requests.py
     analysis/rdf.py
 
 L2  I/O + Config
     io/trajectory.py, forcefield.py, coordinates.py
-    io/tables.py, logger.py
+    io/tables.py, lammps_input.py, logger.py
     configs/parser.py, models.py, vp_config.py
 
 L1  Topology / Forcefield
@@ -120,6 +120,7 @@ The core objects are:
 | `io/coordinates.py` | CG coordinate mapping helpers |
 | `io/coordinates_writers.py` | LAMMPS data-file writing, including topology support |
 | `io/tables.py` | LAMMPS tabulated potential I/O |
+| `io/lammps_input.py` | LAMMPS input lexer, continuation handling, and literal include expansion |
 | `io/logger.py` | Structured screen logging |
 | `configs/parser.py` | `.acg` config parser |
 | `configs/models.py` | Config dataclasses such as `SchedulerConfig` and `WorkflowConfig` |
@@ -144,7 +145,7 @@ This is the numerical core of the system. See [03_compute.md](03_compute.md) and
 | `compute/energy.py` | `energy()` kernel |
 | `compute/force.py` | `force()` kernel |
 | `compute/reducers.py` | Stateful pipeline reducers: init / consume / finalize |
-| `compute/registry.py` | `build_default_engine()`, which registers core observables |
+| `compute/requests.py` | Canonical compute request names and kernel keyword mapping |
 | `analysis/rdf.py` | RDF / PDF distribution analysis |
 
 Stable public APIs:
@@ -360,8 +361,8 @@ For a quick understanding of the current runtime, read in this order:
 2. `topology/topology_array.py` - `TopologyArrays`, `collect_topology_arrays()`
 3. `topology/forcefield.py` - `Forcefield` and parameter-vector APIs
 4. `compute/frame_geometry.py` - `FrameGeometry`, `compute_frame_geometry()`
-5. `compute/registry.py` - `build_default_engine()` and registered observables
-6. `compute/mpi_engine.py` - `MPIComputeEngine.compute()` and `run_post()`
+5. `compute/requests.py` - canonical request names used by reducers and kernels
+6. `compute/mpi_engine.py` - `build_default_engine()`, `MPIComputeEngine.compute()`, and `run_post()`
 7. `compute/reducers.py` - init / consume / finalize pipeline API
 8. `trainers/analytic/*.py` - trainer batch contracts and `step()` implementations
 9. `solvers/fm_matrix.py` - matrix FM solver

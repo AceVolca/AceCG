@@ -241,6 +241,7 @@ class CDFMWorkflow(SamplingWorkflow):
             post_spec["atom_type_name_aliases"] = cfg.system.type_names
         if cfg.vp is not None:
             post_spec["vp_names"] = list(cfg.vp.vp_names)
+        self._apply_sampling_trajectory_format(post_spec, plan)
 
         return TaskSpec(
             task_class="zbx",

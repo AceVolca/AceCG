@@ -1,6 +1,6 @@
 # 11 I/O Utilities Developer Reference
 
-*Updated: 2026-05-24.*
+*Updated: 2026-06-15.*
 
 > This chapter covers generic I/O utilities only. VP-specific `latent.settings` and table generation are documented in [10_vp_grower.md](10_vp_grower.md).
 
@@ -23,6 +23,7 @@ It does not own trainer semantics, workflow training loops, or compute reducer m
 | `io/coordinates.py` | AA-to-CG coordinate mapping and sanity checks |
 | `io/coordinates_writers.py` | `.gro` / `.pdb` / LAMMPS `.data` writing |
 | `io/tables.py` | Table I/O and FM table-bundle export |
+| `io/lammps_input.py` | Shared LAMMPS input-file lexer and literal include resolver |
 | `io/logger.py` | Screen logging and formatted timestamps |
 
 ---
@@ -69,6 +70,9 @@ bonded coefficient entries such as `bond_coeff 4 ...` and `angle_coeff 7 ...`
 are LAMMPS 1-based type ids; the readers translate them through the topology
 maps into canonical interaction keys after configured type aliases are applied.
 The returned specs therefore contain keys such as `bond:HG:VP`, not `bond:4`.
+Both readers use the shared `io.lammps_input` tokenizer, so comments are
+removed, continuation lines are joined, and literal `include` directives are
+expanded before coefficient parsing.
 
 `WriteLmpFF()` is the corresponding write side:
 

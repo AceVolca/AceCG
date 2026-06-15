@@ -114,9 +114,11 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
             "sim_backend",
             "input",
             "engine_command",
+            "trajectory_format",
             "init_config_pool",
             "replay_mode",
             "ncores",
+            "archive_trajectory",
             "perf_trace",
             "perf_trace_all_ranks",
             "heartbeat_interval",
@@ -498,11 +500,17 @@ def build_acg_config(
         ).strip().lower(),
         input=_pop_optional_str(sampling_raw, "input"),
         engine_command=_pop_optional_str(sampling_raw, "engine_command"),
+        trajectory_format=_normalize_trajectory_format(
+            sampling_raw.pop("trajectory_format", None)
+        ),
         init_config_pool=_pop_optional_str(sampling_raw, "init_config_pool"),
         replay_mode=str(
             sampling_raw.pop("replay_mode", "off")
         ).strip().lower(),
         ncores=_pop_optional_int(sampling_raw, "ncores"),
+        archive_trajectory=_pop_optional_bool(
+            sampling_raw, "archive_trajectory", default=False
+        ),
         perf_trace=_pop_optional_bool(sampling_raw, "perf_trace", default=False),
         sim_var=_pop_sim_var(sampling_raw),
         extras=sampling_raw,
@@ -571,9 +579,9 @@ def build_acg_config(
 
     aa_ref = AARefConfig(
         trajectory_files=trajectory_files,
-        trajectory_format=str(
+        trajectory_format=_normalize_trajectory_format(
             aa_ref_raw.pop("trajectory_format", "LAMMPSDUMP")
-        ),
+        ) or "LAMMPSDUMP",
         skip_frames=_pop_optional_int(aa_ref_raw, "skip_frames", default=0),
         every=_pop_optional_int(aa_ref_raw, "every", default=1),
         n_frames=_pop_optional_int(aa_ref_raw, "n_frames", default=0),
@@ -816,6 +824,15 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
             "aa_ref.trajectory_files must contain at least one trajectory "
             "path for FM."
         )
+    force_free_format = _known_force_free_trajectory_format(
+        config.aa_ref.trajectory_format
+    )
+    if method == "fm" and force_free_format is not None:
+        raise ACGConfigError(
+            f"FM does not support aa_ref.trajectory_format={force_free_format!r} "
+            "because that format does not carry reference forces. Use a "
+            "force-bearing format such as a LAMMPS dump with fx/fy/fz columns."
+        )
 
     if method in ("rem", "cdrem"):
         has_traj = bool(config.aa_ref.trajectory_files)
@@ -845,6 +862,23 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
             raise ACGConfigError(
                 f"sampling.engine_command is required for method={method!r}."
             )
+    if config.sampling.trajectory_format is not None and not config.sampling.trajectory_format:
+        raise ACGConfigError("sampling.trajectory_format must be non-empty when set.")
+    if config.sampling.replay_mode not in {"off", "latest", "random"}:
+        raise ACGConfigError(
+            "sampling.replay_mode must be one of 'off', 'latest', or "
+            f"'random', got {config.sampling.replay_mode!r}."
+        )
+    if (
+        config.sampling.init_config_pool is not None
+        and config.sampling.replay_mode != "off"
+    ):
+        raise ACGConfigError(
+            "sampling.init_config_pool and sampling.replay_mode are mutually "
+            "exclusive. Remove sampling.init_config_pool when replaying from "
+            "prior xz checkpoints, or set sampling.replay_mode = off to draw "
+            "from the configured init pool."
+        )
 
     # Optional validation is simulation-only: no replay and no trajectory cleanup.
     validation = config.validation
@@ -930,6 +964,42 @@ def _parse_section_header(line: str) -> Optional[str]:
         return line[1:-1].strip().lower()
     if line.startswith("<") and line.endswith(">"):
         return line[1:-1].strip().lower()
+    return None
+
+
+def _normalize_trajectory_format(value: Any) -> Optional[str]:
+    """Normalize common trajectory format aliases for MDAnalysis."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "auto":
+        return None
+    aliases = {
+        "lammpstrj": "LAMMPSDUMP",
+        "lammpsdump": "LAMMPSDUMP",
+        "lammps_dump": "LAMMPSDUMP",
+        "dump": "LAMMPSDUMP",
+        "xtc": "XTC",
+        "dcd": "DCD",
+        "h5md": "H5MD",
+        "trr": "TRR",
+        "xyz": "XYZ",
+    }
+    lowered = text.lower()
+    if lowered in aliases:
+        return aliases[lowered]
+    if all(char.isalnum() or char in {"_", "-"} for char in text):
+        return text.upper().replace("-", "_")
+    return text
+
+
+def _known_force_free_trajectory_format(value: Any) -> Optional[str]:
+    normalized = _normalize_trajectory_format(value)
+    if normalized is None:
+        return None
+    token = normalized.upper()
+    if token in {"XTC", "DCD"}:
+        return token
     return None
 
 

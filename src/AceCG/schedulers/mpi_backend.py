@@ -453,10 +453,10 @@ class OpenMpiBackend(MpiBackend):
         run_dir: Path,
     ) -> LaunchSpec:
         """Build the OpenMPI launch command for a placement."""
-        if _is_local(placement):
-            return self._realize_local(placement, payload_cmd)
         if os.environ.get("SLURM_JOB_ID"):
             return self._realize_slurm(placement, payload_cmd, run_dir)
+        if _is_local(placement):
+            return self._realize_local(placement, payload_cmd)
         return self._realize_ssh(placement, payload_cmd, run_dir)
 
     # -- Local (single-host, shared-memory) ------------------------------
@@ -590,10 +590,10 @@ class MpichBackend(MpiBackend):
         run_dir: Path,
     ) -> LaunchSpec:
         """Build the MPICH launch command for a placement."""
-        if _is_local(placement):
-            return self._realize_local(placement, payload_cmd)
         if os.environ.get("SLURM_JOB_ID"):
             return self._realize_slurm(placement, payload_cmd, run_dir)
+        if _is_local(placement):
+            return self._realize_local(placement, payload_cmd)
         return self._realize_ssh(placement, payload_cmd, run_dir)
 
     # -- Local (single-host) ---------------------------------------------

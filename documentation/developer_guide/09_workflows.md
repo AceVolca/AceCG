@@ -1,6 +1,6 @@
 # 09 Workflow Module Developer Reference
 
-*Updated: 2026-05-24.*
+*Updated: 2026-06-15.*
 
 > This chapter covers training / orchestration workflows only. VP grower is documented separately in [10_vp_grower.md](10_vp_grower.md).
 
@@ -104,6 +104,7 @@ Key helpers:
 | `_load_workflow_checkpoint()` | Restore from the latest completed epoch |
 | `_energy_mask_runtime_spec()` | Normalize `training.energy_mask` for REM/CDREM post specs |
 | `_apply_rem_statistics_options()` | Attach coordinate-mask and auxiliary-unmasked requests to REM-style steps |
+| `_apply_sampling_trajectory_format()` | Forward configured or script-inferred sampled-trajectory formats to post-processing specs |
 
 `SamplingWorkflow` itself does not define a training loop. It only collects common behavior for workflows that run simulations.
 
@@ -120,6 +121,16 @@ does not apply the coordinate mask itself; it normalizes the spec and forwards
 it to the reducer step. If `training.optimizer_gradient_mode` is `hybrid_aux`
 or `unmasked`, the workflow also requests auxiliary unmasked gradient
 statistics so the trainer can select the optimizer gradient explicitly.
+
+For sampled CG trajectories, `sampling.trajectory_format` may set an explicit
+MDAnalysis format token such as `DCD`, `XTC`, or `H5MD`. If it is omitted, the
+LAMMPS script inspector infers common binary dump styles from commands such as
+`dump ... dcd ...`, `dump ... xtc ...`, and `dump ... h5md ...`. Ordinary
+LAMMPS text dumps remain the default and do not need an explicit format.
+`sampling.init_config_pool` is valid only with `sampling.replay_mode = off`;
+the `latest` and `random` replay modes initialize free xz sampling from prior
+checkpoint data. REM runs may set `sampling.archive_trajectory = true` when
+training trajectories should be retained after successful post-processing.
 
 ### Validation Tasks
 
@@ -148,6 +159,10 @@ does not feed statistics back into trainers.
 4. Build `REMTrainerAnalytic.make_batch(...)`.
 5. Call `trainer.step(batch)` and write parameters back to the runtime forcefield.
 
+By default REM removes sampled CG trajectory files after successful
+post-processing. Set `sampling.archive_trajectory = true` to keep them as run
+outputs.
+
 AA-side statistics are selected by `_build_aa_data_strategy()`: linear
 gauge-free paths may read cached stats directly, while nonlinear paths may
 recompute per epoch.
@@ -167,6 +182,10 @@ ordinary sampled-CG REM branch.
 
 `_build_xz_task()` and `_build_zbx_task()` both use `step_mode="cdrem"` for post-processing. The lower reducer reuses the REM path. `_collect_cdrem_batch()` combines xz and zbx `result.pkl` files into a `CDREMBatch`.
 
+Both branches use the same sampled-trajectory format plumbing as REM: explicit
+`sampling.trajectory_format` wins, otherwise common LAMMPS binary dump styles
+are inferred from the staged input script.
+
 ### `CDFMWorkflow`
 
 `CDFMWorkflow` is zbx-only and has no free xz sampling:
@@ -177,6 +196,10 @@ ordinary sampled-CG REM branch.
 - every zbx task uses `step_mode="cdfm_zbx"`
 
 In the active repo, `y_eff` no longer has a separate `cdfm_y_eff` step. It is computed during the rank-0 preprocessing phase of `cdfm_zbx` from `(init_config, init_force)` and then broadcast to all ranks in that replica.
+
+CDFM has no free xz phase, but conditioned zbx sampled trajectories still use
+the same post-processing trajectory-format forwarding when a non-LAMMPS-dump
+format is configured or inferred.
 
 ### `BoundaryPriorWorkflow`
 

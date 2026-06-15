@@ -274,6 +274,42 @@ def test_parse_acg_file_rejects_validation_replay_and_archive_controls(tmp_path,
         parse_acg_file(cfg_path)
 
 
+def test_parse_acg_file_rejects_sampling_init_pool_with_replay_mode(tmp_path):
+    forcefield_dir = tmp_path / "forcefield"
+    forcefield_dir.mkdir()
+    (forcefield_dir / "real.settings").write_text("", encoding="utf-8")
+    cfg_path = tmp_path / "test.acg"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "[system]",
+                "topology_file = system/topology.data",
+                "forcefield_path = forcefield/real.settings",
+                "pair_style = table",
+                "",
+                "[training]",
+                "method = rem",
+                "temperature = 300.0",
+                "output_dir = results/rem",
+                "",
+                "[sampling]",
+                "input = scripts/in.rem.lmp",
+                "engine_command = lmp",
+                "init_config_pool = pool/*.data",
+                "replay_mode = latest",
+                "",
+                "[aa_ref]",
+                "trajectory_files = ['aa/cg_traj.lammpstrj']",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        parse_acg_file(cfg_path)
+
+
 def test_parse_acg_file_requires_validation_forcefield_template_for_source_free_fm(tmp_path):
     cfg_path = tmp_path / "test.acg"
     cfg_path.write_text(
@@ -422,6 +458,102 @@ def test_parse_acg_file_accepts_sampling_perf_trace(tmp_path):
     cfg = parse_acg_file(cfg_path)
 
     assert cfg.sampling.perf_trace is True
+
+
+def test_parse_acg_file_accepts_sampling_archive_trajectory(tmp_path):
+    forcefield_dir = tmp_path / "forcefield"
+    forcefield_dir.mkdir()
+    (forcefield_dir / "real.settings").write_text("", encoding="utf-8")
+    cfg_path = tmp_path / "test.acg"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "[system]",
+                "topology_file = system/topology.data",
+                "forcefield_path = forcefield/real.settings",
+                "pair_style = table",
+                "",
+                "[training]",
+                "method = rem",
+                "temperature = 300.0",
+                "output_dir = results/rem",
+                "",
+                "[sampling]",
+                "input = scripts/in.rem.lmp",
+                "engine_command = lmp",
+                "archive_trajectory = true",
+                "",
+                "[aa_ref]",
+                "trajectory_files = ['aa/cg_traj.lammpstrj']",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = parse_acg_file(cfg_path)
+
+    assert cfg.sampling.archive_trajectory is True
+
+
+def test_parse_acg_file_accepts_mdanalysis_formats_for_rem(tmp_path):
+    forcefield_dir = tmp_path / "forcefield"
+    forcefield_dir.mkdir()
+    (forcefield_dir / "real.settings").write_text("", encoding="utf-8")
+    cfg_path = tmp_path / "test.acg"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "[system]",
+                "topology_file = system/topology.data",
+                "forcefield_path = forcefield/real.settings",
+                "pair_style = table",
+                "",
+                "[training]",
+                "method = rem",
+                "temperature = 300.0",
+                "output_dir = results/rem",
+                "",
+                "[sampling]",
+                "input = scripts/in.rem.lmp",
+                "engine_command = lmp",
+                "trajectory_format = dcd",
+                "",
+                "[aa_ref]",
+                "trajectory_files = ['aa/cg_traj.dcd']",
+                "trajectory_format = dcd",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = parse_acg_file(cfg_path)
+
+    assert cfg.sampling.trajectory_format == "DCD"
+    assert cfg.aa_ref.trajectory_format == "DCD"
+
+
+def test_parse_acg_file_rejects_fm_xtc_reference(tmp_path):
+    cfg_path = tmp_path / "fm_xtc.acg"
+    _write_fm_noise_config(
+        cfg_path,
+        extra_aa_ref=("trajectory_format = XTC",),
+    )
+
+    with pytest.raises(ValueError, match="FM does not support.*XTC"):
+        parse_acg_file(cfg_path)
+
+
+def test_parse_acg_file_rejects_fm_dcd_reference(tmp_path):
+    cfg_path = tmp_path / "fm_dcd.acg"
+    _write_fm_noise_config(
+        cfg_path,
+        extra_aa_ref=("trajectory_format = dcd",),
+    )
+
+    with pytest.raises(ValueError, match="FM does not support.*DCD"):
+        parse_acg_file(cfg_path)
 
 
 def test_parse_acg_file_accepts_scheduler_extra_env(tmp_path, recwarn):

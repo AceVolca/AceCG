@@ -8,6 +8,7 @@ import pytest
 
 from AceCG.samplers.base import BaseSampler, InitConfigRecord
 from AceCG.samplers.conditioned import ConditionedSampler
+from AceCG.samplers._lammps_script import parse_lammps_script
 
 
 @dataclass(frozen=True)
@@ -38,8 +39,9 @@ def _patch_sampler_runtime(monkeypatch, script_info: _FakeScriptInfo) -> None:
 def test_base_sampler_replay_archive_round_trips_state(monkeypatch, tmp_path: Path) -> None:
     script_path = tmp_path / "sample.in"
     script_path.write_text("# placeholder\n", encoding="utf-8")
-    init_cfg = tmp_path / "seed.data"
-    init_cfg.write_text("seed data\n", encoding="utf-8")
+    default_init = tmp_path / "inputs" / "init.data"
+    default_init.parent.mkdir(parents=True)
+    default_init.write_text("seed data\n", encoding="utf-8")
 
     _patch_sampler_runtime(
         monkeypatch,
@@ -53,7 +55,6 @@ def test_base_sampler_replay_archive_round_trips_state(monkeypatch, tmp_path: Pa
 
     sampler = BaseSampler(
         sim_input=script_path,
-        init_config_pool=[init_cfg],
         replay_mode="latest",
         rng=random.Random(0),
     )
@@ -77,12 +78,79 @@ def test_base_sampler_replay_archive_round_trips_state(monkeypatch, tmp_path: Pa
 
     restored = BaseSampler(
         sim_input=script_path,
-        init_config_pool=[init_cfg],
         replay_mode="latest",
         rng=random.Random(0),
     )
     restored.load_state_dict(sampler.state_dict())
     assert restored.replay_pool == sampler.replay_pool
+
+
+def test_base_sampler_rejects_init_pool_with_replay_mode(monkeypatch, tmp_path: Path) -> None:
+    script_path = tmp_path / "sample.in"
+    script_path.write_text("# placeholder\n", encoding="utf-8")
+    init_cfg = tmp_path / "seed.data"
+    init_cfg.write_text("seed data\n", encoding="utf-8")
+
+    _patch_sampler_runtime(
+        monkeypatch,
+        _FakeScriptInfo(
+            input_path=script_path,
+            init_data_path=Path("inputs/init.data"),
+            trajectory_path=Path("traj/out.lammpstrj"),
+            checkpoint_path=Path("restart/restart.data"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        BaseSampler(
+            sim_input=script_path,
+            init_config_pool=[init_cfg],
+            replay_mode="latest",
+        )
+
+
+@pytest.mark.parametrize(
+    ("dump_style", "suffix", "expected_format"),
+    [
+        ("xtc", "xtc", "XTC"),
+        ("dcd", "dcd", "DCD"),
+        ("h5md", "h5", "H5MD"),
+    ],
+)
+def test_base_sampler_infers_mdanalysis_trajectory_format_from_lammps_dump(
+    tmp_path: Path,
+    dump_style: str,
+    suffix: str,
+    expected_format: str,
+) -> None:
+    script_path = tmp_path / "sample.in"
+    trajectory_relpath = Path("traj") / f"out.{suffix}"
+    script_path.write_text(
+        "\n".join(
+            [
+                "read_data inputs/init.data",
+                f"dump d all {dump_style} 10 {trajectory_relpath.as_posix()}",
+                "run 10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    init_path = tmp_path / "inputs" / "init.data"
+    init_path.parent.mkdir(parents=True)
+    init_path.write_text("seed data\n", encoding="utf-8")
+
+    info = parse_lammps_script(script_path)
+
+    assert info.trajectory_path == trajectory_relpath
+    assert info.trajectory_format == expected_format
+
+    sampler = BaseSampler(sim_input=script_path)
+    state = sampler.init_epoch(iteration_index=0, epoch_dir=tmp_path / "epoch", n_runs=1)
+    plan = state.replica_plans[0]
+
+    assert plan.trajectory_path == plan.run_dir / trajectory_relpath
+    assert plan.trajectory_format == expected_format
 
 
 def test_base_sampler_rejects_runtime_paths_that_escape_replica_dirs(monkeypatch, tmp_path: Path) -> None:

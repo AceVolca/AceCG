@@ -1,6 +1,6 @@
 # 03 Compute Module Developer Reference
 
-*Updated: 2026-05-24.*
+*Updated: 2026-06-15.*
 
 The compute layer is the task-scoped numerical runtime between trajectory/topology I/O and trainers.
 
@@ -29,7 +29,7 @@ It does not own:
 | `compute/energy.py` | `energy()` kernel |
 | `compute/force.py` | `force()` kernel |
 | `compute/reducers.py` | Stateful pipeline reducers: init / consume / finalize per `step_mode` |
-| `compute/registry.py` | `build_default_engine()`, which registers core observables |
+| `compute/requests.py` | Canonical request names and kernel keyword mapping |
 
 ---
 
@@ -73,7 +73,6 @@ shape `(6,)` or `(..., 6)`. There are no separate public `energy_batch()` or
 An engine instance owns:
 
 - an MPI communicator, `comm`, which may be `None`
-- a registry of observables
 - `serial_threshold`, below which frame counts are handled serially
 
 Two stable public entry points:
@@ -82,7 +81,7 @@ Two stable public entry points:
 engine = build_default_engine(comm=comm)
 
 result = engine.compute(
-    request,
+    request,              # canonical names from compute/requests.py
     frame,                # (frame_id, positions, box, forces)
     topology_arrays,
     forcefield_snapshot,
@@ -100,7 +99,8 @@ engine.run_post(spec)
 
 - accepts a localized `frame` tuple
 - builds `FrameGeometry`
-- evaluates registered observables according to `request`
+- evaluates requested energy, force, and geometry channels according to
+  canonical request names
 - returns a dict, including `frame_cache` for reducer cache requests and
   `frame_observables` when `return_observables=True`
 
