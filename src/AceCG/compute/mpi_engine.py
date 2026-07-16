@@ -1465,8 +1465,21 @@ class MPIComputeEngine:
             if not bool(noise_spec.get("enabled", True)):
                 noise_spec = None
         all_steps = [dict(step) for step in spec.get("steps", [])]
-        one_pass_steps = [step for step in all_steps if canonical_step_mode(step) != "rdf"]
-        rdf_steps = [step for step in all_steps if canonical_step_mode(step) == "rdf"]
+        # RDF historically used a rank-0 compatibility path below.  The reducer
+        # registry also provides a true one-pass MPI RDF reducer; keep the old
+        # behaviour by default and let large analyses opt into distributed
+        # frame processing without materialising/gathering a TrajectoryCache.
+        mpi_reduce_rdf = bool(shared_spec.get("mpi_reduce_rdf", False))
+        one_pass_steps = [
+            step
+            for step in all_steps
+            if canonical_step_mode(step) != "rdf" or mpi_reduce_rdf
+        ]
+        rdf_steps = [
+            step
+            for step in all_steps
+            if canonical_step_mode(step) == "rdf" and not mpi_reduce_rdf
+        ]
         perf_trace = bool(shared_spec.get("perf_trace", _env_flag("ACECG_POST_PERF_TRACE")))
         trace_all_ranks = bool(
             shared_spec.get(
