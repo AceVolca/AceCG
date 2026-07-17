@@ -1214,6 +1214,7 @@ class MPIComputeEngine:
         stack_keys = list(plan["stack"])
         dict_sum_keys = list(plan.get("dict_sum", ()))
         dict_update_keys = list(plan.get("dict_update", ()))
+        root_copy_keys = list(plan.get("root_copy", ()))
 
         if comm is not None and size > 1:
             from mpi4py import MPI
@@ -1269,6 +1270,9 @@ class MPIComputeEngine:
                     for item in gathered:
                         merged.update(dict(item))
                     reduced[key] = merged
+            if rank == 0:
+                for key in root_copy_keys:
+                    reduced[key] = local_result.get(key)
         else:
             reduced = dict(local_result)
 

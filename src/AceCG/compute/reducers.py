@@ -850,6 +850,34 @@ def reduce_plan_rdf(step: Dict[str, Any]) -> Dict[str, Tuple[str, ...]]:
             "angle_hist_by_key",
             "dihedral_hist_by_key",
         ),
+        # Static binning/configuration metadata is identical on every rank.
+        # Copy rank 0's values so finalize_distribution_state can reconstruct
+        # DistributionResult objects after the numeric partials are summed.
+        "root_copy": (
+            "pair_edges",
+            "pair_centers",
+            "pair_shell_vol",
+            "pair_meta_by_key",
+            "bond_edges",
+            "bond_centers",
+            "bond_meta_by_key",
+            "angle_edges",
+            "angle_centers",
+            "angle_meta_by_key",
+            "dihedral_edges",
+            "dihedral_centers",
+            "dihedral_meta_by_key",
+            "pair_keys",
+            "bond_keys",
+            "angle_keys",
+            "dihedral_keys",
+            "mode_by_key",
+            "default_pair_mode",
+            "default_bonded_mode",
+            "angle_degrees",
+            "dihedral_degrees",
+            "dihedral_periodic",
+        ),
     }
 
 
