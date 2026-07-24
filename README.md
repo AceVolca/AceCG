@@ -72,7 +72,7 @@ See `./documentation`. Last updated 06/15/2026 to reflect current changes.
 
 ## Known Issues
 
-To be reported. No known issues for this 06/15/2026 release yet. Please feel free to test the code and raise issues.
+- 07/24/2026, Weizhi: all-atom precomputed pickle checkpoint has a different key requirement than the actual dumped checkpoints. This was discovered during an attempt to reuse all-atom checkpoints across different REM or CDREM experiments. Fix incoming.
 
 ## Developer Team
 
