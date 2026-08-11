@@ -54,7 +54,7 @@ acg-boundary-prior
 
 ## Latest update
 
-- 08/11/2026, Weizhi: Added trajectory mapping (`acg-trajmap`), linear force-mapping (Kraemer, Durumeric et al. 2023), and dihedral B-spline potentials. Source code cleanup as well.
+- 08/11/2026, Weizhi: Added trajectory mapping (`acg-trajmap`), linear force-mapping (Kraemer, Durumeric et al. 2023), and dihedral B-spline potentials. Source code cleanup as well, especially for `vpgrower`.
 - 07/17/2026, Ace: Fixed known RDF calculation issues.
 - 06/15/2026, Weizhi: Fixed some known issues in sampling workflow and trajectory handling.
 - 06/02/2026, Weizhi: Source code cleanup, ready for pypi release
