@@ -5,6 +5,7 @@
 AceCG is a versatile and MPI-enabled coarse-graining force-field training engine.
 
 Currently, we support:
+- Trajectory Mapping (`trajmap`)
 - Force-Matching (FM)
 - Denoising Score Matching (DSM)
 - Relative Entropy Minimization (REM)
@@ -53,14 +54,9 @@ acg-boundary-prior
 
 ## Latest update
 
-- 08/11/2026, Weizhi: Added trajectory mapping (`acg-trajmap`) for AA-to-CG structure and force generation, linear force-mapping (Kraemer, Durumeric et al. 2023), and dihedral B-spline potentials, all covered by a new real-frame test suite.
-- 06/15/2026, Weizhi: Fixed some known issues in sampling workflow and trajectory handling:
-  - Added `sampling.trajectory_format` for REM/CDREM/CDFM sampled trajectory post-processing.
-  - Added automatic format inference for common LAMMPS `dump xtc`, `dump dcd`, and `dump h5md` scripts.
-  - Added `sampling.archive_trajectory` for REM runs that need to retain sampled CG trajectories.
-  - Made `sampling.init_config_pool` mutually exclusive with replay modes `latest` and `random`.
-  - Rejected coordinate-only FM reference formats such as XTC and DCD when reference forces are required.
-  - Updated OpenMPI and MPICH scheduler launch realization to prefer Slurm `srun --mpi=pmi2` whenever `SLURM_JOB_ID` is present.
+- 08/11/2026, Weizhi: Added trajectory mapping (`acg-trajmap`), linear force-mapping (Kraemer, Durumeric et al. 2023), and dihedral B-spline potentials. Source code cleanup as well.
+- 07/17/2026, Ace: Fixed known RDF calculation issues.
+- 06/15/2026, Weizhi: Fixed some known issues in sampling workflow and trajectory handling.
 - 06/02/2026, Weizhi: Source code cleanup, ready for pypi release
 - 06/01/2026, Ace: bound & mask apply_spec() moved to forcefield class; WriteLmpFF supports multiple potentials of the same style for pairs
 - 05/24/2026, Weizhi: Merged several new functionalities, including on-the-fly validation simulations (Weizhi), L0 gate utilities (Ace), mask & bound utilities (Ace & Weizhi), coordinate masks for REM diagnostics (Zhikun), etc.
