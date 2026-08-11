@@ -33,9 +33,17 @@ class HarmonicTableFitter(BaseTableFitter):
         """Return this fitter's registry profile name."""
         return "harmonic"
 
-    def fit(self, table_path: str, typ1: str, typ2: str) -> HarmonicPotential:
+    def fit(
+        self,
+        table_path: str,
+        typ1: str,
+        typ2: str,
+        *,
+        table_name: str | None = None,
+        **_kwargs,
+    ) -> HarmonicPotential:
         """Fit a harmonic potential from a bond/angle table file."""
-        r, V, F = parse_lammps_table(table_path)
+        r, V, F = parse_lammps_table(table_path, table_name=table_name)
         r = np.asarray(r, dtype=float).ravel()
         if F is not None:
             F = np.asarray(F, dtype=float).ravel()

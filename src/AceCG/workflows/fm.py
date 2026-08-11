@@ -20,6 +20,7 @@ from ..io.logger import get_screen_logger
 from ..io.forcefield import ReadLmpFF, resolve_source_table_entries
 from ..io.tables import export_tables
 from ..potentials.bspline import BSplinePotential
+from ..potentials.dihedral_bspline import DihedralBSplinePotential
 from ..schedulers.task_runner import run_post
 from ..topology.forcefield import Forcefield
 from ..topology.types import InteractionKey
@@ -103,8 +104,12 @@ class FMWorkflow(BaseWorkflow):
                 rd.setdefault("n_coeffs", spec.model_size)
                 rd["min"] = spec.domain[0]
                 rd["max"] = spec.domain[1]
-                rd["table_min"] = spec.domain[0]
-                rd["table_max"] = spec.domain[1]
+                if spec.style == "dihedral":
+                    rd["table_min"] = -180.0
+                    rd["table_max"] = 180.0
+                else:
+                    rd["table_min"] = spec.domain[0]
+                    rd["table_max"] = spec.domain[1]
                 rd["resolution"] = spec.resolution
                 rd["table_resolution"] = spec.resolution
                 if spec.model == "bspline" and "degree" not in rd and spec.model_overrides:
@@ -124,6 +129,7 @@ class FMWorkflow(BaseWorkflow):
                 source_entries = resolve_source_table_entries(
                     str(ff_path),
                     pair_style=pair_style,
+                    topology_arrays=self.topology,
                 )
 
             source_key = spec.ikey
@@ -136,16 +142,36 @@ class FMWorkflow(BaseWorkflow):
             entry = source_entries[source_key]
             table_path = entry["table_path"]
             spec_min, spec_max, resolution = validate_fm_spec_domain(
-                spec.domain, source_table_path=table_path
+                spec.domain,
+                source_table_path=table_path,
+                table_name=entry["table_name"],
+                style=spec.style,
+                boundary_mode=spec.model_overrides.get("boundary_mode"),
             )
-            potential = _fit_potential(spec, source_table_path=table_path)
+            potential = _fit_potential(
+                spec,
+                source_table_path=table_path,
+                table_name=entry["table_name"],
+            )
             ff_data[canonical_key] = [potential]
             rd["source_table_path"] = table_path
             rd["table_name"] = entry["table_name"]
             rd["min"] = spec_min
             rd["max"] = spec_max
-            rd["table_min"] = spec_min
-            rd["table_max"] = spec_max
+            if spec.style == "dihedral":
+                from ..io.tables import parse_lammps_table
+
+                source_grid, _, _ = parse_lammps_table(
+                    table_path,
+                    table_name=entry["table_name"],
+                    table_style="dihedral",
+                )
+                rd["table_grid"] = np.asarray(source_grid, dtype=float).tolist()
+                rd["table_min"] = float(source_grid[0])
+                rd["table_max"] = float(source_grid[-1])
+            else:
+                rd["table_min"] = spec_min
+                rd["table_max"] = spec_max
             rd["resolution"] = resolution
             rd["table_resolution"] = resolution
             runtime_specs.append(rd)
@@ -387,14 +413,23 @@ def _build_authored_potential(spec: FMInteractionSpec) -> Any:
     return _build_zero_potential(spec)
 
 
-def _build_zero_potential(spec: FMInteractionSpec) -> BSplinePotential:
+def _build_zero_potential(spec: FMInteractionSpec) -> Any:
     if spec.model != "bspline":
         raise ValueError(
             f"Source-table-free FM specs only support bspline, got {spec.model!r}."
         )
-    n_coeffs = spec.model_size
     degree = int(spec.model_overrides.get("degree", 3))
     minimum, maximum = spec.domain
+    if spec.style == "dihedral":
+        return DihedralBSplinePotential.zeros(
+            spec.types,
+            minimum=minimum,
+            maximum=maximum,
+            n_coeffs=spec.model_size,
+            degree=degree,
+            boundary_mode=str(spec.model_overrides["boundary_mode"]),
+        )
+    n_coeffs = spec.model_size
     knots = BSplinePotential.clamped_uniform_knots(
         minimum, maximum, n_coeffs, degree
     )
@@ -414,6 +449,7 @@ def _fit_potential(
     spec: FMInteractionSpec,
     *,
     source_table_path: str,
+    table_name: str | None = None,
 ) -> Any:
     model_overrides = dict(spec.model_overrides)
     if spec.style == "pair" and spec.model == "bspline" and spec.max_force is not None:
@@ -421,6 +457,29 @@ def _fit_potential(
 
     if spec.model == "bspline":
         _assert_no_size_override(model_overrides, "n_coeffs", spec.model_size)
+        if spec.style == "dihedral":
+            degree = int(model_overrides.pop("degree", 3))
+            boundary_mode = str(model_overrides.pop("boundary_mode"))
+            if model_overrides:
+                raise ValueError(
+                    "Unsupported dihedral B-spline overrides: "
+                    f"{sorted(model_overrides)}"
+                )
+            fitter = TABLE_FITTERS.create(
+                "dihedral_bspline",
+                n_coeffs=spec.model_size,
+                degree=degree,
+                boundary_mode=boundary_mode,
+                minimum=spec.domain[0],
+                maximum=spec.domain[1],
+            )
+            return fitter.fit(
+                str(source_table_path),
+                typ1=spec.types[0],
+                typ2=spec.types[-1],
+                types=spec.types,
+                table_name=table_name,
+            )
         model_overrides["bonded"] = (spec.style != "pair")
         fitter = TABLE_FITTERS.create(
             "bspline", n_coeffs=spec.model_size, **model_overrides
@@ -433,7 +492,10 @@ def _fit_potential(
     else:
         raise ValueError(f"Unsupported FM model {spec.model!r}.")
     return fitter.fit(
-        str(source_table_path), typ1=spec.types[0], typ2=spec.types[-1]
+        str(source_table_path),
+        typ1=spec.types[0],
+        typ2=spec.types[-1],
+        table_name=table_name,
     )
 
 

@@ -10,6 +10,7 @@ import pytest
 from AceCG.potentials.harmonic import HarmonicPotential
 from AceCG.compute.mpi_engine import _selected_frame_ids_from_spec
 from AceCG.compute.mpi_engine import MPIComputeEngine, build_default_engine
+from AceCG.io.trajectory import FrameRecord
 from AceCG.topology.forcefield import Forcefield
 from AceCG.topology.topology_array import collect_topology_arrays
 from AceCG.topology.types import InteractionKey
@@ -106,6 +107,181 @@ def test_selected_frame_ids_prefers_subsample_seed():
     assert _selected_frame_ids_from_spec(base_spec, total_frames=100) != (
         _selected_frame_ids_from_spec(with_subsample_seed, total_frames=100)
     )
+
+
+@pytest.mark.parametrize(
+    ("selection_spec", "expected_ids", "inline_weights", "expected_weights"),
+    [
+        ({"frame_start": 1, "frame_end": 5}, [1, 2, 3, 4], [1, 2, 3, 4], [1, 2, 3, 4]),
+        ({"frame_start": 0, "frame_end": 6, "every": 2}, [0, 2, 4], [1, 2, 3], [1, 2, 3]),
+        ({"frame_ids": [4, 1, 3]}, [4, 1, 3], [1, 2, 3], [1, 2, 3]),
+        ({"frame_ids": [2, 2, 5]}, [2, 2, 5], [1, 2, 3], [2, 2, 3]),
+    ],
+)
+def test_run_post_reader_wires_selection_and_global_weights(
+    monkeypatch,
+    tmp_path,
+    selection_spec,
+    expected_ids,
+    inline_weights,
+    expected_weights,
+):
+    ff_path = tmp_path / "ff.pkl"
+    with ff_path.open("wb") as handle:
+        pickle.dump(_test_forcefield(), handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    class DummyTrajectory:
+        def __len__(self):
+            return 6
+
+        def __getitem__(self, frame_id):
+            assert 0 <= int(frame_id) < 6
+            return SimpleNamespace(has_forces=False, has_velocities=False)
+
+    class DummyUniverse:
+        def __init__(self):
+            self.trajectory = DummyTrajectory()
+
+        def select_atoms(self, sel):
+            assert sel == "all"
+            return SimpleNamespace(indices=np.array([0, 1], dtype=np.int64))
+
+    iterated_ids = []
+
+    def fake_iter_frames(universe, *, frame_ids, include_forces):
+        del universe
+        assert include_forces is False
+        iterated_ids.extend(int(frame_id) for frame_id in frame_ids)
+        return iter(
+            FrameRecord(
+                frame_id=int(frame_id),
+                positions=np.zeros((2, 3), dtype=np.float64),
+                box=np.zeros(6, dtype=np.float64),
+                forces=None,
+            )
+            for frame_id in frame_ids
+        )
+
+    monkeypatch.setattr(mda, "Universe", lambda *args, **kwargs: DummyUniverse())
+    monkeypatch.setattr(
+        "AceCG.topology.topology_array.collect_topology_arrays",
+        lambda *args, **kwargs: SimpleNamespace(
+            real_site_indices=np.array([0, 1], dtype=np.int64)
+        ),
+    )
+    monkeypatch.setattr("AceCG.io.trajectory.iter_frames", fake_iter_frames)
+
+    engine = build_default_engine()
+    consumed = []
+
+    def fake_compute(*, frame, frame_weight, frame_idx, **kwargs):
+        del frame, kwargs
+        consumed.append((int(frame_idx), float(frame_weight)))
+        return {
+            "frame_idx": int(frame_idx),
+            "gauge_free_energy_grad": np.array([frame_idx, frame_idx], dtype=np.float64),
+        }
+
+    monkeypatch.setattr(engine, "compute", fake_compute)
+    spec = {
+        "work_dir": str(tmp_path),
+        "forcefield_path": str(ff_path),
+        "topology": "top.data",
+        "trajectory": "traj.lammpstrj",
+        "frame_weight": inline_weights,
+        "steps": [{"step_mode": "rem", "output_file": "rem.pkl"}],
+        **selection_spec,
+    }
+    engine.run_post(spec)
+
+    assert iterated_ids == expected_ids
+    assert [frame_id for frame_id, _ in consumed] == expected_ids
+    np.testing.assert_allclose([weight for _, weight in consumed], expected_weights)
+
+
+def test_run_post_reader_wires_noise_subsample(monkeypatch, tmp_path):
+    selection_spec = {
+        "frame_start": 0,
+        "frame_end": 6,
+        "every": 2,
+        "noise": {"subsample_per_epoch": 2, "subsample_seed": 17},
+    }
+    expected_ids = _selected_frame_ids_from_spec(selection_spec, total_frames=6)
+    test_run_post_reader_wires_selection_and_global_weights(
+        monkeypatch,
+        tmp_path,
+        selection_spec,
+        expected_ids,
+        [1.0, 2.0],
+        [1.0, 2.0],
+    )
+
+
+def test_run_post_peer_raises_root_inspection_error_before_reader_scan(
+    monkeypatch, tmp_path
+):
+    ff_path = tmp_path / "ff.pkl"
+    with ff_path.open("wb") as handle:
+        pickle.dump(_test_forcefield(), handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    root_error = RuntimeError("root topology inspection failed")
+
+    class PeerComm:
+        def __init__(self):
+            self.bcast_calls = 0
+
+        def Get_rank(self):
+            return 1
+
+        def Get_size(self):
+            return 2
+
+        def bcast(self, value, root):
+            assert value is None
+            assert root == 0
+            self.bcast_calls += 1
+            return None, root_error
+
+    comm = PeerComm()
+    monkeypatch.setattr(
+        "AceCG.compute.mpi_engine.MPITrajReader.scan",
+        lambda *args, **kwargs: pytest.fail("reader.scan() must not run after root failure"),
+    )
+    spec = {
+        "work_dir": str(tmp_path),
+        "forcefield_path": str(ff_path),
+        "topology": "top.data",
+        "trajectory": "traj.lammpstrj",
+        "steps": [{"step_mode": "rem", "output_file": "rem.pkl"}],
+    }
+
+    with pytest.raises(RuntimeError, match="root topology inspection failed") as raised:
+        build_default_engine(comm=comm).run_post(spec)
+    assert raised.value is root_error
+    assert comm.bcast_calls == 1
+
+
+def test_run_post_exposes_reader_open_error(monkeypatch, tmp_path):
+    ff_path = tmp_path / "ff.pkl"
+    with ff_path.open("wb") as handle:
+        pickle.dump(_test_forcefield(), handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    open_error = OSError("trajectory open failed")
+    monkeypatch.setattr(
+        "AceCG.compute.mpi_engine.MPITrajReader.open_full",
+        lambda self: (_ for _ in ()).throw(open_error),
+    )
+    spec = {
+        "work_dir": str(tmp_path),
+        "forcefield_path": str(ff_path),
+        "topology": "top.data",
+        "trajectory": "traj.lammpstrj",
+        "steps": [{"step_mode": "rem", "output_file": "rem.pkl"}],
+    }
+
+    with pytest.raises(OSError, match="trajectory open failed") as raised:
+        build_default_engine().run_post(spec)
+    assert raised.value is open_error
 
 
 def test_add_noise_dsm_target_builds_synthetic_reference_force():
@@ -234,6 +410,10 @@ def test_run_post_rem_forwards_topology_context_and_writes_pickle(monkeypatch, t
         def __len__(self):
             return 2
 
+        def __getitem__(self, frame_id):
+            assert 0 <= int(frame_id) < 2
+            return SimpleNamespace(has_forces=False, has_velocities=False)
+
     class DummyUniverse:
         def __init__(self):
             self.trajectory = DummyTrajectory()
@@ -251,14 +431,16 @@ def test_run_post_rem_forwards_topology_context_and_writes_pickle(monkeypatch, t
         captured["vp_names"] = vp_names
         return SimpleNamespace(real_site_indices=np.array([0, 1], dtype=np.int64))
 
-    def fake_iter_frames(universe, *, start, end, every=1, include_forces):
+    def fake_iter_frames(universe, *, frame_ids, include_forces):
+        del universe
         captured["include_forces"] = include_forces
-        yield (
-            0,
-            np.zeros((2, 3), dtype=np.float64),
-            np.zeros(6, dtype=np.float64),
-            None,
-        )
+        for frame_id in frame_ids:
+            yield FrameRecord(
+                frame_id=int(frame_id),
+                positions=np.zeros((2, 3), dtype=np.float64),
+                box=np.zeros(6, dtype=np.float64),
+                forces=None,
+            )
 
     def fake_compute_frame_geometry(*args, **kwargs):
         return SimpleNamespace(
@@ -332,6 +514,10 @@ def test_run_post_rem_reads_frame_weight_file(monkeypatch, tmp_path):
         def __len__(self):
             return 2
 
+        def __getitem__(self, frame_id):
+            assert 0 <= int(frame_id) < 2
+            return SimpleNamespace(has_forces=False, has_velocities=False)
+
     class DummyUniverse:
         def __init__(self):
             self.trajectory = DummyTrajectory()
@@ -345,14 +531,14 @@ def test_run_post_rem_reads_frame_weight_file(monkeypatch, tmp_path):
         lambda *args, **kwargs: SimpleNamespace(real_site_indices=np.array([0, 1], dtype=np.int64)),
     )
 
-    def fake_iter_frames(universe, *, start, end, every=1, include_forces):
+    def fake_iter_frames(universe, *, frame_ids, include_forces):
         del universe, include_forces
-        for frame_id in range(start, end, every):
-            yield (
-                frame_id,
-                np.full((2, 3), float(frame_id), dtype=np.float64),
-                np.zeros(6, dtype=np.float64),
-                None,
+        for frame_id in frame_ids:
+            yield FrameRecord(
+                frame_id=int(frame_id),
+                positions=np.full((2, 3), float(frame_id), dtype=np.float64),
+                box=np.zeros(6, dtype=np.float64),
+                forces=None,
             )
 
     def fake_compute_frame_geometry(positions, *args, **kwargs):
@@ -406,6 +592,10 @@ def test_multi_run_post_reads_trajectory_once(monkeypatch, tmp_path):
         def __len__(self):
             return 4
 
+        def __getitem__(self, frame_id):
+            assert 0 <= int(frame_id) < 4
+            return SimpleNamespace(has_forces=True, has_velocities=False)
+
     class DummyUniverse:
         def __init__(self):
             self.trajectory = DummyTrajectory()
@@ -419,14 +609,15 @@ def test_multi_run_post_reads_trajectory_once(monkeypatch, tmp_path):
         lambda *args, **kwargs: SimpleNamespace(real_site_indices=np.array([0, 1], dtype=np.int64)),
     )
 
-    def fake_iter_frames(universe, *, start, end, every=1, include_forces):
+    def fake_iter_frames(universe, *, frame_ids, include_forces):
+        del universe, include_forces
         calls["iter_frames"] += 1
-        for frame_id in range(start, end, every):
-            yield (
-                frame_id,
-                np.zeros((2, 3), dtype=np.float64),
-                np.zeros(6, dtype=np.float64),
-                np.zeros(6, dtype=np.float64),
+        for frame_id in frame_ids:
+            yield FrameRecord(
+                frame_id=int(frame_id),
+                positions=np.zeros((2, 3), dtype=np.float64),
+                box=np.zeros(6, dtype=np.float64),
+                forces=np.zeros((2, 3), dtype=np.float64),
             )
 
     def fake_compute_frame_geometry(*args, **kwargs):
@@ -506,6 +697,10 @@ def test_run_post_rejects_negative_frame_weight(monkeypatch, tmp_path):
     class DummyTrajectory:
         def __len__(self):
             return 2
+
+        def __getitem__(self, frame_id):
+            assert 0 <= int(frame_id) < 2
+            return SimpleNamespace(has_forces=False, has_velocities=False)
 
     class DummyUniverse:
         def __init__(self):

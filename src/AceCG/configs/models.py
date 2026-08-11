@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple, Union
 
 from .vp_config import VPConfig
 
@@ -65,14 +65,20 @@ class FMInteractionSpec:
 
 @dataclass(frozen=True)
 class FMTrainingSpecs:
-    """Grouped force-matching specs for pair, bond, and angle interactions."""
+    """Grouped force-matching specs for pair and bonded interactions."""
     pair_specs: Tuple[FMInteractionSpec, ...] = ()
     bond_specs: Tuple[FMInteractionSpec, ...] = ()
     angle_specs: Tuple[FMInteractionSpec, ...] = ()
+    dihedral_specs: Tuple[FMInteractionSpec, ...] = ()
 
     def flattened(self) -> Tuple[FMInteractionSpec, ...]:
-        """Return all FM specs in pair, bond, then angle order."""
-        return self.pair_specs + self.bond_specs + self.angle_specs
+        """Return all FM specs in pair, bond, angle, then dihedral order."""
+        return (
+            self.pair_specs
+            + self.bond_specs
+            + self.angle_specs
+            + self.dihedral_specs
+        )
 
     def to_runtime_dict(self) -> Dict[str, Any]:
         """Convert grouped specs to workflow runtime dictionaries."""
@@ -80,6 +86,7 @@ class FMTrainingSpecs:
             "pair_specs": [s.to_runtime_dict() for s in self.pair_specs],
             "bond_specs": [s.to_runtime_dict() for s in self.bond_specs],
             "angle_specs": [s.to_runtime_dict() for s in self.angle_specs],
+            "dihedral_specs": [s.to_runtime_dict() for s in self.dihedral_specs],
         }
 
 
@@ -159,7 +166,8 @@ class SamplingConfig:
     input: Optional[str] = None
     engine_command: Optional[str] = None
     trajectory_format: Optional[str] = None
-    init_config_pool: Optional[str] = None
+    init_config_pool: Optional[Union[str, Tuple[str, ...]]] = None
+    init_config_pool_rounds: Optional[Tuple[int, ...]] = None
     replay_mode: str = "off"
     ncores: Optional[int] = None
     archive_trajectory: bool = False
@@ -253,7 +261,7 @@ class AARefNoiseConfig:
 class AARefConfig:
     """All-atom reference trajectory configuration."""
     trajectory_files: Tuple[str, ...] = ()
-    trajectory_format: str = "LAMMPSDUMP"
+    trajectory_format: Optional[str] = None
     skip_frames: int = 0
     every: int = 1
     n_frames: int = 0

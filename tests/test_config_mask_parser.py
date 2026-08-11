@@ -1,7 +1,8 @@
 import pytest
 
-from AceCG.configs import parse_acg_file
+from AceCG.configs import ACGConfig, ACGConfigError, parse_acg_file
 from AceCG.topology.types import InteractionKey
+import AceCG.workflows.base as workflow_base
 
 
 def _write_cdrem_config(cfg_path, *, conditioning_pattern):
@@ -73,7 +74,13 @@ def _write_dsm_config(cfg_path, *, extra_training=(), extra_aa_ref=()):
     cfg_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _write_fm_noise_config(cfg_path, *, extra_training=(), extra_aa_ref=()):
+def _write_fm_noise_config(
+    cfg_path,
+    *,
+    extra_training=(),
+    extra_aa_ref=(),
+    trajectory_file="aa/reference.lammpstrj",
+):
     lines = [
         "[system]",
         "topology_file = system/topology.data",
@@ -91,7 +98,7 @@ def _write_fm_noise_config(cfg_path, *, extra_training=(), extra_aa_ref=()):
         'pair_specs = [{"types": ["1", "1"], "n_coeffs": 8, "domain": [1.0, 5.0], "degree": 3, "max_force": 100.0}]',
         "",
         "[aa_ref]",
-        "trajectory_files = ['aa/reference.lammpstrj']",
+        f"trajectory_files = ['{trajectory_file}']",
         "noise_enabled = true",
         "noise_samples_per_frame = 2",
         "noise_sigma = 0.10",
@@ -307,6 +314,81 @@ def test_parse_acg_file_rejects_sampling_init_pool_with_replay_mode(tmp_path):
     )
 
     with pytest.raises(ValueError, match="mutually exclusive"):
+        parse_acg_file(cfg_path)
+
+
+def test_parse_acg_file_accepts_sampling_init_pool_list_and_rounds(tmp_path):
+    forcefield_dir = tmp_path / "forcefield"
+    forcefield_dir.mkdir()
+    (forcefield_dir / "real.settings").write_text("", encoding="utf-8")
+    cfg_path = tmp_path / "test.acg"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "[system]",
+                "topology_file = system/topology.data",
+                "forcefield_path = forcefield/real.settings",
+                "pair_style = table",
+                "",
+                "[training]",
+                "method = rem",
+                "temperature = 300.0",
+                "output_dir = results/rem",
+                "",
+                "[sampling]",
+                "input = scripts/in.rem.lmp",
+                "engine_command = lmp",
+                'init_config_pool = ["rand/*.data", "ref/*.data"]',
+                "init_config_pool_rounds = [4, 1]",
+                "replay_mode = off",
+                "",
+                "[aa_ref]",
+                "trajectory_files = ['aa/cg_traj.lammpstrj']",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    cfg = parse_acg_file(cfg_path)
+
+    assert cfg.sampling.init_config_pool == ("rand/*.data", "ref/*.data")
+    assert cfg.sampling.init_config_pool_rounds == (4, 1)
+
+
+def test_parse_acg_file_rejects_sampling_pool_round_count_mismatch(tmp_path):
+    forcefield_dir = tmp_path / "forcefield"
+    forcefield_dir.mkdir()
+    (forcefield_dir / "real.settings").write_text("", encoding="utf-8")
+    cfg_path = tmp_path / "test.acg"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                "[system]",
+                "topology_file = system/topology.data",
+                "forcefield_path = forcefield/real.settings",
+                "pair_style = table",
+                "",
+                "[training]",
+                "method = rem",
+                "temperature = 300.0",
+                "output_dir = results/rem",
+                "",
+                "[sampling]",
+                "input = scripts/in.rem.lmp",
+                "engine_command = lmp",
+                'init_config_pool = ["rand/*.data", "ref/*.data"]',
+                "init_config_pool_rounds = [4]",
+                "",
+                "[aa_ref]",
+                "trajectory_files = ['aa/cg_traj.lammpstrj']",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="init_config_pool_rounds length"):
         parse_acg_file(cfg_path)
 
 
@@ -532,6 +614,30 @@ def test_parse_acg_file_accepts_mdanalysis_formats_for_rem(tmp_path):
 
     assert cfg.sampling.trajectory_format == "DCD"
     assert cfg.aa_ref.trajectory_format == "DCD"
+
+
+@pytest.mark.parametrize(
+    ("trajectory_file", "format_line", "expected"),
+    [
+        ("aa/reference.trr", None, "TRR"),
+        ("aa/reference.lammpstrj", None, "LAMMPSDUMP"),
+        ("aa/reference.trr", "trajectory_format = lammps_dump", "LAMMPSDUMP"),
+    ],
+)
+def test_parse_acg_file_canonicalizes_aa_reference_format(
+    tmp_path, trajectory_file, format_line, expected
+):
+    cfg_path = tmp_path / "fm_format.acg"
+    extra_aa_ref = () if format_line is None else (format_line,)
+    _write_fm_noise_config(
+        cfg_path,
+        trajectory_file=trajectory_file,
+        extra_aa_ref=extra_aa_ref,
+    )
+
+    cfg = parse_acg_file(cfg_path)
+
+    assert cfg.aa_ref.trajectory_format == expected
 
 
 def test_parse_acg_file_rejects_fm_xtc_reference(tmp_path):
@@ -1115,3 +1221,472 @@ def test_parse_dsm_accepts_fixed_priors_and_authored_gauss_cut(tmp_path):
     assert cfg.aa_ref.noise.samples_per_frame == 32
     assert cfg.aa_ref.noise.batch_size == 32
     assert cfg.aa_ref.noise.neighbor_mode == "chunk"
+
+
+def test_parse_acg_file_override_matches_equivalent_config_text(tmp_path):
+    overridden_path = tmp_path / "overridden.acg"
+    equivalent_path = tmp_path / "equivalent.acg"
+    _write_dsm_config(overridden_path)
+    _write_dsm_config(equivalent_path)
+    equivalent_path.write_text(
+        equivalent_path.read_text(encoding="utf-8").replace(
+            "n_epochs = 4", "n_epochs = 9"
+        ),
+        encoding="utf-8",
+    )
+
+    overridden = parse_acg_file(
+        overridden_path,
+        overrides={"training__n_epochs": 9},
+    )
+    equivalent = parse_acg_file(equivalent_path)
+
+    assert overridden.path == overridden_path.resolve()
+    assert overridden.training == equivalent.training
+    assert overridden.system == equivalent.system
+    assert overridden.aa_ref == equivalent.aa_ref
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"training__n_epochs": 0}, "training.n_epochs must be positive"),
+        (
+            {"sampling__replay_mode": "invalid"},
+            "sampling.replay_mode must be one of",
+        ),
+        (
+            {"training__fm_method": "solver"},
+            "DSM is iterative and does not support",
+        ),
+        (
+            {"aa_ref__noise_enabled": False},
+            "DSM requires aa_ref.noise_enabled=true",
+        ),
+        (
+            {"conditioning__input": "scripts/in.zbx.lmp"},
+            "section is not used by method='dsm'",
+        ),
+    ],
+)
+def test_parse_acg_file_overrides_rerun_canonical_validation(
+    tmp_path,
+    overrides,
+    message,
+):
+    cfg_path = tmp_path / "dsm.acg"
+    _write_dsm_config(cfg_path)
+
+    with pytest.raises(ACGConfigError, match=message):
+        parse_acg_file(cfg_path, overrides=overrides)
+
+
+def test_parse_acg_file_override_preserves_config_relative_path_base(tmp_path):
+    cfg_path = tmp_path / "config" / "dsm.acg"
+    cfg_path.parent.mkdir()
+    _write_dsm_config(cfg_path)
+
+    config = parse_acg_file(
+        cfg_path,
+        overrides={"system__topology_file": "alternate/topology.data"},
+    )
+
+    assert config.path == cfg_path.resolve()
+    assert config.system.topology_file == "alternate/topology.data"
+    assert (config.path.parent / config.system.topology_file) == (
+        cfg_path.parent / "alternate/topology.data"
+    )
+
+
+def test_parse_acg_file_forcefield_overrides_precede_mask_construction(tmp_path):
+    cfg_path = tmp_path / "dsm.acg"
+    _write_dsm_config(cfg_path)
+    forcefield_dir = tmp_path / "forcefield"
+    forcefield_dir.mkdir()
+    (forcefield_dir / "real.settings").write_text(
+        "pair_coeff A B table mask 0:2\n",
+        encoding="utf-8",
+    )
+
+    config = parse_acg_file(
+        cfg_path,
+        overrides={
+            "system__forcefield_path": "forcefield/real.settings",
+            "system__pair_style": "table",
+        },
+    )
+
+    assert config.system.forcefield_mask is not None
+    assert config.system.forcefield_mask.entries == (
+        (InteractionKey.pair("A", "B"), "table", ("mask", "0:2")),
+    )
+
+
+@pytest.mark.parametrize(
+    "flat_key",
+    ["training", "__n_epochs", "training__", "training__n_epochs__extra"],
+)
+def test_parse_acg_file_rejects_malformed_override_keys(tmp_path, flat_key):
+    cfg_path = tmp_path / "dsm.acg"
+    _write_dsm_config(cfg_path)
+
+    with pytest.raises(ACGConfigError, match="section__field"):
+        parse_acg_file(cfg_path, overrides={flat_key: 3})
+
+
+def test_parse_acg_file_rejects_unknown_override_section(tmp_path):
+    cfg_path = tmp_path / "dsm.acg"
+    _write_dsm_config(cfg_path)
+
+    with pytest.raises(ACGConfigError, match="Unknown config section"):
+        parse_acg_file(cfg_path, overrides={"unknown__field": 3})
+
+
+def test_parse_acg_file_preserves_unknown_known_section_override(tmp_path):
+    cfg_path = tmp_path / "dsm.acg"
+    _write_dsm_config(cfg_path)
+
+    with pytest.warns(UserWarning, match="future_option"):
+        config = parse_acg_file(
+            cfg_path,
+            overrides={"training__future_option": "kept"},
+        )
+
+    assert config.training.extras["future_option"] == "kept"
+
+
+def test_core_cli_validates_overrides_once_and_keeps_last_value(
+    tmp_path,
+    monkeypatch,
+):
+    cfg_path = tmp_path / "dsm.acg"
+    _write_dsm_config(cfg_path)
+    captured = []
+
+    class Workflow:
+        def __init__(self, config):
+            captured.append(config)
+            self.output_dir = tmp_path / "output"
+            self.output_dir.mkdir()
+
+        def run(self):
+            return {"n_epochs": self.output_dir.name}
+
+    def reject_post_validation_override(*_args, **_kwargs):
+        raise AssertionError("core CLI used post-validation replacement")
+
+    monkeypatch.setattr(
+        workflow_base,
+        "_apply_config_overrides",
+        reject_post_validation_override,
+    )
+    result = workflow_base._run_workflow_cli(
+        Workflow,
+        prog="acg-test",
+        description="test",
+        argv=[
+            str(cfg_path),
+            "--training.n_epochs",
+            "6",
+            "--training.n_epochs=8",
+        ],
+    )
+
+    assert result == 0
+    assert captured[0].training.n_epochs == 8
+    assert (tmp_path / "output" / "acgreturn.pkl").exists()
+
+
+def test_core_cli_rejects_invalid_and_configless_overrides_before_workflow(
+    tmp_path,
+):
+    cfg_path = tmp_path / "dsm.acg"
+    _write_dsm_config(cfg_path)
+    captured = []
+
+    class Workflow:
+        def __init__(self, config):
+            captured.append(config)
+            self.output_dir = tmp_path / "output"
+            self.output_dir.mkdir(exist_ok=True)
+
+        def run(self):
+            return {}
+
+    with pytest.raises(ACGConfigError, match="n_epochs must be positive"):
+        workflow_base._run_workflow_cli(
+            Workflow,
+            prog="acg-test",
+            description="test",
+            argv=[str(cfg_path), "--training.n_epochs=0"],
+        )
+    with pytest.raises(ValueError, match="require a config path"):
+        workflow_base._run_workflow_cli(
+            Workflow,
+            prog="acg-test",
+            description="test",
+            argv=["--training.n_epochs=2"],
+        )
+    assert captured == []
+
+    assert workflow_base._run_workflow_cli(
+        Workflow,
+        prog="acg-test",
+        description="test",
+        argv=[],
+    ) == 0
+    assert isinstance(captured[0], ACGConfig)
+
+
+def test_base_workflow_trusted_programmatic_overrides_remain(tmp_path):
+    cfg_path = tmp_path / "dsm.acg"
+    _write_dsm_config(cfg_path)
+
+    class Workflow(workflow_base.BaseWorkflow):
+        def _build_output_dir(self):
+            return tmp_path
+
+        def _build_topology(self):
+            return None
+
+        def _build_trainer(self):
+            return None
+
+        def run(self):
+            return None
+
+    workflow = Workflow(
+        parse_acg_file(cfg_path),
+        **{"training__n_epochs": 12},
+    )
+
+    assert workflow.config.training.n_epochs == 12
+
+
+@pytest.mark.parametrize(
+    ("token", "expected"),
+    [
+        ("true", True),
+        ("yes", True),
+        ("on", True),
+        ("1", True),
+        ("false", False),
+        ("no", False),
+        ("off", False),
+        ("0", False),
+    ],
+)
+def test_parse_acg_file_uses_canonical_boolean_tokens(tmp_path, token, expected):
+    cfg_path = tmp_path / f"bool_{token}.acg"
+    _write_dsm_config(
+        cfg_path,
+        extra_training=(f"need_hessian = {token}",),
+    )
+
+    config = parse_acg_file(cfg_path)
+
+    assert config.training.need_hessian is expected
+
+
+def test_parse_acg_file_keeps_ref_has_vp_no(tmp_path):
+    cfg_path = tmp_path / "ref_has_vp_no.acg"
+    _write_dsm_config(
+        cfg_path,
+        extra_aa_ref=("ref_has_vp = no",),
+    )
+
+    config = parse_acg_file(cfg_path)
+
+    assert config.aa_ref.ref_has_vp is False
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["maybe", "2", "-1", "1.0", "none", "[1]", '{"bad": 1}'],
+)
+def test_parse_acg_file_rejects_invalid_boolean_values(tmp_path, value):
+    cfg_path = tmp_path / "invalid_bool.acg"
+    _write_dsm_config(
+        cfg_path,
+        extra_training=(f"need_hessian = {value}",),
+    )
+
+    with pytest.raises(ACGConfigError, match="need_hessian"):
+        parse_acg_file(cfg_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("n_epochs", "1.5"),
+        ("seed", "true"),
+        ("seed", '"4"'),
+        ("start_epoch", "four"),
+    ],
+)
+def test_parse_acg_file_rejects_non_exact_integer_fields(
+    tmp_path,
+    field,
+    value,
+):
+    cfg_path = tmp_path / "invalid_int.acg"
+    _write_dsm_config(
+        cfg_path,
+        extra_training=(f"{field} = {value}",),
+    )
+
+    with pytest.raises(ACGConfigError, match=field):
+        parse_acg_file(cfg_path)
+
+
+@pytest.mark.parametrize(
+    "rounds",
+    ["[4, 1.0]", "[4, True]", '[4, "1"]'],
+)
+def test_parse_acg_file_rejects_non_exact_integer_sequence_items(
+    tmp_path,
+    rounds,
+):
+    cfg_path = tmp_path / "invalid_rounds.acg"
+    _write_dsm_config(cfg_path)
+    with cfg_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n[sampling]\n"
+            'init_config_pool = ["pool/a/*.data", "pool/b/*.data"]\n'
+            f"init_config_pool_rounds = {rounds}\n"
+        )
+
+    with pytest.raises(ACGConfigError, match="init_config_pool_rounds"):
+        parse_acg_file(cfg_path)
+
+
+def test_parse_acg_file_preserves_exact_integer_sequence_order(tmp_path):
+    cfg_path = tmp_path / "valid_rounds.acg"
+    _write_dsm_config(cfg_path)
+    with cfg_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n[sampling]\n"
+            'init_config_pool = ["pool/a/*.data", "pool/b/*.data"]\n'
+            "init_config_pool_rounds = [4, 1]\n"
+        )
+
+    config = parse_acg_file(cfg_path)
+
+    assert config.sampling.init_config_pool_rounds == (4, 1)
+
+
+def test_parse_acg_file_preserves_optional_integer_none(tmp_path):
+    cfg_path = tmp_path / "optional_none.acg"
+    _write_dsm_config(cfg_path)
+    with cfg_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n[sampling]\nncores = none\n")
+
+    config = parse_acg_file(cfg_path)
+
+    assert config.sampling.ncores is None
+
+
+@pytest.mark.parametrize("n_epochs", [0, -1])
+def test_parse_acg_file_keeps_integer_range_validation(tmp_path, n_epochs):
+    cfg_path = tmp_path / "invalid_range.acg"
+    _write_dsm_config(
+        cfg_path,
+        extra_training=(f"n_epochs = {n_epochs}",),
+    )
+
+    with pytest.raises(ACGConfigError, match="n_epochs must be positive"):
+        parse_acg_file(cfg_path)
+
+
+def test_parse_acg_file_accepts_finite_core_real_literals(tmp_path):
+    cfg_path = tmp_path / "finite_reals.acg"
+    _write_dsm_config(cfg_path)
+    with cfg_path.open("a", encoding="utf-8") as handle:
+        handle.write(
+            "\n[system]\ncutoff = 25\n"
+            "\n[training]\ntemperature = 3.0e2\n"
+            "solver_ridge_alpha = 2\nlr = 1.0e-2\n"
+            "\n[scheduler]\ntask_timeout = 1800\n"
+            "\n[aa_ref]\nnoise_sigma = 1.0e-1\n"
+        )
+
+    config = parse_acg_file(cfg_path)
+
+    assert config.system.cutoff == 25.0
+    assert type(config.system.cutoff) is float
+    assert config.training.temperature == 300.0
+    assert config.training.solver_ridge_alpha == 2.0
+    assert type(config.training.solver_ridge_alpha) is float
+    assert config.training.lr == 0.01
+    assert config.scheduler.task_timeout == 1800.0
+    assert type(config.scheduler.task_timeout) is float
+    assert config.aa_ref.noise.sigma == 0.1
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("system", "cutoff", "true"),
+        ("training", "temperature", '"300.0"'),
+        ("training", "solver_ridge_alpha", "not-a-number"),
+        ("training", "lr", "nan"),
+        ("scheduler", "task_timeout", "inf"),
+        ("aa_ref", "noise_sigma", "-inf"),
+        ("training", "convergence_tol", "1e309"),
+    ],
+)
+def test_parse_acg_file_rejects_non_real_or_nonfinite_core_fields(
+    tmp_path,
+    section,
+    field,
+    value,
+):
+    cfg_path = tmp_path / "invalid_real.acg"
+    _write_dsm_config(cfg_path)
+    with cfg_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n[{section}]\n{field} = {value}\n")
+
+    with pytest.raises(ACGConfigError, match=field):
+        parse_acg_file(cfg_path)
+
+
+def test_parse_acg_file_preserves_optional_float_none(tmp_path):
+    cfg_path = tmp_path / "optional_float.acg"
+    _write_dsm_config(cfg_path)
+
+    absent = parse_acg_file(cfg_path)
+    assert absent.training.lr is None
+
+    with cfg_path.open("a", encoding="utf-8") as handle:
+        handle.write("\n[training]\nlr = none\n")
+    explicit = parse_acg_file(cfg_path)
+    assert explicit.training.lr is None
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value", "message"),
+    [
+        ("system", "cutoff", "0", "system.cutoff must be positive"),
+        ("training", "lr", "-1.0", "training.lr must be positive"),
+        (
+            "aa_ref",
+            "noise_sigma",
+            "-0.1",
+            "aa_ref.noise_sigma must be non-negative",
+        ),
+    ],
+)
+def test_parse_acg_file_keeps_finite_real_range_validation(
+    tmp_path,
+    section,
+    field,
+    value,
+    message,
+):
+    cfg_path = tmp_path / "invalid_real_range.acg"
+    _write_dsm_config(cfg_path)
+    with cfg_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n[{section}]\n{field} = {value}\n")
+
+    with pytest.raises(ACGConfigError, match=message):
+        parse_acg_file(cfg_path)

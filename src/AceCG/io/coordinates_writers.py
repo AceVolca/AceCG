@@ -30,7 +30,9 @@ def write_gro(
         nanometers for GRO output.
     beads : Sequence[dict]
         Bead records containing at least ``resid``, ``resname``, and
-        ``bead_type``.
+        ``bead_type``. An optional ``label`` is preferred for the atom-name
+        column, so a CG topology that names its beads (``NC3``, ``PO4``, …)
+        keeps those names instead of showing the site-type key.
     box_A : np.ndarray or None
         Optional MDAnalysis-style box in Angstrom.
     """
@@ -43,7 +45,8 @@ def write_gro(
         f.write(f"{n:5d}\n")
         for i, (xyz, br) in enumerate(zip(coords_nm, beads), start=1):
             f.write(
-                f"{int(br['resid']):5d}{str(br['resname']):<5s}{str(br['bead_type']):>5s}{i:5d}"
+                f"{int(br['resid']):5d}{str(br['resname']):<5s}"
+                f"{str(br.get('label', br['bead_type'])):>5s}{i:5d}"
                 f"{xyz[0]:8.3f}{xyz[1]:8.3f}{xyz[2]:8.3f}\n"
             )
 
@@ -71,13 +74,14 @@ def write_pdb(
     coords_A : np.ndarray
         Coordinates in Angstrom, shape ``(n_beads, 3)``.
     beads : Sequence[dict]
-        Bead records containing residue and bead-name metadata.
+        Bead records containing residue and bead-name metadata. An optional
+        ``label`` is preferred for the atom-name column.
     """
     path = Path(path)
     with path.open("w") as f:
         f.write(f"TITLE     {title}\n")
         for i, (xyz, br) in enumerate(zip(coords_A, beads), start=1):
-            name = str(br["bead_type"])[:4]
+            name = str(br.get("label", br["bead_type"]))[:4]
             resname = str(br["resname"])
             resname = resname[:3] if len(resname) > 3 else resname
             resid = int(br["resid"])
@@ -316,7 +320,10 @@ def write_lammps_data(
 
         f.write(f"\nAtoms # {atom_style}\n\n")
         for i, (xyz, images, br) in enumerate(zip(wrapped_coords, image_flags, beads), start=1):
-            mol_id = int(br["resid"])
+            # LAMMPS' second column is the molecule id. Bead records that
+            # distinguish molecule from residue supply `molid`; older records
+            # only have `resid`, where the two coincide.
+            mol_id = int(br.get("molid", br["resid"]))
             bead_type = str(br.get("bead_type", br.get("type")))
             tid = int(type2id[bead_type])
 

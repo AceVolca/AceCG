@@ -344,9 +344,27 @@ def collect_topology_arrays(
                     labels_by_type = [np.unique(key_labels[type_ids == type_id]) for type_id in unique_type_ids]
                     if any(labels.size != 1 for labels in labels_by_type):
                         raise ValueError(
-                            f"{attr1} type ids must map one-to-one to canonical keys."
+                            f"Each LAMMPS {attr1} type id must map to exactly "
+                            "one canonical atom-type key."
                         )
                     unique_labels = np.asarray([str(labels[0]) for labels in labels_by_type], dtype=str)
+                    ids_by_label: dict[str, list[int]] = {}
+                    for type_id, label in zip(unique_type_ids, unique_labels):
+                        ids_by_label.setdefault(str(label), []).append(int(type_id))
+                    collisions = {
+                        label: ids
+                        for label, ids in ids_by_label.items()
+                        if len(ids) > 1
+                    }
+                    if collisions:
+                        details = "; ".join(
+                            f"{label} <- LAMMPS type ids {ids}"
+                            for label, ids in sorted(collisions.items())
+                        )
+                        raise ValueError(
+                            f"LAMMPS {attr1} type ids must map one-to-one with "
+                            f"AceCG canonical keys; conflicting mapping: {details}"
+                        )
                     key_index = type_ids - 1
             
             else: 

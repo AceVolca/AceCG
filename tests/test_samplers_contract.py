@@ -8,7 +8,7 @@ import pytest
 
 from AceCG.samplers.base import BaseSampler, InitConfigRecord
 from AceCG.samplers.conditioned import ConditionedSampler
-from AceCG.samplers._lammps_script import parse_lammps_script
+from AceCG.samplers._lammps_script import parse_lammps_script, stage_lammps_input_tree
 
 
 @dataclass(frozen=True)
@@ -109,6 +109,84 @@ def test_base_sampler_rejects_init_pool_with_replay_mode(monkeypatch, tmp_path: 
         )
 
 
+def test_base_sampler_rotates_grouped_init_pools_by_rounds(monkeypatch, tmp_path: Path) -> None:
+    script_path = tmp_path / "sample.in"
+    script_path.write_text("# placeholder\n", encoding="utf-8")
+    rand_cfg = tmp_path / "rand.data"
+    ref_cfg = tmp_path / "ref.data"
+    rand_cfg.write_text("rand\n", encoding="utf-8")
+    ref_cfg.write_text("ref\n", encoding="utf-8")
+
+    _patch_sampler_runtime(
+        monkeypatch,
+        _FakeScriptInfo(
+            input_path=script_path,
+            init_data_path=Path("inputs/init.data"),
+            trajectory_path=Path("traj/out.lammpstrj"),
+            checkpoint_path=Path("restart/restart.data"),
+        ),
+    )
+
+    sampler = BaseSampler(
+        sim_input=script_path,
+        init_config_pool=[[rand_cfg], [ref_cfg]],
+        init_config_pool_rounds=[4, 1],
+        rng=random.Random(0),
+    )
+
+    chosen = []
+    for iteration in range(10):
+        state = sampler.init_epoch(
+            iteration_index=iteration,
+            epoch_dir=tmp_path / f"epoch_{iteration:04d}",
+            n_runs=1,
+        )
+        chosen.append(state.replica_plans[0].init_config_path.name)
+
+    assert chosen == [
+        "rand.data",
+        "rand.data",
+        "rand.data",
+        "rand.data",
+        "ref.data",
+        "rand.data",
+        "rand.data",
+        "rand.data",
+        "rand.data",
+        "ref.data",
+    ]
+    assert [record.path.name for record in sampler._init_pool] == [
+        "rand.data",
+        "ref.data",
+    ]
+
+
+def test_base_sampler_rejects_pool_round_count_mismatch(monkeypatch, tmp_path: Path) -> None:
+    script_path = tmp_path / "sample.in"
+    script_path.write_text("# placeholder\n", encoding="utf-8")
+    rand_cfg = tmp_path / "rand.data"
+    ref_cfg = tmp_path / "ref.data"
+    rand_cfg.write_text("rand\n", encoding="utf-8")
+    ref_cfg.write_text("ref\n", encoding="utf-8")
+
+    _patch_sampler_runtime(
+        monkeypatch,
+        _FakeScriptInfo(
+            input_path=script_path,
+            init_data_path=Path("inputs/init.data"),
+            trajectory_path=Path("traj/out.lammpstrj"),
+            checkpoint_path=Path("restart/restart.data"),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="init_config_pool_rounds length"):
+        BaseSampler(
+            sim_input=script_path,
+            init_config_pool=[[rand_cfg], [ref_cfg]],
+            init_config_pool_rounds=[1],
+        )
+
+
 @pytest.mark.parametrize(
     ("dump_style", "suffix", "expected_format"),
     [
@@ -151,6 +229,38 @@ def test_base_sampler_infers_mdanalysis_trajectory_format_from_lammps_dump(
 
     assert plan.trajectory_path == plan.run_dir / trajectory_relpath
     assert plan.trajectory_format == expected_format
+
+
+def test_lammps_staging_copies_table_cut_dihedral_table(tmp_path: Path) -> None:
+    script_path = tmp_path / "sample.in"
+    script_path.write_text(
+        "\n".join(
+            [
+                "include system.init",
+                "read_data start.data",
+                "include system.settings",
+                "dump d all custom 10 traj.lammpstrj id type x y z",
+                "run 10",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "system.init").write_text(
+        "dihedral_style table/cut linear 720\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "system.settings").write_text(
+        "dihedral_coeff 1 aat 1 177 180 dih.table DIH\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "dih.table").write_text("table payload\n", encoding="utf-8")
+    (tmp_path / "start.data").write_text("data payload\n", encoding="utf-8")
+
+    staged = tmp_path / "staged"
+    stage_lammps_input_tree(script_path, staged)
+
+    assert (staged / "dih.table").read_text(encoding="utf-8") == "table payload\n"
 
 
 def test_base_sampler_rejects_runtime_paths_that_escape_replica_dirs(monkeypatch, tmp_path: Path) -> None:

@@ -2,8 +2,7 @@
 
 Scope: Tests focus on file-format mechanics (WriteLmpFF round-trip and
 ReadLmpFF table parsing). ReadLmpFF with table style is tested with a
-BSpline fitter; if fitting proves non-deterministic, the test is skipped
-per the plan §7 risk note.
+real BSpline fit.
 """
 
 import pytest
@@ -11,9 +10,14 @@ import numpy as np
 from pathlib import Path
 from types import SimpleNamespace
 
+import AceCG.io.forcefield as forcefield_io
 from AceCG.fitters import BSplineConfig, BSplineTableFitter
 from AceCG.io.forcefield import ReadLmpFF, ReadLmpFFBounds, ReadLmpFFMask, WriteLmpFF
-from AceCG.io.tables import parse_lammps_table
+from AceCG.io.tables import (
+    integrate_force_to_potential,
+    parse_lammps_table,
+    read_lammps_table_section,
+)
 from AceCG.potentials.bspline import BSplinePotential
 from AceCG.potentials.harmonic import HarmonicPotential
 from AceCG.topology.forcefield import Forcefield
@@ -247,6 +251,175 @@ def test_writelmpff_r_grid_preserved(ff_setup):
     assert np.allclose(r_orig, r_new, atol=1e-8)
 
 
+def test_writelmpff_updates_one_section_and_caps_it_in_one_pass(tmp_path):
+    source_dir = tmp_path / "source"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir()
+    output_dir.mkdir()
+    table_path = source_dir / "shared.table"
+    table_path.write_text(
+        "# ACECG-TABLE owner=sibling\n"
+        "SIBLING\nN 2 R 1.0 2.0\n1 1.0 7.0 8.0\n2 2.0 9.0 10.0\n"
+        "# ACECG-TABLE owner=target\n"
+        "TARGET\nN 3 R 1.0 3.0\n1 1.0 0.0 0.0\n"
+        "2 2.0 0.0 0.0\n3 3.0 0.0 0.0\n",
+        encoding="utf-8",
+    )
+    settings = source_dir / "settings.lmp"
+    settings.write_text(
+        "pair_coeff A B shared.table TARGET\n",
+        encoding="utf-8",
+    )
+    potential = HarmonicPotential("A", "B", k=20.0, r0=2.0)
+    potential._acecg_max_force = 5.0
+
+    WriteLmpFF(
+        str(settings),
+        str(output_dir / "settings.lmp"),
+        {InteractionKey.pair("A", "B"): [potential]},
+        "table",
+        topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
+    )
+
+    output_table = output_dir / "shared.table"
+    sibling = read_lammps_table_section(output_table, table_name="SIBLING")
+    target = read_lammps_table_section(output_table, table_name="TARGET")
+    expected_force = np.clip(potential.force(target.x), -5.0, 5.0)
+    np.testing.assert_array_equal(sibling.x, [1.0, 2.0])
+    np.testing.assert_array_equal(sibling.potential, [7.0, 9.0])
+    np.testing.assert_array_equal(sibling.force, [8.0, 10.0])
+    assert sibling.metadata == {"owner": "sibling"}
+    assert target.metadata == {"owner": "target"}
+    np.testing.assert_allclose(target.force, expected_force)
+    np.testing.assert_allclose(
+        target.potential,
+        integrate_force_to_potential(target.x, expected_force),
+    )
+    text = output_table.read_text(encoding="utf-8")
+    assert text.index("SIBLING") < text.index("TARGET")
+
+
+def test_writelmpff_updates_two_keywords_in_one_table(tmp_path):
+    source_dir = tmp_path / "source"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir()
+    output_dir.mkdir()
+    shared_table = source_dir / "shared.table"
+    shared_table.write_text(
+        "FIRST\nN 2 R 1.0 2.0\n1 1.0 0.0 0.0\n2 2.0 0.0 0.0\n"
+        "SECOND\nN 2 R 1.0 2.0\n1 1.0 0.0 0.0\n2 2.0 0.0 0.0\n",
+        encoding="utf-8",
+    )
+    settings = source_dir / "settings.lmp"
+    settings.write_text(
+        "pair_coeff A B shared.table FIRST\n"
+        "pair_coeff A C shared.table SECOND\n",
+        encoding="utf-8",
+    )
+    first_potential = HarmonicPotential("A", "B", k=8.0, r0=1.5)
+    second_potential = HarmonicPotential("A", "C", k=12.0, r0=1.25)
+
+    WriteLmpFF(
+        str(settings),
+        str(output_dir / "settings.lmp"),
+        {
+            InteractionKey.pair("A", "B"): [first_potential],
+            InteractionKey.pair("A", "C"): [second_potential],
+        },
+        "table",
+        topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
+    )
+
+    output_table = output_dir / "shared.table"
+    first = read_lammps_table_section(output_table, table_name="FIRST")
+    second = read_lammps_table_section(output_table, table_name="SECOND")
+    np.testing.assert_allclose(first.potential, first_potential.value(first.x))
+    np.testing.assert_allclose(first.force, first_potential.force(first.x))
+    np.testing.assert_allclose(second.potential, second_potential.value(second.x))
+    np.testing.assert_allclose(second.force, second_potential.force(second.x))
+    text = output_table.read_text(encoding="utf-8")
+    assert text.index("FIRST") < text.index("SECOND")
+
+
+def test_writelmpff_stages_every_file_before_publishing(tmp_path, monkeypatch):
+    source_dir = tmp_path / "source"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir()
+    output_dir.mkdir()
+    _write_pair_table(source_dir / "a.table", k=8.0, r0=2.0)
+    _write_pair_table(source_dir / "b.table", k=9.0, r0=3.0)
+    settings = source_dir / "settings.lmp"
+    settings.write_text(
+        "pair_coeff A B a.table PAIR_AB\n"
+        "pair_coeff A C b.table PAIR_AB\n",
+        encoding="utf-8",
+    )
+    output_settings = output_dir / "settings.lmp"
+    output_settings.write_text("old settings\n", encoding="utf-8")
+    (output_dir / "a.table").write_text("old a\n", encoding="utf-8")
+    (output_dir / "b.table").write_text("old b\n", encoding="utf-8")
+    original_serializer = forcefield_io._write_lammps_table_sections
+    calls = 0
+
+    def fail_second_stage(path, sections, *, comment=None):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("stage failure")
+        return original_serializer(path, sections, comment=comment)
+
+    monkeypatch.setattr(
+        forcefield_io,
+        "_write_lammps_table_sections",
+        fail_second_stage,
+    )
+    forcefield = {
+        InteractionKey.pair("A", "B"): [
+            HarmonicPotential("A", "B", k=10.0, r0=2.5)
+        ],
+        InteractionKey.pair("A", "C"): [
+            HarmonicPotential("A", "C", k=11.0, r0=3.5)
+        ],
+    }
+
+    with pytest.raises(RuntimeError, match="stage failure"):
+        WriteLmpFF(
+            str(settings),
+            str(output_settings),
+            forcefield,
+            "table",
+            topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
+        )
+
+    assert output_settings.read_text(encoding="utf-8") == "old settings\n"
+    assert (output_dir / "a.table").read_text(encoding="utf-8") == "old a\n"
+    assert (output_dir / "b.table").read_text(encoding="utf-8") == "old b\n"
+    assert not list(output_dir.glob(".*.acecg-stage"))
+
+
+def test_writelmpff_publishes_settings_last(ff_setup, monkeypatch):
+    output_dir = ff_setup["tmp_path"] / "published"
+    output_settings = output_dir / "settings_new.lmp"
+    replaced = []
+    original_replace = forcefield_io.os.replace
+
+    def record_replace(source, destination):
+        replaced.append(Path(destination))
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(forcefield_io.os, "replace", record_replace)
+    WriteLmpFF(
+        str(ff_setup["settings_file"]),
+        str(output_settings),
+        {InteractionKey.pair("A", "B"): [ff_setup["pot"]]},
+        "table",
+        topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
+    )
+
+    assert replaced[-1] == output_settings.resolve()
+    assert all(path != output_settings.resolve() for path in replaced[:-1])
+
+
 # ---------------------------------------------------------------------------
 # ReadLmpFF tests — table style with BSpline fitter
 # ---------------------------------------------------------------------------
@@ -262,85 +435,24 @@ def ff_readlmpff_setup(tmp_path):
     return {"settings_file": settings_file}
 
 
-def test_readlmpff_returns_dict(ff_readlmpff_setup):
-    try:
-        result = ReadLmpFF(
-            str(ff_readlmpff_setup["settings_file"]),
-            "table",
-            table_fit="bspline",
-            topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
-        )
-    except Exception as exc:
-        pytest.skip(f"ReadLmpFF fitting failed (plan §7 risk): {exc}")
+def test_readlmpff_returns_canonical_pair_forcefield(ff_readlmpff_setup):
+    result = ReadLmpFF(
+        str(ff_readlmpff_setup["settings_file"]),
+        "table",
+        table_fit="bspline",
+        topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
+    )
+
     assert isinstance(result, Forcefield)
-
-
-def test_readlmpff_has_pair_key(ff_readlmpff_setup):
-    try:
-        result = ReadLmpFF(
-            str(ff_readlmpff_setup["settings_file"]),
-            "table",
-            table_fit="bspline",
-            topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
-        )
-    except Exception as exc:
-        pytest.skip(f"ReadLmpFF fitting failed (plan §7 risk): {exc}")
     assert len(result) >= 1
-
-
-def test_readlmpff_potential_has_nparams(ff_readlmpff_setup):
-    try:
-        result = ReadLmpFF(
-            str(ff_readlmpff_setup["settings_file"]),
-            "table",
-            table_fit="bspline",
-            topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
-        )
-    except Exception as exc:
-        pytest.skip(f"ReadLmpFF fitting failed (plan §7 risk): {exc}")
-    for pair, pots in result.items():
-        for pot in (pots if isinstance(pots, list) else [pots]):
-            assert pot.n_params() > 0
-
-
-# ---------------------------------------------------------------------------
-# ReadLmpFF — InteractionKey contract
-# ---------------------------------------------------------------------------
-
-def test_readlmpff_keys_are_interactionkey(ff_readlmpff_setup):
-    """ReadLmpFF must return InteractionKey keys (U1 contract)."""
-    from AceCG.topology.types import InteractionKey
-
-    try:
-        result = ReadLmpFF(
-            str(ff_readlmpff_setup["settings_file"]),
-            "table",
-            table_fit="bspline",
-            topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
-        )
-    except Exception as exc:
-        pytest.skip(f"ReadLmpFF fitting failed (plan §7 risk): {exc}")
-    for key in result:
+    assert InteractionKey.pair("A", "B") in result
+    for key, pots in result.items():
         assert isinstance(key, InteractionKey), f"Expected InteractionKey, got {type(key)}"
         assert key.style == "pair"
-
-
-def test_readlmpff_key_types_are_tuple(ff_readlmpff_setup):
-    """ReadLmpFF InteractionKey.types should be a tuple of type strings."""
-    from AceCG.topology.types import InteractionKey
-
-    try:
-        result = ReadLmpFF(
-            str(ff_readlmpff_setup["settings_file"]),
-            "table",
-            table_fit="bspline",
-            topology_arrays=EMPTY_TOPOLOGY_ARRAYS,
-        )
-    except Exception as exc:
-        pytest.skip(f"ReadLmpFF fitting failed (plan §7 risk): {exc}")
-    for key in result:
         assert isinstance(key.types, tuple)
-        assert all(isinstance(t, str) for t in key.types)
+        assert all(isinstance(type_name, str) for type_name in key.types)
+        for pot in (pots if isinstance(pots, list) else [pots]):
+            assert pot.n_params() > 0
 
 
 def test_readlmpff_reads_bonded_terms_into_single_forcefield(tmp_path):

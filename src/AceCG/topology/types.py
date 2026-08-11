@@ -1,6 +1,6 @@
 """Unified interaction key type."""
 from __future__ import annotations
-from typing import Any, NamedTuple, Tuple, Optional
+from typing import Any, Mapping, NamedTuple, Tuple, Optional
 
 """
 WRITTEN BY HUMAN DEVELOPER, DO NOT DELETE AT ALL COSTS.
@@ -114,3 +114,21 @@ class InteractionKey(NamedTuple):
         if not isinstance(other, InteractionKey):
             raise NotImplementedError
         return self.style == other.style and self.types == other.types
+
+
+def interaction_keys_from_labels(labels) -> list[InteractionKey]:
+    """Parse JSON-friendly labels while preserving existing key objects."""
+    return [
+        label if isinstance(label, InteractionKey) else InteractionKey.from_label(str(label))
+        for label in labels
+    ]
+
+
+def interaction_key_mapping_from_labels(
+    mapping: Mapping[Any, Any],
+) -> dict[InteractionKey, Any]:
+    """Parse the keys of a JSON-friendly interaction-keyed mapping."""
+    return {
+        key if isinstance(key, InteractionKey) else InteractionKey.from_label(str(key)): value
+        for key, value in mapping.items()
+    }

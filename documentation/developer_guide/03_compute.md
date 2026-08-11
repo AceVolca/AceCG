@@ -1,13 +1,17 @@
 # 03 Compute Module Developer Reference
 
-*Updated: 2026-06-15.*
+*Updated: 2026-08-11.*
+
+> `compute/cgmap.py` (the per-frame AA→CG mapping kernel) and
+> `compute/force_mapping.py` (linear force-mapping statistics and fitting)
+> are documented in [12_trajmap.md](12_trajmap.md) rather than here.
 
 The compute layer is the task-scoped numerical runtime between trajectory/topology I/O and trainers.
 
 It owns:
 
 - `FrameGeometry`
-- `MPIComputeEngine`, including `FrameCache` and `TrajectoryCache`; legacy aliases are `FrameObservables` and `TrajectoryObservablesCache`
+- `MPIComputeEngine`, including `FrameCache` and `TrajectoryCache`
 - the `energy()` and `force()` kernels
 - the stateful reducer pipeline in `reducers.py`
 
@@ -101,17 +105,30 @@ engine.run_post(spec)
 - builds `FrameGeometry`
 - evaluates requested energy, force, and geometry channels according to
   canonical request names
-- returns a dict, including `frame_cache` for reducer cache requests and
-  `frame_observables` when `return_observables=True`
+- returns a dict, including `frame_cache` when requested
 
 `engine.run_post(spec)` is the scheduled-task boundary:
 
-- rank 0 loads the force-field snapshot, MDAnalysis Universe, and `TopologyArrays`
-- shared context is broadcast to all ranks
-- each rank receives a contiguous frame chunk or a split of `discrete_ids`
-- one-pass steps call the reducer pipeline
+- one `MPITrajReader(strategy="broadcast")` owns source scan, validation,
+  balanced partition, live-Universe distribution, and global frame identity
+- rank 0 opens the inspection Universe, builds `TopologyArrays`, resolves the
+  engine-specific noise-aware selection, and communicates context or the
+  originating inspection error before `reader.scan()`
+- each rank aligns a priori weights with `reader.local_frame_ids` and consumes
+  only `reader.iter_local()` for the outer frame stream
+- `run_post()` resolves one `ReducerOps` bundle per step, unions and normalizes
+  its requests once, then calls the cached bundle directly for geometry, init,
+  consume, local partials, reduction plan, and root finalization
+- every registered post step, including ordinary RDF, uses that reducer pipeline
 - MPI reduce -> rank 0 finalize -> pickle output
 - see [04_mpi_runtime.md](04_mpi_runtime.md)
+
+The post default remains the historical effective `broadcast` loading policy;
+the reader now owns that broadcast rather than the engine. The rank-0
+inspection Universe is used only to establish shared topology context. Range and
+explicit selections no longer have separate engine partition/iteration paths,
+and this ownership migration does not change reducer payloads, FM batches,
+force units, or output schemas.
 
 ### Same-Frame Batch Contract
 
@@ -161,8 +178,6 @@ spec["observables_output_file"] = "cache.pkl"
 | `TrajectoryCache` | `compute/mpi_engine.py` | Collection of `FrameCache` objects for a trajectory |
 | `geometry_to_observables()` | `compute/mpi_engine.py` | Extracts a `FrameCache` from `FrameGeometry` |
 
-The old names `FrameObservables` and `TrajectoryObservablesCache` remain as compatibility aliases. New code and documentation should prefer `FrameCache` and `TrajectoryCache`.
-
 This mechanism lets `analysis/rdf.py` access already-computed geometry without rereading the trajectory.
 
 ---
@@ -188,7 +203,7 @@ Current reducer families:
 | `dsm` | `init_fm_state` with DSM request flags |
 | `rem` / `cdrem` | `init_rem_state` |
 | `cdfm_zbx` | `init_cdfm_zbx_state` |
-| `rdf` | Uses `analysis.rdf.interaction_distributions()` directly and does not enter the one-pass pipeline |
+| `rdf` | `init_rdf_state` / `consume_rdf_frame` / generic reduction |
 
 `cdfm_y_eff` has been deprecated. `y_eff` is now computed during the rank-0 preprocessing phase of `cdfm_zbx` from each replica's init configuration and paired `.forces.npy` reference-force file:
 
@@ -290,7 +305,7 @@ Output payload:
 
 ## `multi` Mode
 
-When `spec["steps"]` contains multiple steps, all one-pass steps share a single trajectory traversal:
+When `spec["steps"]` contains multiple steps, every registered step shares a single trajectory traversal:
 
 ```text
 run_post(spec with multiple steps):
@@ -309,9 +324,10 @@ run_post(spec with multiple steps):
 
 Contract:
 
-- all one-pass steps in `steps` must share the same trajectory, topology, and context
+- all steps in `steps` must share the same trajectory, topology, and context
 - if different trajectory or geometry context is needed, use a separate task
-- `rdf` steps do not enter the one-pass pipeline; they run separately after one-pass steps finish
+- ordinary RDF uses the top-level frame selection, `sel`, exclusion policy, and
+  a-priori weights; `rdf_source` and step-local frame/selection overrides are removed
 
 ---
 

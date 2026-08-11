@@ -7,7 +7,8 @@ from scipy.optimize import lsq_linear
 
 from .base import BaseTableFitter, TABLE_FITTERS
 from ..potentials.bspline import BSplinePotential
-from ..io.tables import parse_lammps_table
+from ..potentials.dihedral_bspline import DihedralBSplinePotential
+from ..io.tables import parse_lammps_table, read_lammps_table_section
 from .utils import make_cutoff_anchors
 from ..topology.forcefield import Forcefield
 from ..topology.types import InteractionKey
@@ -119,9 +120,17 @@ class BSplineTableFitter(BaseTableFitter):
         """Return this fitter's registry profile name."""
         return "bspline"
 
-    def fit(self, table_path: str, typ1: str, typ2: str) -> BSplinePotential:
+    def fit(
+        self,
+        table_path: str,
+        typ1: str,
+        typ2: str,
+        *,
+        table_name: str | None = None,
+        **_kwargs,
+    ) -> BSplinePotential:
         """Fit a force-basis B-spline potential from a table file."""
-        r, V, F = parse_lammps_table(table_path)
+        r, V, F = parse_lammps_table(table_path, table_name=table_name)
         r = np.asarray(r, dtype=float).ravel()
 
         # Force-basis: fit B @ c ≈ F (force), not B @ c ≈ V (energy)
@@ -210,3 +219,110 @@ class BSplineTableFitter(BaseTableFitter):
 
 # register
 TABLE_FITTERS.register("bspline", lambda **kw: BSplineTableFitter(**kw))
+
+
+@dataclass
+class DihedralBSplineConfig:
+    """Configuration for fitting a signed dihedral table."""
+
+    degree: int = 3
+    n_coeffs: int = 64
+    boundary_mode: Optional[str] = None
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+
+
+class DihedralBSplineTableFitter(BaseTableFitter):
+    """Fit a cyclic or cutoff dihedral force basis from one table section."""
+
+    def __init__(
+        self,
+        config: Optional[DihedralBSplineConfig] = None,
+        **overrides,
+    ):
+        self.cfg = config or DihedralBSplineConfig()
+        self._override_fields = set(overrides)
+        for key, value in overrides.items():
+            if not hasattr(self.cfg, key):
+                raise AttributeError(
+                    f"Unknown DihedralBSplineConfig field {key!r}"
+                )
+            setattr(self.cfg, key, value)
+
+    def profile_name(self) -> str:
+        return "dihedral_bspline"
+
+    def fit(
+        self,
+        table_path: str,
+        typ1: str,
+        typ2: str,
+        *,
+        types=None,
+        table_name: str | None = None,
+        **_kwargs,
+    ) -> DihedralBSplinePotential:
+        section = read_lammps_table_section(
+            table_path,
+            table_name=table_name,
+            table_style="dihedral",
+        )
+        r = np.asarray(section.x, dtype=float).reshape(-1)
+        value = np.asarray(section.potential, dtype=float).reshape(-1)
+        force = (
+            np.asarray(section.force, dtype=float).reshape(-1)
+            if section.force is not None
+            else -np.gradient(value, r)
+        )
+        metadata = section.metadata
+        mode = self.cfg.boundary_mode or metadata.get(
+            "boundary_mode", "periodic"
+        )
+        minimum = self.cfg.minimum
+        maximum = self.cfg.maximum
+        if minimum is None:
+            minimum = float(metadata.get("model_min", -180.0))
+        if maximum is None:
+            maximum = float(metadata.get("model_max", 180.0))
+        degree = int(
+            self.cfg.degree
+            if "degree" in self._override_fields
+            else metadata.get("degree", self.cfg.degree)
+        )
+        n_coeffs = int(
+            self.cfg.n_coeffs
+            if "n_coeffs" in self._override_fields
+            else metadata.get("n_coeffs", self.cfg.n_coeffs)
+        )
+        labels = tuple(str(item) for item in (types or (typ1, typ1, typ2, typ2)))
+        if len(labels) != 4:
+            raise ValueError("dihedral table fitting requires four type labels")
+
+        potential = DihedralBSplinePotential.zeros(
+            labels,
+            minimum=float(minimum),
+            maximum=float(maximum),
+            n_coeffs=n_coeffs,
+            degree=degree,
+            boundary_mode=str(mode),
+        )
+        design = np.asarray(potential.force_grad(r), dtype=float)
+        active = np.isfinite(force) & np.all(np.isfinite(design), axis=1)
+        if int(np.count_nonzero(active)) < n_coeffs:
+            raise ValueError(
+                f"Too few finite dihedral table rows to fit {n_coeffs} "
+                f"coefficients: {int(np.count_nonzero(active))}"
+            )
+        coefficients, *_ = np.linalg.lstsq(
+            design[active],
+            force[active],
+            rcond=None,
+        )
+        potential.set_params(coefficients)
+        return potential
+
+
+TABLE_FITTERS.register(
+    "dihedral_bspline",
+    lambda **kw: DihedralBSplineTableFitter(**kw),
+)

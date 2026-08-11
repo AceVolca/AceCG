@@ -1,8 +1,11 @@
 # 09 Workflow Module Developer Reference
 
-*Updated: 2026-06-15.*
+*Updated: 2026-08-11.*
 
-> This chapter covers training / orchestration workflows only. VP grower is documented separately in [10_vp_grower.md](10_vp_grower.md).
+> This chapter covers training / orchestration workflows only. VP grower is
+> documented separately in [10_vp_grower.md](10_vp_grower.md); TrajMap and
+> linear force-mapping are documented separately in
+> [12_trajmap.md](12_trajmap.md).
 
 The workflow layer sits above scheduler, trainer, and solver. It connects config, topology, resources, and batch construction. It owns iteration directory layout, checkpoint semantics, task planning, and trainer / solver call timing. It does not own reducer math, MPI broadcast, frame slicing, or table/potential kernels.
 
@@ -53,13 +56,25 @@ Workflows should not own:
 - per-frame trajectory accumulation logic
 - numerical details of force / energy Jacobians
 
+The reader's two failure collectives are the only shared closure used by
+trajectory transformations: root-only stages broadcast an already-formed
+outcome, and complete rank-local work reaches consensus before a writer's
+explicit gather. They do not turn TrajMap or VP into a workflow hierarchy.
+
+`TrajMapWorkflow` is a thin orchestrator: it resolves inputs, compiles/scans,
+runs the optional explicit force-map statistics and fitting stages, and constructs `TrajMapResult`.
+The concrete `io.trajmap.map_cg_trajectory()` operation owns TrajMap's local
+frame stream, staged topology/segment/artifact writes, count-validated merge,
+exact-target publication, and report-last completion record. That record is a
+completion boundary, not a claim of atomic multi-file publication.
+
 ---
 
 ## `BaseWorkflow`
 
 `BaseWorkflow` is the root class for all training workflows. Construction does three things:
 
-- parse and apply config overrides
+- retain trusted programmatic constructor overrides
 - create `output_dir`
 - build `TopologyArrays` from `system.topology_file`
 
@@ -68,13 +83,34 @@ Important shared helpers:
 | Method | Purpose |
 |---|---|
 | `_run_workflow_cli()` | Shared CLI wrapper for `acg-rem`, `acg-fm`, `acg-dsm`, and related entry points |
-| `_apply_config_overrides()` | Supports `--section.field value` style overrides |
 | `_build_topology()` | Builds `TopologyArrays` from current config |
 | `_build_optimizer()` | Selects optimizer from `training.optimizer` / `training.trainer` |
 | `_build_resource_pool()` | Discovers MPI backend and CPU resources from environment and scheduler config |
 | `_build_forcefield_mask()` | Compiles `[system] forcefield_mask` into runtime `param_mask` |
 
 Important development rule: `BaseWorkflow.run()` remains abstract. Real training loops belong in concrete workflow classes.
+
+Core training CLI overrides use `--section.field value` or
+`--section.field=value`. For config-backed invocations they are merged into
+the parsed raw sections by `parse_acg_file()` before its one canonical model
+build and validation. Duplicate keys keep the final CLI value. Overrides
+without a config path are rejected; the configless/no-override fallback and
+trusted programmatic `BaseWorkflow(config, **kwargs)` path remain separate.
+TrajMap and VP growth retain their explicit transformation config paths.
+
+For the core FM/DSM/REM/CDREM/CDFM parser, boolean fields use the shared token
+set `true/false`, `yes/no`, `on/off`, and `1/0`. Integer fields require actual
+unquoted integer literals: booleans, floats, quoted numbers, and arbitrary
+strings are rejected with the field name. Positive integer sequences preserve
+their authored order and apply the same exact-integer rule to every item.
+Existing field-specific range validation remains separate. These rules do not
+change TrajMap or VP-growth parsing.
+
+Core real-valued fields likewise require finite built-in integer or float
+literals. Integer literals such as `task_timeout = 1800` normalize to floats;
+finite scientific notation remains valid. Booleans, quoted numeric strings,
+arbitrary strings, NaN and infinities are rejected before the unchanged
+field-specific range and unit checks.
 
 ---
 
@@ -227,6 +263,9 @@ FM has two execution paths:
 | solver path | `fm_method=solver`, or auto selects Newton / closed-form | Accumulate FM stats once and call `FMMatrixSolver.solve()` |
 
 After solving, `_export_table_bundle()` exports the result as LAMMPS tables.
+`training.fm_specs.dihedral_specs` accepts four canonical atom-type labels and
+a B-spline with explicit `boundary_mode = "periodic"` or `"cutoff"`; exported
+dihedral tables use signed degrees and a half-open cyclic grid.
 
 Noisy FM is a post-processing option on the AA reference path. If
 `aa_ref.noise_enabled = true`, `_fm_noise_runtime_spec()` adds `spec["noise"]`

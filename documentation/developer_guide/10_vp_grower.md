@@ -1,171 +1,152 @@
 # 10 VP Grower Developer Reference
 
-*Updated: 2026-04-23.*
+*Updated: 2026-08-10.*
 
-> This chapter covers only the VP grower pipeline. Training workflows are documented in [09_workflows.md](09_workflows.md).
+> This chapter covers the one-shot VP trajectory transformation. Training
+> workflows are documented in [09_workflows.md](09_workflows.md); the other
+> one-shot trajectory transformation, TrajMap, is documented separately in
+> [12_trajmap.md](12_trajmap.md).
 
-In the active repo, VP grower is an independent one-shot data-production pipeline:
-
-- it does not inherit from `BaseWorkflow`
-- it does not participate in trainer / optimizer / checkpoint training loops
-- it does not reuse `TaskScheduler.run_iteration()`
-
-Its goal is to generate, from a CG-only reference topology and trajectory:
+VP growth turns a CG-only reference topology and trajectory into:
 
 - a VP-augmented schema topology
 - `latent.settings` and initial pair/bond/angle tables
-- per-conditioning-frame `frame_*.data`
-- optional `frame_*.forces.npy`
-- `manifest.json`
+- one `frame_*.data` per unique selected source frame
+- optional aligned `frame_*.forces.npy`
+- `timing.json` and the manifest-last `manifest.json` completion record
 
----
+It does not inherit from `BaseWorkflow`, enter trainer/optimizer loops, or use
+the task scheduler.
 
-## Core Files
+## Core ownership
 
 | File | Responsibility |
 |---|---|
-| `workflows/vp_growth.py` | Top-level one-shot orchestrator; decides Universe loading strategy and output layout |
-| `topology/vpgrower.py` | VP template construction, single-frame VP placement, `.data` writing |
-| `compute/vp_prepare.py` | MPI-parallel frame growth and manifest aggregation |
-| `io/vp_ffbuilder.py` | Export of `latent.settings` and initial VP tables |
+| `workflows/vp_growth.py` | Resolve config-relative paths, construct the shared reader, call one terminal, return `VPGrowthResult` |
+| `io/vp_growth.py` | Distributed VP transform, validation, staging, publication, timing, and ordered provenance |
+| `io/trajectory.py` | Scan, global frame identity, MPI slices, loading strategy, and rank-local iteration |
+| `topology/vpgrower.py` | Static template, single-frame VP placement, and concrete LAMMPS DATA writer |
+| `io/vp_ffbuilder.py` | VP forcefield construction plus the shared settings/table inventory, renderer, and writers |
 | `configs/vp_growth_config.py` | VP grower-specific config model and parser |
 
----
+There is no `compute/vp_prepare.py` layer. It was an additional orchestration
+and writer owner, not a scientific kernel, and has been deleted rather than
+retained as a compatibility facade.
 
-## Static Template vs Dynamic Frames
+## Call path
 
-The core design separates the static topology template from per-frame geometry.
+```text
+VPGrowthWorkflow.run()
+  -> resolve paths
+  -> MPITrajReader(strategy="auto", broadcast_segment_limit=2)
+  -> grow_vp_trajectory(...)
+       -> build VPTopologyTemplate from the static reference topology
+       -> reader.scan()
+       -> enumerate and preflight every final target
+       -> stage schema topology and latent settings/tables
+       -> reader.iter_local() exactly once per rank
+       -> VPGrower.grow_frame() + concrete DATA/force writers
+       -> one records/statistics gather
+       -> validate order, coverage, files, and force arrays
+       -> stage timing and ordered manifest
+       -> publish exact targets, manifest last
+  -> VPGrowthResult from the terminal's plain dictionary
+```
 
-| Layer | Main object | Description |
-|---|---|---|
-| Static template | `VPTopologyTemplate` | Atom names, type ids, inserted bonds / angles / dihedrals, real/VP index mappings |
-| Single-frame geometry | `VPGrownFrame` | `(n_atoms, 3)` coordinates aligned to the template plus box dimensions |
-| Executor | `VPGrower` | Holds the template and calls `grow_frame(...)` per frame |
+The workflow owns no Universe open, scan, frame loop, MPI collective, writer,
+merge, or serialization logic.
 
-This keeps shared data small across ranks: broadcast the template once instead of rebuilding topology every frame.
+## Scientific objects
 
----
-
-## Key Entry Points
-
-| Symbol | Location | Purpose |
-|---|---|---|
-| `VPGrowthWorkflow.run()` | `workflows/vp_growth.py` | Top-level execution: read config, choose Universe strategy, write schema, dispatch frame growth |
-| `VPGrower.from_universe()` | `topology/vpgrower.py` | Build a `VPTopologyTemplate` from a CG-only `MDAnalysis.Universe` |
-| `VPGrower.grow_frame()` | `topology/vpgrower.py` | Insert VP coordinates into one frame of real-site coordinates |
-| `grow_vp_frames()` | `compute/vp_prepare.py` | Split work by frame id and write `frame_*.data` in MPI parallel |
-| `write_latent_settings()` | `io/vp_ffbuilder.py` | Export `latent.settings` and initial VP tables |
-| `write_vp_data()` | `topology/vpgrower.py` | Write template plus single-frame geometry as LAMMPS data |
-
----
-
-## `VPGrowthWorkflow`
-
-`VPGrowthWorkflow` is a one-shot driver, not a training workflow.
-
-Top-level steps:
-
-1. Read `VPGrowthConfig`.
-2. Decide whether to broadcast the full Universe or have each rank load only local segments.
-3. Rank 0 builds `VPGrower` / `VPTopologyTemplate`.
-4. Rank 0 writes `vp_topology.data` and `latent.settings`.
-5. All ranks call `grow_vp_frames()`.
-6. Rank 0 aggregates `manifest.json`.
-
-The current trajectory-loading strategy is explicit:
-
-- when the segment count is small, broadcast the full Universe
-- when there are many segments, each rank opens only the trajectory subset it owns
-
-This strategy lives directly in `workflows/vp_growth.py` and does not depend on the scheduler layer.
-
----
-
-## `VPGrower`
-
-`VPGrower` is a stateless-after-construction executor. It owns an immutable template; the per-frame inputs are:
-
-- real-site positions
-- box dimensions
-- orientation seed
-
-`topology/vpgrower.py` also owns:
-
-- parsed VP bond / angle / dihedral specs
-- carrier-residue to VP-slot mapping
-- anti-clash iterative placement logic
-- `write_vp_data()`, a thin wrapper around `write_lammps_data()`
-
-The design boundary is deliberate: geometric placement is controlled only by VP bonds / angles and anti-clash logic. VP dihedrals are written into the final topology and `latent.settings`, but they do not participate in the geometric grow itself.
-
----
-
-## `grow_vp_frames()`
-
-`compute/vp_prepare.py` performs parallel frame growth. Its frame-id sharding intentionally matches `MPIComputeEngine.run_post()` so VP grower and compute runtime share discrete-frame semantics.
-
-Important inputs:
-
-- `grower`: shared-template `VPGrower`
-- `universe`: locally seekable `MDAnalysis.Universe` on each rank
-- `frame_ids`: global frame-id list
-- `local_frame_ids`: optional local Universe seek indices for this rank
-- `orientation_seed_base`: base random-orientation seed per frame
-
-Output convention:
-
-- `frame_{fid:06d}.data`
-- optional `frame_{fid:06d}.forces.npy`
-- rank 0 merges a `VPGrowManifest`
-
----
-
-## `write_latent_settings()`
-
-`io/vp_ffbuilder.py` converts the VP template and VP config into static files consumable by LAMMPS:
-
-- `latent.settings`
-- initial pair/bond/angle tables
-
-Important helpers:
-
-| Function | Purpose |
+| Object or operation | Meaning |
 |---|---|
-| `build_vp_forcefield()` | Materialize a VP-only `Forcefield` from `VPConfig + VPTopologyTemplate` |
-| `render_vp_latent_template()` | Render final `pair_coeff` / `bond_coeff` / `angle_coeff` / `dihedral_coeff` text |
+| `VPTopologyTemplate` | Immutable atom/type/topology layout and real/VP index mappings |
+| `VPGrownFrame` | One `(n_atoms, 3)` grown coordinate array plus box |
+| `VPGrower.from_universe()` | Compile the static reference topology into the template |
+| `VPGrower.grow_frame()` | Sole per-frame VP placement and clash-resolution kernel |
+| `write_vp_data()` | Concrete template-plus-frame LAMMPS DATA writer |
 
-These outputs belong to the VP grower pipeline and are therefore not documented in the generic I/O chapter.
+The orientation seed is always
+`orientation_seed_base + source_frame_id`. It never depends on rank, local
+seek ID, selection index, or MPI size.
 
----
+## Shared reader policy
 
-## Output Files
+`MPITrajReader` retains the VP-measured threshold:
 
-A VP grow run usually produces:
+- serial input reopens
+- one or two non-XDR segments broadcast the live rank-0 Universe
+- one or two XTC/TRR segments reopen with offsets scanned once on rank 0
+- more than two segments open only the segments intersecting each rank's slice
+
+For the last case, a LAMMPSDUMP chain is counted per file with the cheap text
+counter inside `scan()`. The workflow does not discover or pass segment
+counts. `iter_local()` is the only distributed-read entry and restores every
+record's global logical source ID.
+
+## Ordered duplicate semantics
+
+Selection is an occurrence sequence, not a set. For a selection such as
+`[5, 0, 2, 2]`:
+
+- the manifest contains four records in that exact order
+- source ID `2` has one physical DATA/force pair
+- only the rank owning the first `2` occurrence grows and writes that pair
+- both occurrence records point to that pair and use the same seed
+
+The manifest record fields include `selection_index`, `source_frame_id`,
+`orientation_seed`, `data`, and `forces`. No sorting or frame-ID dictionary
+merge is allowed.
+
+## Force contract
+
+`include_forces = true` is strict. If scan knows the source has no forces, the
+terminal fails before staging. If capability is unknown, every consumed
+occurrence is checked and a missing force closes collectively after the local
+loop. Emitted arrays are `float32` with shape `(n_real, 3)` and remain aligned
+to their source global ID.
+
+## Output inventory and publication
+
+`vp_forcefield_inventory()` is the single source of relative settings/table
+names used by renderer, writer, and terminal. Before the first writer, the
+terminal enumerates:
+
+- `vp_topology.data`
+- latent settings and every configured pair/bond/angle table
+- unique DATA and requested force files
+- `timing.json`
+- `manifest.json`
+
+It rejects resolved duplicates, parent/child overlaps, staging overlap, and
+non-overwrite collisions. Writers target one shared staging directory. After
+all staged artifacts and force arrays validate, only enumerated final paths are
+replaced; unrelated files survive overwrite. An old manifest is invalidated
+before replacement starts, and the new manifest is published last. This is a
+completion-marker protocol, not a claim of multi-file POSIX atomicity.
+
+Typical output:
 
 ```text
 output_dir/
   vp_topology.data
   latent.settings
   Pair_*.table
-  Bond_*.table
-  Angle_*.table
+  VP_*_bon.table
+  VP_*_ang.table
   frame_000000.data
   frame_000000.forces.npy
+  timing.json
   manifest.json
 ```
 
-Where:
+## Development rules
 
-- `vp_topology.data` is a schema-only topology used by later CDREM / CDFM runs
-- `frame_*.data` files are the actual per-frame grown configurations
-- `manifest.json` is the canonical rank-0 aggregated index
-
----
-
-## Development Rules
-
-When extending VP grower, preserve these boundaries:
-
-1. Keep static topology templates in `topology/vpgrower.py`; do not move them into training workflows.
-2. Keep parallel frame growth in `compute/vp_prepare.py`, preserving the same frame-id sharding semantics as `run_post()`.
-3. Treat `latent.settings` and VP table output as VP-specific I/O; do not fold them into the generic `io` developer document.
+1. Keep template and placement mathematics in `topology/vpgrower.py`.
+2. Keep exactly one VP transform/output operation in `io/vp_growth.py`; do not
+   add per-frame wrappers, workflow inheritance, sinks, managers, or result
+   hierarchies.
+3. Keep discovery, selection, global IDs, partitioning, and local opening in
+   `MPITrajReader`.
+4. Keep VP and TrajMap terminals separate: they share the reader spine and
+   failure/publication rules, not scientific kernels or writers.

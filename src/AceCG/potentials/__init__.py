@@ -1,6 +1,7 @@
 # AceCG/potentials/__init__.py
 from .base import BasePotential, IteratePotentials
 from .bspline import BSplinePotential
+from .dihedral_bspline import DihedralBSplinePotential
 from .gated import (
     GatedPotential,
     iter_gated_potentials,

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+import os
 from pathlib import Path
-from typing import Any, Dict, Optional, Sequence, Tuple
+import re
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -91,63 +94,383 @@ def constant_force_extrapolate(
 
 def export_grid(spec: Dict[str, Any]) -> np.ndarray:
     """Build a uniform output grid from an interaction spec dict."""
+    if spec.get("table_grid") is not None:
+        grid = np.asarray(spec["table_grid"], dtype=float).reshape(-1)
+        if grid.size < 2 or np.any(np.diff(grid) <= 0.0):
+            raise ValueError("table_grid must contain strictly increasing coordinates")
+        return grid
     dx = float(spec.get("table_resolution", spec["resolution"]))
     xmin = float(spec.get("table_min", spec["min"]))
     xmax = float(spec.get("table_max", spec["max"]))
+    if str(spec.get("style", "")).strip().lower() == "dihedral":
+        span = xmax - xmin
+        n = int(round(span / dx))
+        if n < 2 or not np.isclose(n * dx, span, rtol=0.0, atol=1.0e-8):
+            raise ValueError(
+                "dihedral table resolution must divide its output span exactly"
+            )
+        # Half-open cyclic grid: never emit both congruent seam endpoints.
+        return xmin + np.arange(n, dtype=float) * (span / n)
     return _uniform_grid(xmin, xmax, dx)
 
 
-def parse_lammps_table(table_path: str | Path):
-    """Read a LAMMPS table file and return ``(r, V, F)``."""
-    r_list, v_list, f_list = [], [], []
-    with open(table_path, "r", encoding="utf-8") as f:
-        for raw in f:
-            s = raw.strip()
-            if not s or s.startswith("#"):
-                continue
-            parts = s.split()
+@dataclass(frozen=True)
+class LammpsTableSection:
+    """One keyword-selected section from a LAMMPS table file."""
+
+    keyword: str
+    header_tokens: Tuple[str, ...]
+    x: np.ndarray
+    potential: np.ndarray
+    force: Optional[np.ndarray]
+    metadata: Dict[str, str] = field(default_factory=dict)
+
+
+def _update_acecg_metadata(raw: str, metadata: Dict[str, str]) -> None:
+    """Add metadata from one AceCG table comment to ``metadata`` in-place."""
+    stripped = raw.strip()
+    if not stripped.lower().startswith("# acecg-table "):
+        return
+    for token in stripped.split()[2:]:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        metadata[str(key)] = str(value)
+
+
+def _read_lammps_table_sections(
+    table_path: str | Path,
+    *,
+    table_styles: Optional[Mapping[str, str]] = None,
+    default_table_style: str | None = None,
+) -> list[LammpsTableSection]:
+    path = Path(table_path)
+    lines = path.read_text(encoding="utf-8").splitlines()
+    sections: list[LammpsTableSection] = []
+    pending_metadata: Dict[str, str] = {}
+    index = 0
+    while index < len(lines):
+        raw = lines[index]
+        stripped = raw.strip()
+        if not stripped:
+            index += 1
+            continue
+        if stripped.startswith("#"):
+            _update_acecg_metadata(raw, pending_metadata)
+            index += 1
+            continue
+        tokens = stripped.split()
+        numeric_row = (
+            len(tokens) in {3, 4}
+            and re.fullmatch(r"[+-]?\d+", tokens[0]) is not None
+        )
+        if numeric_row:
             try:
-                if len(parts) >= 4:
-                    float(parts[0])
-                    float(parts[1])
-                    float(parts[2])
-                    float(parts[3])
-                    r_list.append(float(parts[1]))
-                    v_list.append(float(parts[2]))
-                    f_list.append(float(parts[3]))
-                elif len(parts) == 3:
-                    try:
-                        r_list.append(float(parts[1]))
-                        v_list.append(float(parts[2]))
-                    except Exception:
-                        r_list.append(float(parts[0]))
-                        v_list.append(float(parts[1]))
-                        f_list.append(float(parts[2]))
-                elif len(parts) == 2:
-                    r_list.append(float(parts[0]))
-                    v_list.append(float(parts[1]))
+                [float(token) for token in tokens[1:]]
             except ValueError:
+                numeric_row = False
+        if numeric_row:
+            raise ValueError(
+                f"Numeric table row outside a declared section in {path}: "
+                f"{stripped!r}"
+            )
+
+        keyword = tokens[0]
+        header_index = index + 1
+        while header_index < len(lines):
+            header_text = lines[header_index].split("#", 1)[0].strip()
+            if header_text:
+                break
+            header_index += 1
+        if header_index >= len(lines):
+            raise ValueError(
+                f"Missing table header after section {keyword!r} in {path}"
+            )
+        header_tokens = tuple(header_text.split())
+        n_positions = [
+            position
+            for position, token in enumerate(header_tokens)
+            if token.upper() == "N"
+        ]
+        if not n_positions:
+            raise ValueError(
+                f"Missing N header in table section {keyword!r} of {path}"
+            )
+        if len(n_positions) != 1 or n_positions[0] + 1 >= len(header_tokens):
+            raise ValueError(
+                f"Invalid N header in table section {keyword!r} of {path}"
+            )
+        try:
+            n_rows = int(header_tokens[n_positions[0] + 1])
+        except ValueError as exc:
+            raise ValueError(
+                f"Invalid N header in table section {keyword!r} of {path}"
+            ) from exc
+        if n_rows < 1:
+            raise ValueError(
+                f"Table section {keyword!r} in {path} has invalid N={n_rows}"
+            )
+
+        rows: list[list[float]] = []
+        row_index = header_index + 1
+        while row_index < len(lines) and len(rows) < n_rows:
+            row_text = lines[row_index].split("#", 1)[0].strip()
+            row_index += 1
+            if not row_text:
                 continue
+            parts = row_text.split()
+            try:
+                values = [float(token) for token in parts]
+            except ValueError:
+                break
+            if len(values) not in {3, 4}:
+                raise ValueError(
+                    f"Expected 3 or 4 numeric columns in section {keyword!r} "
+                    f"of {path}, got {len(values)}"
+                )
+            rows.append(values)
+        if len(rows) != n_rows:
+            raise ValueError(
+                f"Table section {keyword!r} in {path} declares N={n_rows} "
+                f"but contains {len(rows)} numeric rows"
+            )
+        next_index = row_index
+        while next_index < len(lines):
+            next_text = lines[next_index].split("#", 1)[0].strip()
+            if next_text:
+                break
+            next_index += 1
+        if next_index < len(lines):
+            next_tokens = next_text.split()
+            if (
+                len(next_tokens) in {3, 4}
+                and re.fullmatch(r"[+-]?\d+", next_tokens[0]) is not None
+            ):
+                try:
+                    [float(token) for token in next_tokens[1:]]
+                except ValueError:
+                    pass
+                else:
+                    raise ValueError(
+                        f"Table section {keyword!r} in {path} declares N={n_rows} "
+                        "but contains additional numeric rows"
+                    )
 
-    if not r_list:
-        raise ValueError(f"No numeric (r,V) rows found in {table_path}")
+        widths = {len(row) for row in rows}
+        if len(widths) != 1:
+            raise ValueError(
+                f"Table section {keyword!r} in {path} mixes row widths"
+            )
+        values = np.asarray(rows, dtype=float)
+        x = values[:, 1]
+        potential = values[:, 2]
+        force = values[:, 3] if values.shape[1] == 4 else None
+        if np.any(~np.isfinite(x)) or np.any(~np.isfinite(potential)):
+            raise ValueError(f"Non-finite table values in section {keyword!r}")
+        if force is not None and np.any(~np.isfinite(force)):
+            raise ValueError(f"Non-finite force values in section {keyword!r}")
+        if np.any(np.diff(x) <= 0.0):
+            raise ValueError(
+                f"Coordinates in table section {keyword!r} must be strictly increasing"
+            )
+        if any(section.keyword == keyword for section in sections):
+            raise ValueError(f"Duplicate table keyword {keyword!r} in {path}")
+        section = LammpsTableSection(
+            keyword=keyword,
+            header_tokens=header_tokens,
+            x=x,
+            potential=potential,
+            force=force,
+            metadata=dict(pending_metadata),
+        )
+        declared_style = (
+            table_styles.get(keyword, default_table_style)
+            if table_styles is not None
+            else default_table_style
+        )
+        if str(declared_style or "").strip().lower() == "dihedral":
+            header_upper = {token.upper() for token in section.header_tokens}
+            if "DEGREES" in header_upper and "RADIANS" in header_upper:
+                raise ValueError(
+                    f"Dihedral table {path} cannot specify DEGREES and RADIANS"
+                )
+            if "DEGREES" not in header_upper:
+                converted_force = None
+                if section.force is not None:
+                    converted_force = np.asarray(section.force, dtype=float) * (
+                        np.pi / 180.0
+                    )
+                section = LammpsTableSection(
+                    keyword=section.keyword,
+                    header_tokens=section.header_tokens,
+                    x=np.degrees(np.asarray(section.x, dtype=float)),
+                    potential=np.asarray(section.potential, dtype=float),
+                    force=converted_force,
+                    metadata=dict(section.metadata),
+                )
+        sections.append(section)
+        pending_metadata.clear()
+        index = row_index
+    return sections
 
-    r = np.asarray(r_list, dtype=float)
-    v = np.asarray(v_list, dtype=float)
-    f = np.asarray(f_list, dtype=float) if f_list else None
 
-    mask = np.isfinite(r) & np.isfinite(v)
-    if f is not None:
-        mask &= np.isfinite(f)
-    r = r[mask]
-    v = v[mask]
-    f = f[mask] if f is not None else None
+def read_lammps_table_section(
+    table_path: str | Path,
+    *,
+    table_name: str | None = None,
+    table_style: str | None = None,
+) -> LammpsTableSection:
+    """Read one keyword-selected LAMMPS table section."""
+    style = str(table_style or "").strip().lower()
+    sections = _read_lammps_table_sections(
+        table_path,
+        table_styles=(
+            {str(table_name): style}
+            if table_name is not None and style
+            else None
+        ),
+        default_table_style=(style if table_name is None else None),
+    )
+    if not sections:
+        raise ValueError(f"No LAMMPS table sections found in {table_path}")
+    if table_name is None:
+        if len(sections) != 1:
+            names = [section.keyword for section in sections]
+            raise ValueError(
+                f"{table_path} contains multiple table sections {names}; "
+                "a table_name is required"
+            )
+        section = sections[0]
+    else:
+        matches = [
+            section for section in sections if section.keyword == str(table_name)
+        ]
+        if not matches:
+            raise KeyError(
+                f"Table keyword {table_name!r} was not found in {table_path}"
+            )
+        section = matches[0]
+    return section
 
-    order = np.argsort(r)
-    r = r[order]
-    v = v[order]
-    f = f[order] if f is not None else None
-    return r, v, f
+
+def parse_lammps_table(
+    table_path: str | Path,
+    table_name: str | None = None,
+    table_style: str | None = None,
+):
+    """Read one LAMMPS table section and return ``(x, V, F)``."""
+    section = read_lammps_table_section(
+        table_path,
+        table_name=table_name,
+        table_style=table_style,
+    )
+    return section.x.copy(), section.potential.copy(), (
+        None if section.force is None else section.force.copy()
+    )
+
+
+def _write_lammps_table_sections(
+    path: str | Path,
+    sections: Sequence[LammpsTableSection],
+    *,
+    comment: str | None = None,
+) -> None:
+    """Serialize a complete ordered section sequence to a new stage path."""
+    destination = Path(path)
+    seen: set[str] = set()
+    prepared: list[
+        tuple[LammpsTableSection, np.ndarray, np.ndarray, Optional[np.ndarray]]
+    ] = []
+    for section in sections:
+        keyword = str(section.keyword)
+        if not keyword or any(char.isspace() for char in keyword):
+            raise ValueError(f"Invalid LAMMPS table keyword {keyword!r}")
+        if keyword in seen:
+            raise ValueError(f"Duplicate table keyword {keyword!r}")
+        seen.add(keyword)
+        x = np.asarray(section.x, dtype=float)
+        potential = np.asarray(section.potential, dtype=float)
+        force = (
+            None
+            if section.force is None
+            else np.asarray(section.force, dtype=float)
+        )
+        if x.ndim != 1 or potential.ndim != 1 or x.shape != potential.shape:
+            raise ValueError(
+                f"Table section {keyword!r} coordinates and potential must be "
+                "one-dimensional arrays with identical shapes"
+            )
+        if force is not None and (force.ndim != 1 or force.shape != x.shape):
+            raise ValueError(
+                f"Table section {keyword!r} force must match its coordinate shape"
+            )
+        if x.size < 1:
+            raise ValueError(f"Table section {keyword!r} must contain at least one row")
+        if np.any(~np.isfinite(x)) or np.any(~np.isfinite(potential)):
+            raise ValueError(f"Non-finite table values in section {keyword!r}")
+        if force is not None and np.any(~np.isfinite(force)):
+            raise ValueError(f"Non-finite force values in section {keyword!r}")
+        if np.any(np.diff(x) <= 0.0):
+            raise ValueError(
+                f"Coordinates in table section {keyword!r} must be strictly increasing"
+            )
+        header_tokens = tuple(str(token) for token in section.header_tokens)
+        n_positions = [
+            position
+            for position, token in enumerate(header_tokens)
+            if token.upper() == "N"
+        ]
+        if len(n_positions) != 1 or n_positions[0] + 1 >= len(header_tokens):
+            raise ValueError(f"Invalid N header in table section {keyword!r}")
+        try:
+            declared_rows = int(header_tokens[n_positions[0] + 1])
+        except ValueError as exc:
+            raise ValueError(f"Invalid N header in table section {keyword!r}") from exc
+        if declared_rows != x.size:
+            raise ValueError(
+                f"Table section {keyword!r} declares N={declared_rows} "
+                f"but contains {x.size} rows"
+            )
+        prepared.append((section, x, potential, force))
+
+    created = False
+    try:
+        with destination.open("x", encoding="utf-8") as handle:
+            created = True
+            if comment is not None:
+                for line in str(comment).splitlines():
+                    handle.write(f"# {line}\n")
+            for section, x, potential, force in prepared:
+                if section.metadata:
+                    payload = " ".join(
+                        f"{key}={section.metadata[key]}"
+                        for key in sorted(section.metadata)
+                    )
+                    handle.write(f"# ACECG-TABLE {payload}\n")
+                handle.write(f"\n{section.keyword}\n")
+                handle.write(" ".join(section.header_tokens) + "\n\n")
+                if force is None:
+                    for row, (coordinate, value) in enumerate(
+                        zip(x, potential), start=1
+                    ):
+                        handle.write(
+                            f"{row:6d}  {coordinate:16.8f}  {value:16.8e}\n"
+                        )
+                else:
+                    for row, (coordinate, value, force_value) in enumerate(
+                        zip(x, potential, force), start=1
+                    ):
+                        handle.write(
+                            f"{row:6d}  {coordinate:16.8f}  {value:16.8e}  "
+                            f"{force_value:16.8e}\n"
+                        )
+    except Exception as exc:
+        if created and destination.exists():
+            try:
+                destination.unlink()
+            except Exception as cleanup_exc:
+                exc.add_note(f"Failed to remove table stage {destination}: {cleanup_exc}")
+        raise
 
 
 def write_lammps_table(
@@ -160,8 +483,9 @@ def write_lammps_table(
     table_style: str = "pair",
     eq: float | None = None,
     fp: Tuple[float, float] | None = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Write a LAMMPS-style pair, bond, or angle table file.
+    """Write a LAMMPS-style pair, bond, angle, or dihedral table file.
 
     Parameters
     ----------
@@ -174,7 +498,7 @@ def write_lammps_table(
         Comment text written above the table.
     table_name : str, default="Table1"
         LAMMPS table section name.
-    table_style : {"pair", "bond", "angle"}, default="pair"
+    table_style : {"pair", "bond", "angle", "dihedral"}, default="pair"
         Header format to write.
     eq : float, optional
         Equilibrium coordinate for bonded table headers.
@@ -184,76 +508,68 @@ def write_lammps_table(
     r = np.asarray(r, dtype=float)
     V = np.asarray(V, dtype=float)
     F = np.asarray(F, dtype=float)
+    if r.ndim != 1 or V.ndim != 1 or F.ndim != 1:
+        raise ValueError("r, V, F must be one-dimensional arrays")
     if r.shape != V.shape or r.shape != F.shape:
         raise ValueError("r, V, F must have the same shape")
 
     style = str(table_style).lower()
-    if style not in {"pair", "bond", "angle"}:
+    if style not in {"pair", "bond", "angle", "dihedral"}:
         raise ValueError(f"Unsupported LAMMPS table style: {table_style!r}")
-
-    with open(filename, "w", encoding="utf-8") as f:
-        if comment is not None:
-            for line in comment.splitlines():
-                f.write(f"# {line}\n")
-
-        npoints = len(r)
-        f.write(f"\n{table_name}\n")
-        if style == "pair":
-            f.write(f"N {npoints} R {r[0]:.6f} {r[-1]:.6f}\n\n")
-        else:
-            header_parts = [f"N {npoints}"]
-            if fp is not None:
-                header_parts.append(f"FP {float(fp[0]):.8e} {float(fp[1]):.8e}")
-            if eq is not None:
-                header_parts.append(f"EQ {float(eq):.8f}")
-            f.write(" ".join(header_parts) + "\n\n")
-
-        for i, (ri, vi, fi) in enumerate(zip(r, V, F), start=1):
-            f.write(f"{i:6d}  {ri:16.8f}  {vi:16.8e}  {fi:16.8e}\n")
-
-
-def write_lammps_table_bundle(
-    outdir: str | Path,
-    tables: Dict[str, Dict[str, Any]],
-) -> Dict[str, str]:
-    """Write a collection of LAMMPS table payloads.
-
-    Parameters
-    ----------
-    outdir : str or Path
-        Directory where ``*.table`` files are written.
-    tables : dict
-        Mapping from table stem to payload dictionaries containing ``r``,
-        ``V``, ``F``, and optional style/header metadata.
-
-    Returns
-    -------
-    dict[str, str]
-        Mapping from table stem to written file path.
-    """
-    out_path = Path(outdir)
-    out_path.mkdir(parents=True, exist_ok=True)
-
-    files: Dict[str, str] = {}
-    for stem, item in tables.items():
-        style = str(item.get("style", "pair")).lower()
-        if style == "dihedral":
-            raise ValueError(f"LAMMPS dihedral table export is not supported for {stem!r}")
-        table_file = out_path / f"{stem}.table"
-        write_lammps_table(
-            filename=str(table_file),
-            r=np.asarray(item["r"], dtype=float),
-            V=np.asarray(item["V"], dtype=float),
-            F=np.asarray(item["F"], dtype=float),
-            comment=str(item.get("comment", "LAMMPS Table written by AceCG")),
-            table_name=str(item.get("table_name", stem)),
-            table_style=style,
-            eq=float(item["eq"]) if item.get("eq") is not None else None,
-            fp=tuple(item["fp"]) if item.get("fp") is not None else None,
+    if np.any(~np.isfinite(r)) or np.any(~np.isfinite(V)) or np.any(~np.isfinite(F)):
+        raise ValueError("LAMMPS table coordinates, potential, and force must be finite")
+    if r.size < 2 or np.any(np.diff(r) <= 0.0):
+        raise ValueError("LAMMPS table coordinates must be strictly increasing")
+    if style == "dihedral":
+        span = float(r[-1] - r[0])
+        if span >= 360.0 - 1.0e-10:
+            raise ValueError(
+                "LAMMPS dihedral table angle span must be strictly less than 360 degrees"
+            )
+        wrapped = (r - r[0]) % 360.0
+        if np.unique(np.round(wrapped, 10)).size != r.size:
+            raise ValueError("LAMMPS dihedral table contains congruent angle entries")
+    npoints = len(r)
+    if style == "pair":
+        header_tokens = (
+            "N",
+            str(npoints),
+            "R",
+            f"{r[0]:.6f}",
+            f"{r[-1]:.6f}",
         )
-        files[str(stem)] = str(table_file)
+    elif style in {"bond", "angle"}:
+        header_parts = ["N", str(npoints)]
+        if fp is not None:
+            header_parts.extend(
+                ("FP", f"{float(fp[0]):.8e}", f"{float(fp[1]):.8e}")
+            )
+        if eq is not None:
+            header_parts.extend(("EQ", f"{float(eq):.8f}"))
+        header_tokens = tuple(header_parts)
+    else:
+        header_tokens = ("N", str(npoints), "DEGREES")
 
-    return files
+    destination = Path(filename)
+    stage = destination.with_name(f".{destination.name}.acecg-stage")
+    section = LammpsTableSection(
+        keyword=str(table_name),
+        header_tokens=header_tokens,
+        x=r,
+        potential=V,
+        force=F,
+        metadata={str(key): str(value) for key, value in (metadata or {}).items()},
+    )
+    _write_lammps_table_sections(stage, (section,), comment=comment)
+    try:
+        os.replace(stage, destination)
+    except Exception as exc:
+        if stage.exists():
+            try:
+                stage.unlink()
+            except Exception as cleanup_exc:
+                exc.add_note(f"Failed to remove table stage {stage}: {cleanup_exc}")
+        raise
 
 
 def interaction_table_stem(style: str, types: Sequence[str]) -> str:
@@ -380,6 +696,11 @@ def _fm_bspline_force_and_value(
 ) -> Tuple[np.ndarray, np.ndarray]:
     style = str(spec.get("style", "")).lower()
     model = str(spec.get("model", "")).lower()
+    if style == "dihedral":
+        return (
+            np.asarray(pot.value(x_out), dtype=float),
+            np.asarray(pot.force(x_out), dtype=float),
+        )
     if model != "bspline":
         return np.asarray(pot.value(x_out), dtype=float), np.asarray(pot.force(x_out), dtype=float)
 
@@ -451,8 +772,7 @@ def build_forcefield_tables(
     Returns
     -------
     dict
-        Payload with a ``"tables"`` mapping ready for
-        :func:`write_lammps_table_bundle`.
+        Payload with a ``"tables"`` mapping ready for :func:`export_tables`.
     """
     from ..potentials.base import IteratePotentials
 
@@ -480,6 +800,11 @@ def build_forcefield_tables(
             "comment": f"AceCG FM export for {key.style}:{':'.join(key.types)}",
             "model_min": float(spec.get("min", x[0])),
             "model_max": float(spec.get("max", x[-1])),
+            "metadata": (
+                pot.table_metadata()
+                if hasattr(pot, "table_metadata")
+                else {}
+            ),
         }
     return payload
 
@@ -517,23 +842,26 @@ def export_tables(
     if not isinstance(tables_raw, dict):
         raise ValueError("forcefield table payload is missing 'tables' dictionary")
 
-    bundle: Dict[str, Dict[str, Any]] = {}
+    out_path = Path(outdir)
+    out_path.mkdir(parents=True, exist_ok=True)
+    written: Dict[str, str] = {}
     for stem, item in tables_raw.items():
         if not isinstance(item, dict):
             raise ValueError(f"table payload for {stem!r} is not a dictionary")
-        bundle[str(stem)] = {
-            "style": str(item.get("style", "pair")),
-            "r": np.asarray(item["r"], dtype=float),
-            "V": np.asarray(item["V"], dtype=float),
-            "F": np.asarray(item["F"], dtype=float),
-            "comment": str(item.get("comment", f"AceCG FM export for {stem}")),
-            "table_name": str(item.get("table_name", stem)),
-            "eq": float(item["eq"]) if item.get("eq") is not None else None,
-            "fp": tuple(item["fp"]) if item.get("fp") is not None else None,
-        }
-
-    out_path = Path(outdir)
-    written = write_lammps_table_bundle(str(out_path), bundle)
+        table_file = out_path / f"{stem}.table"
+        write_lammps_table(
+            filename=table_file,
+            r=np.asarray(item["r"], dtype=float),
+            V=np.asarray(item["V"], dtype=float),
+            F=np.asarray(item["F"], dtype=float),
+            comment=str(item.get("comment", f"AceCG FM export for {stem}")),
+            table_name=str(item.get("table_name", stem)),
+            table_style=str(item.get("style", "pair")),
+            eq=float(item["eq"]) if item.get("eq") is not None else None,
+            fp=tuple(item["fp"]) if item.get("fp") is not None else None,
+            metadata=dict(item.get("metadata", {})),
+        )
+        written[str(stem)] = str(table_file)
 
     manifest: Dict[str, Any] = {"tables": {}}
     for stem, item in tables_raw.items():
@@ -602,6 +930,8 @@ def _interaction_table_filename(style: str, types: Sequence[str]) -> str:
         return f"{labels[0]}_{labels[1]}_bon.table"
     if style_key == "angle":
         return f"{labels[0]}_{labels[1]}_{labels[2]}_ang.table"
+    if style_key == "dihedral":
+        return f"{'_'.join(labels)}_dih.table"
     raise ValueError(f"Unsupported interaction style {style!r}")
 
 
@@ -644,90 +974,10 @@ def _extend_table_constant_force_tail(
     )
 
 
-def cap_table_forces(
-    table_path: str | Path,
-    max_force: float = 100.0,
-    scale: float = 1.0,
-) -> None:
-    """Clamp force values in an existing LAMMPS table file.
-
-    Parameters
-    ----------
-    table_path : str or Path
-        Table file to edit in place.
-    max_force : float, default=100.0
-        Absolute force cap.
-    scale : float, default=1.0
-        Optional multiplier applied before clipping.
-    """
-    max_f = abs(float(max_force))
-    scale_f = float(scale)
-    path = Path(table_path)
-    raw = path.read_text(encoding="utf-8")
-
-    header_lines: list[str] = []
-    data_lines: list[str] = []
-    table_name = ""
-    in_header = True
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            if in_header:
-                header_lines.append(line)
-            continue
-        if stripped.startswith("#"):
-            header_lines.append(line)
-            continue
-        parts = stripped.split()
-        if in_header:
-            try:
-                float(parts[0])
-                in_header = False
-                data_lines.append(line)
-            except ValueError:
-                if parts[0] == "N":
-                    in_header = False
-                else:
-                    table_name = stripped
-                continue
-        else:
-            if parts[0] == "N":
-                continue
-            data_lines.append(line)
-
-    r_list, f_list = [], []
-    for line in data_lines:
-        parts = line.split()
-        if len(parts) >= 4:
-            try:
-                r_list.append(float(parts[1]))
-                f_list.append(float(parts[3]))
-            except ValueError:
-                continue
-
-    if not r_list:
-        return
-
-    r = np.asarray(r_list, dtype=float)
-    f = np.asarray(f_list, dtype=float)
-    f_scaled = f * scale_f
-    f_capped = np.clip(f_scaled, -max_f, max_f)
-    v = integrate_force_to_potential(r, f_capped)
-
-    write_lammps_table(
-        filename=str(path),
-        r=r,
-        V=v,
-        F=f_capped,
-        comment="\n".join(l.lstrip("# ") for l in header_lines if l.strip().startswith("#"))
-        or f"Force-capped table (max_force={max_f})",
-        table_name=table_name,
-        table_style="pair",
-    )
-
-
 __all__ = [
+    "LammpsTableSection",
     "parse_lammps_table",
+    "read_lammps_table_section",
     "integrate_force_to_potential",
     "constant_force_extrapolate",
     "export_grid",
@@ -736,8 +986,6 @@ __all__ = [
     "build_forcefield_tables",
     "export_tables",
     "compare_table_files",
-    "cap_table_forces",
     "write_lammps_table",
-    "write_lammps_table_bundle",
     "estimate_table_fp",
 ]

@@ -9,6 +9,7 @@ from .rdf import (
     interaction_distributions,
     multi_source_interaction_distributions,
 )
+from .spectral_rdf import SpectralRDFResult
 
 __all__ = [
     "DistributionResult",
@@ -18,4 +19,5 @@ __all__ = [
     "dihedral_distributions",
     "interaction_distributions",
     "multi_source_interaction_distributions",
+    "SpectralRDFResult",
 ]

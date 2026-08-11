@@ -23,6 +23,8 @@ examples.
 - `templates/cdrem_prod.acg`: DOPC CDREM template
 - `templates/cdfm_prod.acg`: DOPC CDFM template using paired init config and
   force pools
+- `templates/trajmap_optimal_force.acg`: AA-to-CG trajectory mapping with a
+  constraint-aware optimal linear force-map fit and portable artifact
 - `templates/tutorial.acg`: parser reference and commented workflow examples
 
 Some templates and commented examples contain placeholder input/output paths.

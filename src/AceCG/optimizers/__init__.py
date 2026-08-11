@@ -3,3 +3,4 @@ from .rmsprop import RMSpropMaskedOptimizer
 from .newton_raphson import NewtonRaphsonOptimizer
 from .adam import AdamMaskedOptimizer
 from .adamW import AdamWMaskedOptimizer
+from .sgd import SGDMaskedOptimizer

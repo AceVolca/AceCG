@@ -20,7 +20,15 @@ KNOWN_EXCEPTIONS: set[Tuple[str, str]] = {
     # Canonical PBC wrap lives with the other coordinate/PBC helpers in
     # io.coordinates; the noise path reuses it instead of a duplicate.
     ("compute/mpi_engine.py", "AceCG.io.coordinates"),
-    ("compute/vp_prepare.py", "AceCG.io.trajectory"),
+    # The AA→CG kernel uses the same canonical box classifier, minimum-image
+    # operation, and final coordinate wrap rather than duplicating PBC math.
+    ("compute/cgmap.py", "AceCG.io.coordinates"),
+    # Accepted concrete transformation terminals call their scientific owner;
+    # this is one exact edge, not an exemption for the IO layer.
+    ("io/trajmap.py", "AceCG.compute.cgmap"),
+    # P07's force-map operation reuses the shared frame record and PBC math.
+    ("compute/force_mapping.py", "AceCG.io.trajectory"),
+    ("compute/force_mapping.py", "AceCG.io.coordinates"),
 }
 
 
@@ -124,3 +132,22 @@ def test_no_layer_violations():
         if "__pycache__" not in str(f)
     )
     assert n_files > 0, "No files were scanned — check SRC_ROOT path"
+
+
+def test_vp_growth_has_one_io_terminal_and_no_compute_compatibility_module():
+    terminal_path = SRC_ROOT / "io" / "vp_growth.py"
+    tree = ast.parse(terminal_path.read_text(encoding="utf-8"))
+    operations = [
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    assert operations == ["grow_vp_trajectory"]
+    assert not any(isinstance(node, ast.ClassDef) for node in tree.body)
+    assert not (SRC_ROOT / "compute" / "vp_prepare.py").exists()
+    imported = {module for _, module in collect_imports(terminal_path)}
+    assert not any(
+        module == prefix or module.startswith(prefix + ".")
+        for module in imported
+        for prefix in ("AceCG.compute", "AceCG.workflows")
+    )

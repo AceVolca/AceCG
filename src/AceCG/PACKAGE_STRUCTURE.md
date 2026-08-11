@@ -8,20 +8,26 @@ AceCG/	# Main package root
 ├── PACKAGE_STRUCTURE.md	# Source package structure overview
 ├── analysis/	# Analysis utilities for distributions and observables
 │	├── __init__.py	# Analysis package exports
-│	└── rdf.py	# Pair, bond, angle, dihedral, and interaction distribution tools
+│	├── fm_validation.py	# Full-frame FM and generated-table production validation
+│	├── fm_residuals.py	# MPI force-matching residual decomposition by bead type
+│	├── force_mapping.py	# Fitted force-map reapplication validation
+│	├── rdf.py	# Pair, bond, angle, dihedral, and interaction distribution tools
+│	└── spectral_rdf.py	# Spectral RDF coefficient accumulation
 ├── compute/	# Frame-level compute engine and reducers
 │	├── __init__.py	# Compute package exports
+│	├── cgmap.py	# Vectorized per-frame AA-to-CG mapping kernel
+│	├── force_mapping.py	# Constraint-aware optimal linear AA-to-CG force maps
 │	├── energy.py	# Energy, energy-gradient, Hessian, and gradient-outer computations
 │	├── force.py	# Force, force-gradient, and force-matching statistics
 │	├── frame_geometry.py	# Per-frame geometry extraction from topology and coordinates
 │	├── mpi_engine.py	# MPI-aware compute engine and default engine builder
 │	├── requests.py	# Canonical compute request names and kernel keyword mappings
-│	├── reducers.py	# One-pass reducer helpers and canonical compute request mapping
-│	└── vp_prepare.py	# Virtual-particle preparation helpers for compute workflows
+│	└── reducers.py	# One-pass reducer helpers and canonical compute request mapping
 ├── configs/	# ACG and VP configuration parsing
 │	├── __init__.py	# Config package exports
 │	├── models.py	# Frozen dataclass models for parsed AceCG configs
 │	├── parser.py	# `.acg` parser and validation logic
+│	├── trajmap_config.py	# Trajectory-mapping workflow config parser/model
 │	├── utils.py	# Config parsing utilities
 │	├── vp_config.py	# Virtual-particle topology config parser/model
 │	└── vp_growth_config.py	# VP-growth workflow config parser/model
@@ -40,8 +46,9 @@ AceCG/	# Main package root
 │	├── lammps_input.py	# Lightweight LAMMPS input decomment/token/include utilities
 │	├── logger.py	# Small timestamped screen logger
 │	├── tables.py	# LAMMPS table parsing, writing, conversion, and comparison
-│	├── trajectory.py	# LAMMPS trajectory loading and splitting helpers
-│	└── vp_ffbuilder.py	# VP forcefield-building helpers
+│	├── trajectory.py	# FrameRecord, shared MPI reader, loading, and splitting
+│	├── vp_ffbuilder.py	# VP forcefield/table inventory and writers
+│	└── vp_growth.py	# VP trajectory transformation and manifest-last publication terminal
 ├── optimizers/	# Masked optimizers over the global parameter vector
 │	├── __init__.py	# Optimizer exports
 │	├── adam.py	# Masked Adam optimizer
@@ -56,6 +63,7 @@ AceCG/	# Main package root
 │	├── __init__.py	# Potential exports and LAMMPS-style registry
 │	├── base.py	# BasePotential interface and potential iterator helper
 │	├── bspline.py	# Force-basis B-spline potential
+│	├── dihedral_bspline.py	# Signed cyclic/compact tabulated-dihedral B-spline potential
 │	├── gaussian.py	# Single normalized Gaussian potential
 │	├── harmonic.py	# Harmonic bond/angle potential
 │	├── lennardjones.py	# Lennard-Jones 12-6 potential
@@ -84,7 +92,10 @@ AceCG/	# Main package root
 │	└── fm_matrix.py	# OLS, ridge, and Bayesian FM matrix solver
 ├── topology/	# Topology keys, forcefield container, neighbor lists, and VP growth
 │	├── __init__.py	# Topology public API
+│	├── cgmap.py	# Mapping YAML compiler and residue/group CG topology schema
+│	├── cgmap_builder.py	# Mapping authoring and GROMACS ITP conversion
 │	├── forcefield.py	# Canonical InteractionKey-to-potential-list forcefield container
+│	├── force_map.py	# Shared template layouts and portable fitted-map artifacts
 │	├── mscg.py	# MSCG topology parsing and replicated topology helpers
 │	├── neighbor.py	# Pair and neighbor-list construction helpers
 │	├── topology_array.py	# Immutable topology arrays for MPI workers
@@ -112,6 +123,7 @@ AceCG/	# Main package root
 	├── fm.py	# Force-matching workflow
 	├── rem.py	# REM workflow
 	├── sampling.py	# Shared sampling-workflow base class
+	├── trajmap.py	# MPI AA-to-CG trajectory-mapping workflow and CLI
 	└── vp_growth.py	# VP growth workflow and CLI entry points
 ```
 

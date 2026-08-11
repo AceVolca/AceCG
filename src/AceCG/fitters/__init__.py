@@ -7,7 +7,12 @@ registry is populated before a workflow asks for a named fitter profile.
 """
 
 from .base import BaseTableFitter, FitterRegistry, TABLE_FITTERS
-from .fit_bspline import BSplineConfig, BSplineTableFitter
+from .fit_bspline import (
+    BSplineConfig,
+    BSplineTableFitter,
+    DihedralBSplineConfig,
+    DihedralBSplineTableFitter,
+)
 from .fit_harmonic import HarmonicTableFitter
 from .fit_multi_gaussian import MultiGaussianTableFitter
 
@@ -17,6 +22,8 @@ __all__ = [
 	"TABLE_FITTERS",
 	"BSplineConfig",
 	"BSplineTableFitter",
+	"DihedralBSplineConfig",
+	"DihedralBSplineTableFitter",
 	"HarmonicTableFitter",
 	"MultiGaussianTableFitter",
 ]

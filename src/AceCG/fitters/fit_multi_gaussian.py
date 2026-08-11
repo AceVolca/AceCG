@@ -108,7 +108,15 @@ class MultiGaussianTableFitter(BaseTableFitter):
         """Return this fitter's registry profile name."""
         return "multigaussian"
 
-    def fit(self, table_path: str, typ1: str, typ2: str) -> MultiGaussianPotential:
+    def fit(
+        self,
+        table_path: str,
+        typ1: str,
+        typ2: str,
+        *,
+        table_name: str | None = None,
+        **_kwargs,
+    ) -> MultiGaussianPotential:
         """
 		Fit a MultiGaussianPotential to LAMMPS table data (r, V[, F]) with
 		optional cutoff anchoring and repulsive component constraints.
@@ -127,7 +135,7 @@ class MultiGaussianTableFitter(BaseTableFitter):
 		pot : MultiGaussianPotential
 			The fitted potential object.
 		"""
-        r, V, _ = parse_lammps_table(table_path)
+        r, V, _ = parse_lammps_table(table_path, table_name=table_name)
         cfg = self.cfg
         n_gauss = int(cfg.n_gauss)
 

@@ -1,6 +1,6 @@
 # 00 AceCG Software Architecture
 
-*Updated: 2026-06-15. Merged and expanded from draw.md (2026-04-03).*
+*Updated: 2026-08-11. Merged and expanded from draw.md (2026-04-03).*
 
 > This is the top-level architecture document for AceCG and is the recommended first document to read before diving into the code.
 
@@ -19,7 +19,7 @@ Core design principle: **each layer owns only its own concerns, exposes stable A
 ```text
 L6  Workflow
     workflows/base.py, sampling.py, rem.py, cdrem.py,
-    fm.py, dsm.py, cdfm.py, vp_growth.py
+    fm.py, dsm.py, cdfm.py, vp_growth.py, trajmap.py
 
 L5  Scheduler / Task Runner
     schedulers/task_scheduler.py, task_runner.py,
@@ -28,28 +28,34 @@ L5  Scheduler / Task Runner
 L4  Trainers / Solvers / Optimizers
     trainers/analytic/{rem,mse,fm,cdrem,cdfm,l_zero,multi}.py
     solvers/fm_matrix.py
-    optimizers/{adam,adamW,rmsprop,newton_raphson}.py
+    optimizers/{adam,adamW,rmsprop,newton_raphson,sgd}.py
 
 L3  Compute Runtime
     compute/mpi_engine.py
     compute/frame_geometry.py, energy.py, force.py
-    compute/reducers.py, requests.py
-    analysis/rdf.py
+    compute/reducers.py, requests.py, cgmap.py, force_mapping.py
+    analysis/rdf.py, spectral_rdf.py, spectral_basis.py, fm_residuals.py
 
 L2  I/O + Config
     io/trajectory.py, forcefield.py, coordinates.py
-    io/tables.py, lammps_input.py, logger.py
-    configs/parser.py, models.py, vp_config.py
+    io/tables.py, lammps_input.py, logger.py, trajmap.py, force_operator.py
+    configs/parser.py, models.py, vp_config.py, trajmap_config.py
 
 L1  Topology / Forcefield
     topology/types.py, topology_array.py, forcefield.py
-    topology/neighbor.py, mscg.py
+    topology/neighbor.py, mscg.py, cgmap.py, cgmap_builder.py
 
 L0  Potentials / Fitters / Samplers
-    potentials/{harmonic,bspline,gaussian,gated,lj,...}.py
+    potentials/{harmonic,bspline,dihedral_bspline,gaussian,gated,lj,...}.py
     fitters/{fit_bspline,fit_harmonic,fit_multi_gaussian}.py
     samplers/base.py, conditioned.py
 ```
+
+`cgmap.py` (topology + compute), `cgmap_builder.py`, `trajmap.py` (io +
+workflows), `trajmap_config.py`, and `force_mapping.py` / `force_operator.py`
+are the TrajMap / linear force-mapping feature — a trajectory
+*transformation*, not a training workflow, so it does not fit neatly into one
+layer above. See [12_trajmap.md](12_trajmap.md) for its own architecture.
 
 ---
 
@@ -64,6 +70,7 @@ This layer does not depend on any other AceCG module. It is the leaf layer of th
 | `potentials/base.py` | `BasePotential` abstract base class and `IteratePotentials` helper |
 | `potentials/harmonic.py` | Harmonic bonded / angle potential |
 | `potentials/bspline.py` | Force-basis B-spline potential; all parameters are linear |
+| `potentials/dihedral_bspline.py` | Signed periodic/compact dihedral force basis with a zero-integral cyclic constraint |
 | `potentials/gaussian.py` | Normalized Gaussian pair potential |
 | `potentials/gated.py` | Hard-concrete gate wrapper for interaction sparsification experiments |
 | `potentials/lj*.py` | LJ 12-6 / 9-6 / soft-core families |
@@ -140,7 +147,7 @@ This is the numerical core of the system. See [03_compute.md](03_compute.md) and
 
 | File | Responsibility |
 |---|---|
-| `compute/mpi_engine.py` | `MPIComputeEngine`, `FrameCache`, `TrajectoryCache`; legacy aliases: `FrameObservables`, `TrajectoryObservablesCache` |
+| `compute/mpi_engine.py` | `MPIComputeEngine`, `FrameCache`, `TrajectoryCache` |
 | `compute/frame_geometry.py` | `FrameGeometry`, an immutable per-frame geometry view |
 | `compute/energy.py` | `energy()` kernel |
 | `compute/force.py` | `force()` kernel |
@@ -287,7 +294,7 @@ AA trajectory (.lammpstrj)
            +-- step_mode="cdrem"     -> same reducer path as rem
            +-- step_mode="cdfm_zbx"  -> reducers.init_cdfm_zbx_state / ...
            |                           rank 0 computes y_eff first
-           +-- step_mode="rdf"       -> analysis/rdf.py, outside one-pass pipeline
+           +-- step_mode="rdf"       -> reducers.init_rdf_state / consume_rdf_frame
                     |
                     | local partials
                     v

@@ -70,7 +70,10 @@ def potential_style_labels(pot: Any) -> set[str]:
         for style, cls in POTENTIAL_REGISTRY.items():
             if isinstance(target, cls):
                 inferred.add(str(style).strip().lower())
-        if type(target).__name__ == "BSplinePotential":
+        if type(target).__name__ in {
+            "BSplinePotential",
+            "DihedralBSplinePotential",
+        }:
             inferred.add("table")
     return inferred
 

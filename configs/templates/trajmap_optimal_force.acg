@@ -1,0 +1,46 @@
+# Reusable AA-to-CG trajmap template with aggforce-style optimal force mapping.
+# Copy into experiments/<level>/<run_id>/ before use and replace every path.
+
+[aa]
+topology = /path/to/aa.tpr
+trajectory_files = /path/to/force-bearing-aa.trr
+trajectory_format = TRR
+skip_frames = 0
+every = 1
+n_frames = 0
+include_forces = true
+include_velocities = false
+
+[mapping]
+map_file = /path/to/map.yaml
+index_base = 0
+mol_reference = first
+resname = CG
+# Set false when every site declares x-weight and the topology is supplied only
+# for constraints; this avoids parsing a very large topology twice.
+use_topology_masses = false
+
+[force_mapping]
+method = optimal_linear
+scope = per_template
+backend = compare
+l2_regularization = 0.0
+constraints = h-bonds
+constraint_algorithm = LINCS
+fit_every = 1
+fit_n_frames = 0
+artifact_name = force_map.npz
+max_covariance_bytes = 2147483648
+
+[trajmap]
+output_dir = results/trajmap
+trajectory_name = cg.trr
+topology_name = cg.data
+write_gro = true
+unwrap = molecule
+wrap = true
+triclinic = exact
+precision = float64
+merge_segments = true
+keep_segments = false
+overwrite = false

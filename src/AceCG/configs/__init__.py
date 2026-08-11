@@ -17,6 +17,15 @@ from .parser import (
     parse_acg_file,
     parse_acg_text,
 )
+from .trajmap_config import (
+    TrajMapAA,
+    TrajMapConfig,
+    TrajMapForceMapping,
+    TrajMapMapping,
+    TrajMapRun,
+    parse_trajmap_file,
+    parse_trajmap_text,
+)
 from .vp_config import VPConfig, parse_vp_config
 from .vp_growth_config import (
     VPGrowthAARef,
@@ -29,6 +38,11 @@ from .vp_growth_config import (
 __all__ = [
     "ACGConfig",
     "ACGConfigError",
+    "TrajMapAA",
+    "TrajMapConfig",
+    "TrajMapForceMapping",
+    "TrajMapMapping",
+    "TrajMapRun",
     "VPConfig",
     "VPGrowthAARef",
     "VPGrowthConfig",
@@ -36,8 +50,9 @@ __all__ = [
     "build_acg_config",
     "parse_acg_file",
     "parse_acg_text",
+    "parse_trajmap_file",
+    "parse_trajmap_text",
     "parse_vp_config",
     "parse_vp_growth_file",
     "parse_vp_growth_text",
 ]
-

@@ -1,6 +1,6 @@
 # 01 Potential Module Developer Reference
 
-*Updated: 2026-05-06.*
+*Updated: 2026-08-03.*
 
 Potentials are the lowest-level scalar interaction models in the modeling stack. Each potential evaluates one interaction coordinate and exposes parameter derivatives for `compute/`, trainers, and solvers. A potential does not know about MPI, `FrameGeometry`, atom ownership, or workflows.
 
@@ -18,6 +18,7 @@ Potentials are the lowest-level scalar interaction models in the modeling stack.
 | `potentials/lennardjones96.py` | Lennard-Jones 9-6 pair potential |
 | `potentials/lennardjones_soft.py` | Soft-core LJ variant |
 | `potentials/bspline.py` | Force-basis B-spline potential |
+| `potentials/dihedral_bspline.py` | Signed periodic/compact force-basis dihedral potential |
 | `potentials/multi_gaussian.py` | Normalized multi-Gaussian family |
 | `potentials/unnormalized_multi_gaussian.py` | Unnormalized LAMMPS-style multi-Gaussian |
 | `potentials/srlrgaussian.py` | SR/LR Gaussian pair potential |
@@ -66,6 +67,7 @@ A potential should not own:
 | `BasePotential` | Abstract base class |
 | `IteratePotentials` | Flattened `(key, potential)` iteration helper |
 | `BSplinePotential` | Force-basis spline |
+| `DihedralBSplinePotential` | Signed cyclic/compact dihedral force-basis spline |
 | `GaussianPotential` | Normalized Gaussian |
 | `HarmonicPotential` | Harmonic potential |
 | `GatedPotential`, `wrap_forcefield_with_L0_gates` | Hard-concrete gated interaction wrappers |
@@ -208,6 +210,7 @@ These classes expose explicit analytic first and second derivatives.
 | Class | Notes |
 |---|---|
 | `BSplinePotential` | Coefficients directly parameterize force; all channels are linear |
+| `DihedralBSplinePotential` | Coefficients parameterize signed-degree dihedral force with a zero-integral cyclic constraint |
 
 `BSplinePotential` is special because:
 
@@ -219,6 +222,13 @@ These classes expose explicit analytic first and second derivatives.
 - bonded splines use the gauge `min(U) = 0`
 - `gauge_free_energy_grad_sum*()` omits parameter-dependent bonded gauge
   shifts so REM can cache/use gauge-free energy gradients
+
+`DihedralBSplinePotential` uses the same linear force-basis contract on
+`[-180, 180)`. `boundary_mode="periodic"` wraps a full cyclic basis;
+`boundary_mode="cutoff"` makes energy, force, and parameter derivatives zero
+outside a strict sub-domain. Both remove one raw basis degree of freedom so
+the force integrates to zero over one turn and the energy is single-valued at
+the seam.
 
 ### Multi-Component Gaussian Family
 

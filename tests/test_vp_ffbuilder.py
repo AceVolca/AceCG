@@ -28,6 +28,7 @@ from AceCG.io.vp_ffbuilder import (
     _is_table,
     build_vp_forcefield,
     render_vp_latent_template,
+    vp_forcefield_inventory,
     write_latent_settings,
 )
 from AceCG.io.tables import parse_lammps_table
@@ -258,11 +259,13 @@ def test_render_vp_latent_template_bond_angle_astable():
 def test_write_latent_settings_round_trip(tmp_path):
     template = _make_template()
     cfg = _make_vp_config()
+    inventory = vp_forcefield_inventory(cfg, template)
     out_path = write_latent_settings(
         template=template, vp_config=cfg, output_dir=tmp_path,
         table_points=101, table_rmin=0.0, table_rmax=25.0,
     )
     assert out_path.exists()
+    assert {path.name for path in tmp_path.iterdir()} == set(inventory)
     content = out_path.read_text()
 
     # Five pair_coeff table lines emitted.
@@ -300,6 +303,29 @@ def test_write_latent_settings_bond_angle_astable_tables(tmp_path):
     assert "VP_HG_MG_ang.table" in content
     assert (tmp_path / "VP_MG_bon.table").exists()
     assert (tmp_path / "VP_HG_MG_ang.table").exists()
+
+
+def test_forcefield_inventory_exactly_matches_writer_files(tmp_path):
+    template = _make_astable_template()
+    config = _make_astable_vp_config()
+    inventory = vp_forcefield_inventory(
+        config, template, include_name="custom.settings"
+    )
+    write_latent_settings(
+        template=template,
+        vp_config=config,
+        output_dir=tmp_path,
+        table_points=101,
+        table_rmin=0.01,
+        table_rmax=25.0,
+        include_name="custom.settings",
+    )
+    assert inventory == (
+        "custom.settings",
+        "VP_MG_bon.table",
+        "VP_HG_MG_ang.table",
+    )
+    assert {path.name for path in tmp_path.iterdir()} == set(inventory)
 
 
 def test_write_latent_settings_angle_table_uses_degree_grid(tmp_path):

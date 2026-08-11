@@ -1,0 +1,523 @@
+TITLE     MDANALYSIS FRAME 0: Created by PDBWriter
+CRYST1  338.065  338.065   96.976  90.00  90.00  90.00 P 1           1
+ATOM      1  N   DPPCX   1      90.310  85.540  62.330  1.00  0.00      seg_ N  
+ATOM      2  C13 DPPCX   1      90.350  85.610  63.840  1.00  0.00      seg_ C  
+ATOM      3 H13A DPPCX   1      91.150  86.280  64.130  1.00  0.00      seg_ H  
+ATOM      4 H13B DPPCX   1      90.390  84.640  64.320  1.00  0.00      seg_ H  
+ATOM      5 H13C DPPCX   1      89.380  86.010  64.110  1.00  0.00      seg_ H  
+ATOM      6  C14 DPPCX   1      89.230  84.650  61.950  1.00  0.00      seg_ C  
+ATOM      7 H14A DPPCX   1      88.260  85.020  62.270  1.00  0.00      seg_ H  
+ATOM      8 H14B DPPCX   1      89.450  83.740  62.480  1.00  0.00      seg_ H  
+ATOM      9 H14C DPPCX   1      89.220  84.530  60.870  1.00  0.00      seg_ H  
+ATOM     10  C15 DPPCX   1      90.210  86.950  61.860  1.00  0.00      seg_ C  
+ATOM     11 H15A DPPCX   1      90.090  86.930  60.790  1.00  0.00      seg_ H  
+ATOM     12 H15B DPPCX   1      91.150  87.470  62.010  1.00  0.00      seg_ H  
+ATOM     13 H15C DPPCX   1      89.380  87.450  62.340  1.00  0.00      seg_ H  
+ATOM     14  C12 DPPCX   1      91.620  85.010  61.880  1.00  0.00      seg_ C  
+ATOM     15 H12A DPPCX   1      91.710  84.050  62.370  1.00  0.00      seg_ H  
+ATOM     16 H12B DPPCX   1      92.390  85.620  62.320  1.00  0.00      seg_ H  
+ATOM     17  C11 DPPCX   1      91.880  84.710  60.390  1.00  0.00      seg_ C  
+ATOM     18 H11A DPPCX   1      92.980  84.720  60.260  1.00  0.00      seg_ H  
+ATOM     19 H11B DPPCX   1      91.460  85.560  59.800  1.00  0.00      seg_ H  
+ATOM     20  P   DPPCX   1      92.200  82.390  59.160  1.00  0.00      seg_ P  
+ATOM     21  O13 DPPCX   1      91.550  81.100  59.340  1.00  0.00      seg_ O  
+ATOM     22  O14 DPPCX   1      93.650  82.500  59.540  1.00  0.00      seg_ O  
+ATOM     23  O11 DPPCX   1      92.130  82.850  57.620  1.00  0.00      seg_ O  
+ATOM     24  O12 DPPCX   1      91.330  83.500  59.950  1.00  0.00      seg_ O  
+ATOM     25  C1  DPPCX   1      92.700  84.080  57.240  1.00  0.00      seg_ C  
+ATOM     26  HA  DPPCX   1      93.800  83.920  57.340  1.00  0.00      seg_ H  
+ATOM     27  HB  DPPCX   1      92.310  84.960  57.800  1.00  0.00      seg_ H  
+ATOM     28  C2  DPPCX   1      92.440  84.240  55.730  1.00  0.00      seg_ C  
+ATOM     29  HS  DPPCX   1      92.840  85.240  55.490  1.00  0.00      seg_ H  
+ATOM     30  O21 DPPCX   1      91.030  84.360  55.590  1.00  0.00      seg_ O  
+ATOM     31  C21 DPPCX   1      90.540  84.840  54.390  1.00  0.00      seg_ C  
+ATOM     32  O22 DPPCX   1      91.200  85.390  53.520  1.00  0.00      seg_ O  
+ATOM     33  C22 DPPCX   1      89.100  84.560  54.330  1.00  0.00      seg_ C  
+ATOM     34  H2R DPPCX   1      88.700  84.660  55.360  1.00  0.00      seg_ H  
+ATOM     35  H2S DPPCX   1      88.980  83.510  54.000  1.00  0.00      seg_ H  
+ATOM     36  C3  DPPCX   1      93.160  83.170  54.780  1.00  0.00      seg_ C  
+ATOM     37  HX  DPPCX   1      92.530  82.260  54.710  1.00  0.00      seg_ H  
+ATOM     38  HY  DPPCX   1      94.040  82.860  55.390  1.00  0.00      seg_ H  
+ATOM     39  O31 DPPCX   1      93.620  83.690  53.490  1.00  0.00      seg_ O  
+ATOM     40  C31 DPPCX   1      92.910  83.310  52.400  1.00  0.00      seg_ C  
+ATOM     41  O32 DPPCX   1      91.980  82.600  52.420  1.00  0.00      seg_ O  
+ATOM     42  C32 DPPCX   1      93.390  84.180  51.220  1.00  0.00      seg_ C  
+ATOM     43  H2X DPPCX   1      93.840  83.400  50.570  1.00  0.00      seg_ H  
+ATOM     44  H2Y DPPCX   1      94.210  84.800  51.660  1.00  0.00      seg_ H  
+ATOM     45  C23 DPPCX   1      88.380  85.440  53.300  1.00  0.00      seg_ C  
+ATOM     46  H3R DPPCX   1      88.740  86.480  53.410  1.00  0.00      seg_ H  
+ATOM     47  H3S DPPCX   1      87.280  85.410  53.480  1.00  0.00      seg_ H  
+ATOM     48  C24 DPPCX   1      88.630  85.050  51.890  1.00  0.00      seg_ C  
+ATOM     49  H4R DPPCX   1      88.750  83.950  51.750  1.00  0.00      seg_ H  
+ATOM     50  H4S DPPCX   1      89.590  85.550  51.620  1.00  0.00      seg_ H  
+ATOM     51  C25 DPPCX   1      87.500  85.520  51.070  1.00  0.00      seg_ C  
+ATOM     52  H5R DPPCX   1      87.140  86.540  51.290  1.00  0.00      seg_ H  
+ATOM     53  H5S DPPCX   1      86.620  84.850  51.140  1.00  0.00      seg_ H  
+ATOM     54  C26 DPPCX   1      87.980  85.450  49.650  1.00  0.00      seg_ C  
+ATOM     55  H6R DPPCX   1      88.390  84.480  49.290  1.00  0.00      seg_ H  
+ATOM     56  H6S DPPCX   1      88.810  86.170  49.480  1.00  0.00      seg_ H  
+ATOM     57  C27 DPPCX   1      86.800  85.790  48.720  1.00  0.00      seg_ C  
+ATOM     58  H7R DPPCX   1      86.460  86.840  48.900  1.00  0.00      seg_ H  
+ATOM     59  H7S DPPCX   1      85.970  85.070  48.890  1.00  0.00      seg_ H  
+ATOM     60  C28 DPPCX   1      87.140  85.610  47.210  1.00  0.00      seg_ C  
+ATOM     61  H8R DPPCX   1      87.680  84.640  47.210  1.00  0.00      seg_ H  
+ATOM     62  H8S DPPCX   1      87.800  86.390  46.770  1.00  0.00      seg_ H  
+ATOM     63  C29 DPPCX   1      85.940  85.670  46.210  1.00  0.00      seg_ C  
+ATOM     64  H9R DPPCX   1      85.500  86.690  46.210  1.00  0.00      seg_ H  
+ATOM     65  H9S DPPCX   1      85.310  84.770  46.370  1.00  0.00      seg_ H  
+ATOM     66 C210 DPPCX   1      86.350  85.490  44.710  1.00  0.00      seg_ C  
+ATOM     67 H10R DPPCX   1      87.040  86.290  44.360  1.00  0.00      seg_ H  
+ATOM     68 H10S DPPCX   1      85.430  85.570  44.100  1.00  0.00      seg_ H  
+ATOM     69 C211 DPPCX   1      87.010  84.100  44.370  1.00  0.00      seg_ C  
+ATOM     70 H11R DPPCX   1      86.360  83.380  44.910  1.00  0.00      seg_ H  
+ATOM     71 H11S DPPCX   1      87.980  83.960  44.890  1.00  0.00      seg_ H  
+ATOM     72 C212 DPPCX   1      87.240  83.940  42.930  1.00  0.00      seg_ C  
+ATOM     73 H12R DPPCX   1      87.590  82.910  42.700  1.00  0.00      seg_ H  
+ATOM     74 H12S DPPCX   1      88.020  84.640  42.560  1.00  0.00      seg_ H  
+ATOM     75 C213 DPPCX   1      86.040  84.240  41.980  1.00  0.00      seg_ C  
+ATOM     76 H13R DPPCX   1      85.680  85.280  42.090  1.00  0.00      seg_ H  
+ATOM     77 H13S DPPCX   1      85.230  83.540  42.270  1.00  0.00      seg_ H  
+ATOM     78 C214 DPPCX   1      86.490  84.080  40.560  1.00  0.00      seg_ C  
+ATOM     79 H14R DPPCX   1      87.000  83.100  40.510  1.00  0.00      seg_ H  
+ATOM     80 H14S DPPCX   1      87.220  84.850  40.220  1.00  0.00      seg_ H  
+ATOM     81 C215 DPPCX   1      85.420  84.050  39.450  1.00  0.00      seg_ C  
+ATOM     82 H15R DPPCX   1      84.730  83.220  39.750  1.00  0.00      seg_ H  
+ATOM     83 H15S DPPCX   1      85.840  83.780  38.460  1.00  0.00      seg_ H  
+ATOM     84 C216 DPPCX   1      84.780  85.440  39.360  1.00  0.00      seg_ C  
+ATOM     85 H16R DPPCX   1      84.240  85.780  40.270  1.00  0.00      seg_ H  
+ATOM     86 H16S DPPCX   1      84.130  85.530  38.460  1.00  0.00      seg_ H  
+ATOM     87 H16T DPPCX   1      85.550  86.230  39.180  1.00  0.00      seg_ H  
+ATOM     88  C33 DPPCX   1      92.290  84.930  50.440  1.00  0.00      seg_ C  
+ATOM     89  H3X DPPCX   1      91.920  85.730  51.120  1.00  0.00      seg_ H  
+ATOM     90  H3Y DPPCX   1      91.460  84.300  50.070  1.00  0.00      seg_ H  
+ATOM     91  C34 DPPCX   1      92.880  85.600  49.150  1.00  0.00      seg_ C  
+ATOM     92  H4X DPPCX   1      93.710  86.330  49.300  1.00  0.00      seg_ H  
+ATOM     93  H4Y DPPCX   1      92.010  86.170  48.740  1.00  0.00      seg_ H  
+ATOM     94  C35 DPPCX   1      93.260  84.560  48.100  1.00  0.00      seg_ C  
+ATOM     95  H5X DPPCX   1      92.430  83.840  47.960  1.00  0.00      seg_ H  
+ATOM     96  H5Y DPPCX   1      94.090  83.960  48.520  1.00  0.00      seg_ H  
+ATOM     97  C36 DPPCX   1      93.620  85.130  46.740  1.00  0.00      seg_ C  
+ATOM     98  H6X DPPCX   1      93.920  84.310  46.060  1.00  0.00      seg_ H  
+ATOM     99  H6Y DPPCX   1      94.460  85.820  46.950  1.00  0.00      seg_ H  
+ATOM    100  C37 DPPCX   1      92.540  85.860  45.880  1.00  0.00      seg_ C  
+ATOM    101  H7X DPPCX   1      92.130  86.720  46.460  1.00  0.00      seg_ H  
+ATOM    102  H7Y DPPCX   1      91.830  85.030  45.710  1.00  0.00      seg_ H  
+ATOM    103  C38 DPPCX   1      93.000  86.370  44.480  1.00  0.00      seg_ C  
+ATOM    104  H8X DPPCX   1      93.600  85.560  44.010  1.00  0.00      seg_ H  
+ATOM    105  H8Y DPPCX   1      93.570  87.320  44.490  1.00  0.00      seg_ H  
+ATOM    106  C39 DPPCX   1      91.770  86.680  43.640  1.00  0.00      seg_ C  
+ATOM    107  H9X DPPCX   1      91.230  87.450  44.230  1.00  0.00      seg_ H  
+ATOM    108  H9Y DPPCX   1      91.140  85.770  43.560  1.00  0.00      seg_ H  
+ATOM    109 C310 DPPCX   1      91.980  87.280  42.240  1.00  0.00      seg_ C  
+ATOM    110 H10X DPPCX   1      92.390  88.300  42.420  1.00  0.00      seg_ H  
+ATOM    111 H10Y DPPCX   1      91.050  87.320  41.640  1.00  0.00      seg_ H  
+ATOM    112 C311 DPPCX   1      93.050  86.520  41.390  1.00  0.00      seg_ C  
+ATOM    113 H11X DPPCX   1      93.010  85.410  41.410  1.00  0.00      seg_ H  
+ATOM    114 H11Y DPPCX   1      94.060  86.800  41.750  1.00  0.00      seg_ H  
+ATOM    115 C312 DPPCX   1      92.820  87.000  39.880  1.00  0.00      seg_ C  
+ATOM    116 H12X DPPCX   1      92.630  88.090  39.810  1.00  0.00      seg_ H  
+ATOM    117 H12Y DPPCX   1      91.900  86.510  39.490  1.00  0.00      seg_ H  
+ATOM    118 C313 DPPCX   1      94.010  86.710  38.960  1.00  0.00      seg_ C  
+ATOM    119 H13X DPPCX   1      94.220  85.630  38.840  1.00  0.00      seg_ H  
+ATOM    120 H13Y DPPCX   1      94.950  87.140  39.380  1.00  0.00      seg_ H  
+ATOM    121 C314 DPPCX   1      93.780  87.300  37.510  1.00  0.00      seg_ C  
+ATOM    122 H14X DPPCX   1      93.690  88.410  37.500  1.00  0.00      seg_ H  
+ATOM    123 H14Y DPPCX   1      92.760  86.960  37.210  1.00  0.00      seg_ H  
+ATOM    124 C315 DPPCX   1      94.830  86.960  36.520  1.00  0.00      seg_ C  
+ATOM    125 H15X DPPCX   1      94.750  85.860  36.340  1.00  0.00      seg_ H  
+ATOM    126 H15Y DPPCX   1      95.820  87.260  36.920  1.00  0.00      seg_ H  
+ATOM    127 C316 DPPCX   1      94.610  87.720  35.230  1.00  0.00      seg_ C  
+ATOM    128 H16X DPPCX   1      93.660  87.480  34.720  1.00  0.00      seg_ H  
+ATOM    129 H16Y DPPCX   1      95.470  87.540  34.550  1.00  0.00      seg_ H  
+ATOM    130 H16Z DPPCX   1      94.700  88.810  35.450  1.00  0.00      seg_ H  
+ATOM    131  N   DPPCX   2      90.670  79.810  55.500  1.00  0.00      seg_ N  
+ATOM    132  C13 DPPCX   2      92.130  79.810  55.130  1.00  0.00      seg_ C  
+ATOM    133 H13A DPPCX   2      92.620  78.850  55.240  1.00  0.00      seg_ H  
+ATOM    134 H13B DPPCX   2      92.670  80.500  55.760  1.00  0.00      seg_ H  
+ATOM    135 H13C DPPCX   2      92.090  80.150  54.100  1.00  0.00      seg_ H  
+ATOM    136  C14 DPPCX   2      90.040  81.130  55.240  1.00  0.00      seg_ C  
+ATOM    137 H14A DPPCX   2      90.440  81.920  55.860  1.00  0.00      seg_ H  
+ATOM    138 H14B DPPCX   2      88.970  81.160  55.330  1.00  0.00      seg_ H  
+ATOM    139 H14C DPPCX   2      90.260  81.500  54.250  1.00  0.00      seg_ H  
+ATOM    140  C15 DPPCX   2      89.940  78.940  54.520  1.00  0.00      seg_ C  
+ATOM    141 H15A DPPCX   2      89.920  79.280  53.500  1.00  0.00      seg_ H  
+ATOM    142 H15B DPPCX   2      88.900  78.880  54.810  1.00  0.00      seg_ H  
+ATOM    143 H15C DPPCX   2      90.240  77.900  54.610  1.00  0.00      seg_ H  
+ATOM    144  C12 DPPCX   2      90.430  79.410  56.890  1.00  0.00      seg_ C  
+ATOM    145 H12A DPPCX   2      91.230  79.710  57.550  1.00  0.00      seg_ H  
+ATOM    146 H12B DPPCX   2      90.430  78.340  57.010  1.00  0.00      seg_ H  
+ATOM    147  C11 DPPCX   2      89.100  79.930  57.570  1.00  0.00      seg_ C  
+ATOM    148 H11A DPPCX   2      89.180  81.040  57.610  1.00  0.00      seg_ H  
+ATOM    149 H11B DPPCX   2      89.160  79.540  58.610  1.00  0.00      seg_ H  
+ATOM    150  P   DPPCX   2      86.470  79.880  57.530  1.00  0.00      seg_ P  
+ATOM    151  O13 DPPCX   2      86.650  81.040  58.400  1.00  0.00      seg_ O  
+ATOM    152  O14 DPPCX   2      85.830  78.720  58.170  1.00  0.00      seg_ O  
+ATOM    153  O11 DPPCX   2      85.590  80.190  56.240  1.00  0.00      seg_ O  
+ATOM    154  O12 DPPCX   2      87.890  79.480  56.850  1.00  0.00      seg_ O  
+ATOM    155  C1  DPPCX   2      85.690  79.300  55.100  1.00  0.00      seg_ C  
+ATOM    156  HA  DPPCX   2      84.660  78.940  54.930  1.00  0.00      seg_ H  
+ATOM    157  HB  DPPCX   2      86.320  78.400  55.250  1.00  0.00      seg_ H  
+ATOM    158  C2  DPPCX   2      86.010  80.100  53.830  1.00  0.00      seg_ C  
+ATOM    159  HS  DPPCX   2      87.100  80.300  53.820  1.00  0.00      seg_ H  
+ATOM    160  O21 DPPCX   2      85.120  81.230  53.660  1.00  0.00      seg_ O  
+ATOM    161  C21 DPPCX   2      85.270  82.310  54.380  1.00  0.00      seg_ C  
+ATOM    162  O22 DPPCX   2      86.240  82.560  55.080  1.00  0.00      seg_ O  
+ATOM    163  C22 DPPCX   2      84.290  83.400  54.130  1.00  0.00      seg_ C  
+ATOM    164  H2R DPPCX   2      84.600  84.020  53.260  1.00  0.00      seg_ H  
+ATOM    165  H2S DPPCX   2      84.270  83.990  55.070  1.00  0.00      seg_ H  
+ATOM    166  C3  DPPCX   2      85.790  79.270  52.500  1.00  0.00      seg_ C  
+ATOM    167  HX  DPPCX   2      84.690  79.240  52.350  1.00  0.00      seg_ H  
+ATOM    168  HY  DPPCX   2      86.100  78.230  52.710  1.00  0.00      seg_ H  
+ATOM    169  O31 DPPCX   2      86.490  79.960  51.400  1.00  0.00      seg_ O  
+ATOM    170  C31 DPPCX   2      87.740  79.780  51.240  1.00  0.00      seg_ C  
+ATOM    171  O32 DPPCX   2      88.410  79.010  51.880  1.00  0.00      seg_ O  
+ATOM    172  C32 DPPCX   2      88.320  80.630  50.100  1.00  0.00      seg_ C  
+ATOM    173  H2X DPPCX   2      88.010  81.690  50.240  1.00  0.00      seg_ H  
+ATOM    174  H2Y DPPCX   2      87.740  80.340  49.200  1.00  0.00      seg_ H  
+ATOM    175  C23 DPPCX   2      82.810  82.950  53.840  1.00  0.00      seg_ C  
+ATOM    176  H3R DPPCX   2      82.310  82.400  54.670  1.00  0.00      seg_ H  
+ATOM    177  H3S DPPCX   2      82.810  82.260  52.970  1.00  0.00      seg_ H  
+ATOM    178  C24 DPPCX   2      82.040  84.240  53.550  1.00  0.00      seg_ C  
+ATOM    179  H4R DPPCX   2      82.090  84.860  54.460  1.00  0.00      seg_ H  
+ATOM    180  H4S DPPCX   2      81.010  83.900  53.310  1.00  0.00      seg_ H  
+ATOM    181  C25 DPPCX   2      82.440  85.150  52.320  1.00  0.00      seg_ C  
+ATOM    182  H5R DPPCX   2      83.440  85.630  52.400  1.00  0.00      seg_ H  
+ATOM    183  H5S DPPCX   2      81.760  86.020  52.340  1.00  0.00      seg_ H  
+ATOM    184  C26 DPPCX   2      82.230  84.390  51.050  1.00  0.00      seg_ C  
+ATOM    185  H6R DPPCX   2      81.430  83.620  51.060  1.00  0.00      seg_ H  
+ATOM    186  H6S DPPCX   2      83.110  83.760  50.810  1.00  0.00      seg_ H  
+ATOM    187  C27 DPPCX   2      81.970  85.260  49.810  1.00  0.00      seg_ C  
+ATOM    188  H7R DPPCX   2      82.710  86.090  49.850  1.00  0.00      seg_ H  
+ATOM    189  H7S DPPCX   2      80.920  85.560  49.980  1.00  0.00      seg_ H  
+ATOM    190  C28 DPPCX   2      82.040  84.510  48.520  1.00  0.00      seg_ C  
+ATOM    191  H8R DPPCX   2      81.300  83.680  48.520  1.00  0.00      seg_ H  
+ATOM    192  H8S DPPCX   2      83.090  84.150  48.540  1.00  0.00      seg_ H  
+ATOM    193  C29 DPPCX   2      82.010  85.400  47.290  1.00  0.00      seg_ C  
+ATOM    194  H9R DPPCX   2      83.020  85.810  47.100  1.00  0.00      seg_ H  
+ATOM    195  H9S DPPCX   2      81.340  86.270  47.460  1.00  0.00      seg_ H  
+ATOM    196 C210 DPPCX   2      81.610  84.660  46.000  1.00  0.00      seg_ C  
+ATOM    197 H10R DPPCX   2      80.580  84.270  46.140  1.00  0.00      seg_ H  
+ATOM    198 H10S DPPCX   2      82.340  83.820  45.970  1.00  0.00      seg_ H  
+ATOM    199 C211 DPPCX   2      81.780  85.590  44.770  1.00  0.00      seg_ C  
+ATOM    200 H11R DPPCX   2      82.820  85.980  44.900  1.00  0.00      seg_ H  
+ATOM    201 H11S DPPCX   2      81.190  86.530  44.780  1.00  0.00      seg_ H  
+ATOM    202 C212 DPPCX   2      81.430  84.910  43.450  1.00  0.00      seg_ C  
+ATOM    203 H12R DPPCX   2      80.360  84.620  43.370  1.00  0.00      seg_ H  
+ATOM    204 H12S DPPCX   2      82.070  84.000  43.510  1.00  0.00      seg_ H  
+ATOM    205 C213 DPPCX   2      81.880  85.700  42.230  1.00  0.00      seg_ C  
+ATOM    206 H13R DPPCX   2      82.980  85.830  42.340  1.00  0.00      seg_ H  
+ATOM    207 H13S DPPCX   2      81.360  86.670  42.390  1.00  0.00      seg_ H  
+ATOM    208 C214 DPPCX   2      81.620  85.080  40.890  1.00  0.00      seg_ C  
+ATOM    209 H14R DPPCX   2      80.660  84.520  40.980  1.00  0.00      seg_ H  
+ATOM    210 H14S DPPCX   2      82.460  84.370  40.710  1.00  0.00      seg_ H  
+ATOM    211 C215 DPPCX   2      81.420  86.050  39.690  1.00  0.00      seg_ C  
+ATOM    212 H15R DPPCX   2      82.310  86.710  39.650  1.00  0.00      seg_ H  
+ATOM    213 H15S DPPCX   2      80.490  86.630  39.890  1.00  0.00      seg_ H  
+ATOM    214 C216 DPPCX   2      81.310  85.440  38.260  1.00  0.00      seg_ C  
+ATOM    215 H16R DPPCX   2      81.160  86.220  37.480  1.00  0.00      seg_ H  
+ATOM    216 H16S DPPCX   2      80.400  84.800  38.170  1.00  0.00      seg_ H  
+ATOM    217 H16T DPPCX   2      82.200  84.810  38.050  1.00  0.00      seg_ H  
+ATOM    218  C33 DPPCX   2      89.800  80.430  49.910  1.00  0.00      seg_ C  
+ATOM    219  H3X DPPCX   2      90.100  79.390  49.670  1.00  0.00      seg_ H  
+ATOM    220  H3Y DPPCX   2      90.320  80.650  50.860  1.00  0.00      seg_ H  
+ATOM    221  C34 DPPCX   2      90.450  81.310  48.880  1.00  0.00      seg_ C  
+ATOM    222  H4X DPPCX   2      91.550  81.130  48.810  1.00  0.00      seg_ H  
+ATOM    223  H4Y DPPCX   2      90.230  82.350  49.170  1.00  0.00      seg_ H  
+ATOM    224  C35 DPPCX   2      89.950  81.140  47.470  1.00  0.00      seg_ C  
+ATOM    225  H5X DPPCX   2      88.880  81.420  47.420  1.00  0.00      seg_ H  
+ATOM    226  H5Y DPPCX   2      89.870  80.050  47.330  1.00  0.00      seg_ H  
+ATOM    227  C36 DPPCX   2      90.820  82.010  46.480  1.00  0.00      seg_ C  
+ATOM    228  H6X DPPCX   2      91.900  81.760  46.610  1.00  0.00      seg_ H  
+ATOM    229  H6Y DPPCX   2      90.680  83.090  46.710  1.00  0.00      seg_ H  
+ATOM    230  C37 DPPCX   2      90.350  81.630  45.060  1.00  0.00      seg_ C  
+ATOM    231  H7X DPPCX   2      89.280  81.710  44.770  1.00  0.00      seg_ H  
+ATOM    232  H7Y DPPCX   2      90.770  80.620  44.850  1.00  0.00      seg_ H  
+ATOM    233  C38 DPPCX   2      90.890  82.570  43.980  1.00  0.00      seg_ C  
+ATOM    234  H8X DPPCX   2      91.970  82.630  44.220  1.00  0.00      seg_ H  
+ATOM    235  H8Y DPPCX   2      90.450  83.580  44.170  1.00  0.00      seg_ H  
+ATOM    236  C39 DPPCX   2      90.720  82.130  42.500  1.00  0.00      seg_ C  
+ATOM    237  H9X DPPCX   2      89.660  81.970  42.220  1.00  0.00      seg_ H  
+ATOM    238  H9Y DPPCX   2      91.200  81.140  42.320  1.00  0.00      seg_ H  
+ATOM    239 C310 DPPCX   2      91.250  83.120  41.490  1.00  0.00      seg_ C  
+ATOM    240 H10X DPPCX   2      92.360  83.070  41.480  1.00  0.00      seg_ H  
+ATOM    241 H10Y DPPCX   2      90.880  84.150  41.610  1.00  0.00      seg_ H  
+ATOM    242 C311 DPPCX   2      90.790  82.710  40.050  1.00  0.00      seg_ C  
+ATOM    243 H11X DPPCX   2      89.730  83.020  39.920  1.00  0.00      seg_ H  
+ATOM    244 H11Y DPPCX   2      90.880  81.620  39.860  1.00  0.00      seg_ H  
+ATOM    245 C312 DPPCX   2      91.390  83.600  38.990  1.00  0.00      seg_ C  
+ATOM    246 H12X DPPCX   2      92.490  83.440  38.880  1.00  0.00      seg_ H  
+ATOM    247 H12Y DPPCX   2      91.270  84.690  39.190  1.00  0.00      seg_ H  
+ATOM    248 C313 DPPCX   2      90.870  83.280  37.550  1.00  0.00      seg_ C  
+ATOM    249 H13X DPPCX   2      89.830  83.650  37.450  1.00  0.00      seg_ H  
+ATOM    250 H13Y DPPCX   2      90.870  82.200  37.300  1.00  0.00      seg_ H  
+ATOM    251 C314 DPPCX   2      91.840  83.770  36.470  1.00  0.00      seg_ C  
+ATOM    252 H14X DPPCX   2      92.760  83.170  36.610  1.00  0.00      seg_ H  
+ATOM    253 H14Y DPPCX   2      92.090  84.830  36.670  1.00  0.00      seg_ H  
+ATOM    254 C315 DPPCX   2      91.260  83.760  35.050  1.00  0.00      seg_ C  
+ATOM    255 H15X DPPCX   2      90.170  83.980  35.080  1.00  0.00      seg_ H  
+ATOM    256 H15Y DPPCX   2      91.310  82.740  34.620  1.00  0.00      seg_ H  
+ATOM    257 C316 DPPCX   2      91.930  84.660  34.040  1.00  0.00      seg_ C  
+ATOM    258 H16X DPPCX   2      93.010  84.490  33.850  1.00  0.00      seg_ H  
+ATOM    259 H16Y DPPCX   2      91.910  85.750  34.280  1.00  0.00      seg_ H  
+ATOM    260 H16Z DPPCX   2      91.450  84.550  33.040  1.00  0.00      seg_ H  
+CONECT    1    2    6   10   14
+CONECT    2    1    3    4    5
+CONECT    3    2
+CONECT    4    2
+CONECT    5    2
+CONECT    6    1    7    8    9
+CONECT    7    6
+CONECT    8    6
+CONECT    9    6
+CONECT   10    1   11   12   13
+CONECT   11   10
+CONECT   12   10
+CONECT   13   10
+CONECT   14    1   15   16   17
+CONECT   15   14
+CONECT   16   14
+CONECT   17   14   18   19   24
+CONECT   18   17
+CONECT   19   17
+CONECT   20   21   22   23   24
+CONECT   21   20
+CONECT   22   20
+CONECT   23   20   25
+CONECT   24   17   20
+CONECT   25   23   26   27   28
+CONECT   26   25
+CONECT   27   25
+CONECT   28   25   29   30   36
+CONECT   29   28
+CONECT   30   28   31
+CONECT   31   30   32   33
+CONECT   32   31
+CONECT   33   31   34   35   45
+CONECT   34   33
+CONECT   35   33
+CONECT   36   28   37   38   39
+CONECT   37   36
+CONECT   38   36
+CONECT   39   36   40
+CONECT   40   39   41   42
+CONECT   41   40
+CONECT   42   40   43   44   88
+CONECT   43   42
+CONECT   44   42
+CONECT   45   33   46   47   48
+CONECT   46   45
+CONECT   47   45
+CONECT   48   45   49   50   51
+CONECT   49   48
+CONECT   50   48
+CONECT   51   48   52   53   54
+CONECT   52   51
+CONECT   53   51
+CONECT   54   51   55   56   57
+CONECT   55   54
+CONECT   56   54
+CONECT   57   54   58   59   60
+CONECT   58   57
+CONECT   59   57
+CONECT   60   57   61   62   63
+CONECT   61   60
+CONECT   62   60
+CONECT   63   60   64   65   66
+CONECT   64   63
+CONECT   65   63
+CONECT   66   63   67   68   69
+CONECT   67   66
+CONECT   68   66
+CONECT   69   66   70   71   72
+CONECT   70   69
+CONECT   71   69
+CONECT   72   69   73   74   75
+CONECT   73   72
+CONECT   74   72
+CONECT   75   72   76   77   78
+CONECT   76   75
+CONECT   77   75
+CONECT   78   75   79   80   81
+CONECT   79   78
+CONECT   80   78
+CONECT   81   78   82   83   84
+CONECT   82   81
+CONECT   83   81
+CONECT   84   81   85   86   87
+CONECT   85   84
+CONECT   86   84
+CONECT   87   84
+CONECT   88   42   89   90   91
+CONECT   89   88
+CONECT   90   88
+CONECT   91   88   92   93   94
+CONECT   92   91
+CONECT   93   91
+CONECT   94   91   95   96   97
+CONECT   95   94
+CONECT   96   94
+CONECT   97   94   98   99  100
+CONECT   98   97
+CONECT   99   97
+CONECT  100   97  101  102  103
+CONECT  101  100
+CONECT  102  100
+CONECT  103  100  104  105  106
+CONECT  104  103
+CONECT  105  103
+CONECT  106  103  107  108  109
+CONECT  107  106
+CONECT  108  106
+CONECT  109  106  110  111  112
+CONECT  110  109
+CONECT  111  109
+CONECT  112  109  113  114  115
+CONECT  113  112
+CONECT  114  112
+CONECT  115  112  116  117  118
+CONECT  116  115
+CONECT  117  115
+CONECT  118  115  119  120  121
+CONECT  119  118
+CONECT  120  118
+CONECT  121  118  122  123  124
+CONECT  122  121
+CONECT  123  121
+CONECT  124  121  125  126  127
+CONECT  125  124
+CONECT  126  124
+CONECT  127  124  128  129  130
+CONECT  128  127
+CONECT  129  127
+CONECT  130  127
+CONECT  131  132  136  140  144
+CONECT  132  131  133  134  135
+CONECT  133  132
+CONECT  134  132
+CONECT  135  132
+CONECT  136  131  137  138  139
+CONECT  137  136
+CONECT  138  136
+CONECT  139  136
+CONECT  140  131  141  142  143
+CONECT  141  140
+CONECT  142  140
+CONECT  143  140
+CONECT  144  131  145  146  147
+CONECT  145  144
+CONECT  146  144
+CONECT  147  144  148  149  154
+CONECT  148  147
+CONECT  149  147
+CONECT  150  151  152  153  154
+CONECT  151  150
+CONECT  152  150
+CONECT  153  150  155
+CONECT  154  147  150
+CONECT  155  153  156  157  158
+CONECT  156  155
+CONECT  157  155
+CONECT  158  155  159  160  166
+CONECT  159  158
+CONECT  160  158  161
+CONECT  161  160  162  163
+CONECT  162  161
+CONECT  163  161  164  165  175
+CONECT  164  163
+CONECT  165  163
+CONECT  166  158  167  168  169
+CONECT  167  166
+CONECT  168  166
+CONECT  169  166  170
+CONECT  170  169  171  172
+CONECT  171  170
+CONECT  172  170  173  174  218
+CONECT  173  172
+CONECT  174  172
+CONECT  175  163  176  177  178
+CONECT  176  175
+CONECT  177  175
+CONECT  178  175  179  180  181
+CONECT  179  178
+CONECT  180  178
+CONECT  181  178  182  183  184
+CONECT  182  181
+CONECT  183  181
+CONECT  184  181  185  186  187
+CONECT  185  184
+CONECT  186  184
+CONECT  187  184  188  189  190
+CONECT  188  187
+CONECT  189  187
+CONECT  190  187  191  192  193
+CONECT  191  190
+CONECT  192  190
+CONECT  193  190  194  195  196
+CONECT  194  193
+CONECT  195  193
+CONECT  196  193  197  198  199
+CONECT  197  196
+CONECT  198  196
+CONECT  199  196  200  201  202
+CONECT  200  199
+CONECT  201  199
+CONECT  202  199  203  204  205
+CONECT  203  202
+CONECT  204  202
+CONECT  205  202  206  207  208
+CONECT  206  205
+CONECT  207  205
+CONECT  208  205  209  210  211
+CONECT  209  208
+CONECT  210  208
+CONECT  211  208  212  213  214
+CONECT  212  211
+CONECT  213  211
+CONECT  214  211  215  216  217
+CONECT  215  214
+CONECT  216  214
+CONECT  217  214
+CONECT  218  172  219  220  221
+CONECT  219  218
+CONECT  220  218
+CONECT  221  218  222  223  224
+CONECT  222  221
+CONECT  223  221
+CONECT  224  221  225  226  227
+CONECT  225  224
+CONECT  226  224
+CONECT  227  224  228  229  230
+CONECT  228  227
+CONECT  229  227
+CONECT  230  227  231  232  233
+CONECT  231  230
+CONECT  232  230
+CONECT  233  230  234  235  236
+CONECT  234  233
+CONECT  235  233
+CONECT  236  233  237  238  239
+CONECT  237  236
+CONECT  238  236
+CONECT  239  236  240  241  242
+CONECT  240  239
+CONECT  241  239
+CONECT  242  239  243  244  245
+CONECT  243  242
+CONECT  244  242
+CONECT  245  242  246  247  248
+CONECT  246  245
+CONECT  247  245
+CONECT  248  245  249  250  251
+CONECT  249  248
+CONECT  250  248
+CONECT  251  248  252  253  254
+CONECT  252  251
+CONECT  253  251
+CONECT  254  251  255  256  257
+CONECT  255  254
+CONECT  256  254
+CONECT  257  254  258  259  260
+CONECT  258  257
+CONECT  259  257
+CONECT  260  257
+END

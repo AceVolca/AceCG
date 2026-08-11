@@ -14,6 +14,7 @@ from AceCG.configs import (
     parse_vp_growth_file,
     parse_vp_growth_text,
 )
+from AceCG.configs.vp_growth_config import VPGrowthAARef
 
 
 # ─── Fixtures ─────────────────────────────────────────────────────────
@@ -118,6 +119,36 @@ def test_parse_vp_growth_file_full(
     assert vp.angles[0].type_keys == ("VP", "MG", "HG")
     assert vp.default_pair is not None
     assert vp.default_pair.pot_style == "gauss/cut"
+
+
+@pytest.mark.parametrize(
+    ("trajectory_file", "format_line", "expected"),
+    [
+        ("reference.trr", "", "TRR"),
+        ("reference.lammpstrj", "", "LAMMPSDUMP"),
+        ("reference.trr", "trajectory_format = dump", "LAMMPSDUMP"),
+    ],
+)
+def test_vp_growth_infers_and_canonicalizes_trajectory_format(
+    trajectory_file: str, format_line: str, expected: str
+) -> None:
+    text = textwrap.dedent(f"""\
+        [aa_ref]
+        trajectory_files = {trajectory_file}
+        {format_line}
+        ref_topo = cg6.data
+
+        [vp]
+        output_dir = pool
+    """)
+
+    cfg = parse_vp_growth_text(text)
+
+    assert cfg.aa_ref.trajectory_format == expected
+
+
+def test_programmatic_vp_growth_format_defaults_to_inference() -> None:
+    assert VPGrowthAARef().trajectory_format is None
 
 
 def test_frame_ids_range_form(tmp_path: Path, alias_file: Path) -> None:

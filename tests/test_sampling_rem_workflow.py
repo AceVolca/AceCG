@@ -142,6 +142,7 @@ def _make_config(
     forcefield_path="ff/system.settings",
     sampling_input="scripts/in.rem.lmp",
     init_config_pool=None,
+    init_config_pool_rounds=None,
     cutoff=7.5,
     trajectory_files=(),
     all_atom_data_path=None,
@@ -172,6 +173,7 @@ def _make_config(
             input=sampling_input,
             engine_command="lmp",
             init_config_pool=init_config_pool,
+            init_config_pool_rounds=init_config_pool_rounds,
             sim_var={} if sim_var is None else dict(sim_var),
         ),
         scheduler=SchedulerConfig(python_exe="python"),
@@ -300,6 +302,64 @@ def test_sampling_workflow_resolves_relative_input_pool_and_float_cutoff(monkeyp
     assert [record.path for record in workflow.sampler._init_pool] == [
         (init_pool_dir / "frame0.data").resolve()
     ]
+
+
+def test_sampling_workflow_builds_grouped_init_pool_rounds(monkeypatch, tmp_path):
+    config_path = tmp_path / "config" / "test.acg"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("# config\n", encoding="utf-8")
+
+    script_path = config_path.parent / "scripts" / "in.rem.lmp"
+    _write_rem_script(script_path)
+    rand_pool_dir = config_path.parent / "rand_pool"
+    ref_pool_dir = config_path.parent / "ref_pool"
+    rand_pool_dir.mkdir(parents=True, exist_ok=True)
+    ref_pool_dir.mkdir(parents=True, exist_ok=True)
+    rand_frame = rand_pool_dir / "frame0.data"
+    ref_frame = ref_pool_dir / "frame0.data"
+    rand_frame.write_text("# rand frame\n", encoding="utf-8")
+    ref_frame.write_text("# ref frame\n", encoding="utf-8")
+
+    monkeypatch.setattr(BaseWorkflow, "_build_topology", lambda self: {})
+    monkeypatch.setattr(
+        BaseWorkflow,
+        "_build_resource_pool",
+        lambda self, sim_cmd=None: SimpleNamespace(hosts=[SimpleNamespace(n_cpus=4)]),
+    )
+    monkeypatch.setattr(SamplingWorkflow, "_build_scheduler", lambda self: SimpleNamespace())
+    monkeypatch.setattr(
+        "AceCG.workflows.sampling.ReadLmpFF",
+        lambda *args, **kwargs: _linear_forcefield(),
+    )
+
+    workflow = _SamplingHarness(
+        _make_config(
+            config_path,
+            init_config_pool=("rand_pool/*.data", "ref_pool/*.data"),
+            init_config_pool_rounds=(4, 1),
+            trajectory_files=("aa/reference.lammpstrj",),
+        )
+    )
+
+    assert [
+        [record.path for record in group]
+        for group in workflow.sampler._init_pools
+    ] == [[rand_frame.resolve()], [ref_frame.resolve()]]
+    assert workflow.sampler._init_pool_rounds == [4, 1]
+
+    state_a = workflow.sampler.init_epoch(
+        iteration_index=3,
+        epoch_dir=tmp_path / "epoch_0003",
+        n_runs=1,
+    )
+    state_b = workflow.sampler.init_epoch(
+        iteration_index=4,
+        epoch_dir=tmp_path / "epoch_0004",
+        n_runs=1,
+    )
+
+    assert state_a.replica_plans[0].init_config_path == rand_frame.resolve()
+    assert state_b.replica_plans[0].init_config_path == ref_frame.resolve()
 
 
 def test_rem_builds_constant_aa_stats_from_relative_cache(monkeypatch, tmp_path):
@@ -681,6 +741,36 @@ def test_rem_run_forwards_mdanalysis_sampling_format_to_cg_post_spec(monkeypatch
     assert task.trajectory_files == ["traj.dcd"]
     assert task.post_spec["trajectory"] == str(Path(task.run_dir) / "traj.dcd")
     assert task.post_spec["trajectory_format"] == "DCD"
+
+
+@pytest.mark.parametrize(
+    ("configured", "runtime_format", "expected"),
+    [
+        (None, "dcd", "DCD"),
+        ("", "dcd", "DCD"),
+        ("auto", "dcd", "DCD"),
+        ("trr", "dcd", "TRR"),
+        (None, "lammps_dump", None),
+    ],
+)
+def test_sampling_post_format_uses_canonical_configured_and_runtime_tokens(
+    configured, runtime_format, expected
+):
+    workflow = object.__new__(_SamplingHarness)
+    workflow.config = SimpleNamespace(
+        sampling=SimpleNamespace(trajectory_format=configured)
+    )
+    post_spec = {}
+
+    workflow._apply_sampling_trajectory_format(
+        post_spec,
+        SimpleNamespace(trajectory_format=runtime_format),
+    )
+
+    if expected is None:
+        assert "trajectory_format" not in post_spec
+    else:
+        assert post_spec["trajectory_format"] == expected
 
 
 def test_rem_run_forwards_perf_trace_to_cg_post_spec(monkeypatch, tmp_path):

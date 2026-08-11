@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from AceCG.compute.mpi_engine import build_default_engine
+from AceCG.io.trajectory import FrameRecord
 from AceCG.potentials.harmonic import HarmonicPotential
 from AceCG.topology.forcefield import Forcefield
 from AceCG.topology.types import InteractionKey
@@ -176,6 +177,10 @@ def test_one_pass_engine_supports_cdrem_alias(monkeypatch, tmp_path: Path):
         def __len__(self):
             return 2
 
+        def __getitem__(self, frame_id):
+            assert 0 <= int(frame_id) < 2
+            return SimpleNamespace(has_forces=False, has_velocities=False)
+
     class _DummyUniverse:
         def __init__(self):
             self.trajectory = _DummyTrajectory()
@@ -190,14 +195,18 @@ def test_one_pass_engine_supports_cdrem_alias(monkeypatch, tmp_path: Path):
         lambda *args, **kwargs: topo,
     )
 
-    frames_with_forces = [
-        (*frame, None) for frame in _frames()
-    ]
+    frames = _frames()
 
-    def fake_iter_frames(universe, *, start=0, end=None, every=1, include_forces=False):
-        del universe, start, end, every, include_forces
-        for item in frames_with_forces:
-            yield item
+    def fake_iter_frames(universe, *, frame_ids, include_forces=False):
+        del universe, include_forces
+        for frame_id in frame_ids:
+            _, positions, box = frames[int(frame_id)]
+            yield FrameRecord(
+                frame_id=int(frame_id),
+                positions=positions,
+                box=box,
+                forces=None,
+            )
 
     monkeypatch.setattr("AceCG.io.trajectory.iter_frames", fake_iter_frames)
 
@@ -220,6 +229,25 @@ def test_one_pass_engine_supports_cdrem_alias(monkeypatch, tmp_path: Path):
     build_default_engine().run_post(spec)
     with (tmp_path / "cdrem.pkl").open("rb") as handle:
         payload = pickle.load(handle)
-    assert "energy_grad_avg" in payload
-    assert "d2U_avg" in payload
-    assert "grad_outer_avg" in payload
+
+    expected_frames = [
+        build_default_engine().compute(
+            request={"energy_grad", "energy_hessian", "energy_grad_outer"},
+            frame=(*frame, None),
+            topology_arrays=topo,
+            forcefield_snapshot=forcefield,
+        )
+        for frame in frames
+    ]
+    np.testing.assert_allclose(
+        payload["energy_grad_avg"],
+        np.mean([frame["energy_grad"] for frame in expected_frames], axis=0),
+    )
+    np.testing.assert_allclose(
+        payload["d2U_avg"],
+        np.mean([frame["energy_hessian"] for frame in expected_frames], axis=0),
+    )
+    np.testing.assert_allclose(
+        payload["grad_outer_avg"],
+        np.mean([frame["energy_grad_outer"] for frame in expected_frames], axis=0),
+    )

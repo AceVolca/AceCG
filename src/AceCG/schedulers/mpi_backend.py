@@ -350,41 +350,32 @@ class IntelMpiBackend(MpiBackend):
         placement: Placement,
         payload_cmd: list[str],
     ) -> LaunchSpec:
-        # MPMD colon syntax: each host-slice becomes a separate segment
-        # with its own -n and -host.  Hydra's SLURM bootstrap ignores
-        # -hostfile, so we must use this form for heterogeneous layouts.
-        #   mpirun -bootstrap slurm
-        #     -n 9 -host A -env I_MPI_PIN_PROCESSOR_LIST <cpus> <cmd>
-        #     : -n 8 -host B -env I_MPI_PIN_PROCESSOR_LIST <cpus> <cmd>
-        #
-        # CRITICAL: segments MUST follow SLURM's canonical node order.
-        # Hydra's SLURM bootstrap creates a single srun step for all
-        # hosts, and SLURM does block distribution in the order given by
-        # SLURM_JOB_NODELIST — NOT hostname-sorted.  If segments are out
-        # of SLURM's order, rank counts get misassigned to the wrong
-        # hosts, silently corrupting per-rank CPU pinning.  We read
-        # SLURM_JOB_NODELIST here and sort slices by their position in
-        # that list; unknown hosts (shouldn't happen) fall back to the
-        # end in hostname order.
-        #
-        # Per-segment I_MPI_PIN_PROCESSOR_LIST pins each rank to the
-        # exact allocated CPUs, enabling concurrent sub-node tasks
-        # without overlap (no whole-node reservation needed).
+        # SLURM already supplies Hydra's global host list.  A single program
+        # plus -ppn lets Hydra distribute a homogeneous placement over that
+        # list.  Repeating local -host options conflicts with the resource-
+        # manager host list, while host-free MPMD segments can be packed onto
+        # the first node.  Reject heterogeneous slices instead of emitting a
+        # launch command with ambiguous or incorrect placement.
         sorted_slices = _sort_slices_by_slurm_nodelist(placement.slices)
-        argv: list[str] = [self.mpirun_path, "-bootstrap", "slurm"]
-        for i, s in enumerate(sorted_slices):
-            if i > 0:
-                argv.append(":")
-            cpu_list = ",".join(str(c) for c in s.cpu_ids)
-            argv.extend([
-                "-n", str(s.n_cpus),
-                "-host", s.host,
-                "-env", "I_MPI_PIN", "1",
-                "-env", "I_MPI_PIN_PROCESSOR_LIST", cpu_list,
-            ])
-            argv.extend(payload_cmd)
+        reference_cpu_ids = sorted_slices[0].cpu_ids
+        if any(s.cpu_ids != reference_cpu_ids for s in sorted_slices[1:]):
+            layouts = {s.host: list(s.cpu_ids) for s in sorted_slices}
+            raise RuntimeError(
+                "Intel MPI SLURM bootstrap requires identical per-host CPU "
+                f"layouts; got {layouts}"
+            )
+        cpu_list = ",".join(str(c) for c in reference_cpu_ids)
+        argv = [
+            self.mpirun_path,
+            "-bootstrap", "slurm",
+            "-ppn", str(len(reference_cpu_ids)),
+            "-genv", "I_MPI_PIN", "1",
+            "-genv", "I_MPI_PIN_PROCESSOR_LIST", cpu_list,
+            "-n", str(placement.n_ranks),
+            *payload_cmd,
+        ]
         return LaunchSpec(
-            argv=argv,
+            argv=tuple(argv),
             env_add={},
             env_strip_prefixes=("PMI_",),
         )

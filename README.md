@@ -47,11 +47,13 @@ acg-rem
 acg-cdrem
 acg-cdfm
 acg-vpgrower
+acg-trajmap
 acg-boundary-prior
 ```
 
 ## Latest update
 
+- 08/11/2026, Weizhi: Added trajectory mapping (`acg-trajmap`) for AA-to-CG structure and force generation, linear force-mapping (Kraemer, Durumeric et al. 2023), and dihedral B-spline potentials, all covered by a new real-frame test suite.
 - 06/15/2026, Weizhi: Fixed some known issues in sampling workflow and trajectory handling:
   - Added `sampling.trajectory_format` for REM/CDREM/CDFM sampled trajectory post-processing.
   - Added automatic format inference for common LAMMPS `dump xtc`, `dump dcd`, and `dump h5md` scripts.
@@ -68,7 +70,7 @@ acg-boundary-prior
 
 ## Developer Documentation
 
-See `./documentation`. Last updated 06/15/2026 to reflect current changes.
+See `./documentation`. Last updated 08/11/2026 to reflect current changes.
 
 ## Known Issues
 

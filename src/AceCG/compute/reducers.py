@@ -18,7 +18,7 @@ AceCG's one-pass engine supports two distinct frame-weight modes:
    external weight vector and computes its own weighted average.
 
 Every reducer mode conforms to the same uniform operator bundle, exposed via
-``MODE_OPS`` and the top-level dispatch helpers below:
+``MODE_OPS`` and resolved once by the engine:
 
 - ``init(step, ff, topo) -> state``
 - ``request(step) -> frozenset[str]``
@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -46,9 +46,6 @@ from ..configs.energy_mask import (
     accumulate_mask_diagnostics,
     summarize_energy_mask_counts,
 )
-from .requests import normalize_compute_request
-
-
 if TYPE_CHECKING:
     from ..topology.forcefield import Forcefield
     from ..topology.topology_array import TopologyArrays
@@ -71,6 +68,16 @@ def canonical_step_mode(step_or_mode: Dict[str, Any] | str) -> str:
 
 
 @dataclass(frozen=True)
+class GeometryRequirements:
+    """Declarative geometry required by one reducer step."""
+
+    keys: tuple[Any, ...]
+    pair_cutoff: Optional[float] = None
+    sel_indices: Optional[np.ndarray] = None
+    exclude_option: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ReducerOps:
     """Uniform contract each step_mode must implement."""
 
@@ -80,79 +87,18 @@ class ReducerOps:
     local_partials: Callable[[Dict[str, Any]], Dict[str, Any]]
     reduce_plan: Callable[[Dict[str, Any]], Dict[str, Tuple[str, ...]]]
     finalize: Callable[[Dict[str, Any]], Dict[str, Any]]
+    geometry_requirements: Optional[
+        Callable[[Dict[str, Any], "Forcefield", "TopologyArrays"], Optional[GeometryRequirements]]
+    ] = None
 
 
-def _ops(step: Dict[str, Any]) -> ReducerOps:
+def reducer_ops(step: Dict[str, Any]) -> ReducerOps:
     """Resolve the :class:`ReducerOps` bundle registered for ``step['step_mode']``."""
     mode = canonical_step_mode(step)
     ops = MODE_OPS.get(mode)
     if ops is None:
         raise NotImplementedError(f"Unsupported step_mode {mode!r}.")
     return ops
-
-
-def step_request(step: Dict[str, Any]) -> frozenset[str]:
-    """Return the canonical compute request names needed by ``step``."""
-    return normalize_compute_request(_ops(step).request(step))
-
-
-def init_step_state(
-    step: Dict[str, Any],
-    forcefield_snapshot: "Forcefield",
-    topology_arrays: "TopologyArrays",
-) -> Dict[str, Any]:
-    """Initialise a per-step accumulator; also stashes ``step_mode`` / ``reduce_stack``."""
-    state = _ops(step).init(step, forcefield_snapshot, topology_arrays)
-    state.setdefault("step_mode", canonical_step_mode(step))
-    state.setdefault("reduce_stack", bool(step.get("reduce_stack", False)))
-    return state
-
-
-def consume_step_payload(
-    step: Dict[str, Any],
-    state: Dict[str, Any],
-    payload: Dict[str, Any],
-    *,
-    frame_weight: float,
-    reference_force: np.ndarray | None,
-) -> None:
-    """Accumulate one reducer-ready payload into ``state`` for this step."""
-    _ops(step).consume(
-        state,
-        payload,
-        frame_weight=frame_weight,
-        reference_force=reference_force,
-    )
-
-
-def local_step_partials(step: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
-    """Return the per-rank partial result dict ready for MPI reduction."""
-    return _ops(step).local_partials(state)
-
-
-def step_reduce_plan(step: Dict[str, Any]) -> Dict[str, Tuple[str, ...]]:
-    """Return the ``{sum, max, stack, dict_sum, dict_update}`` reduce plan."""
-    return _ops(step).reduce_plan(step)
-
-
-def finalize_step_root(step: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
-    """Produce the root-rank finalized output from reduced step state."""
-    # Re-inject per-step inputs that the reduce plan does not carry (e.g.
-    # the rank-0 broadcast y_eff vector for cdfm_zbx). These are constant
-    # across ranks and already live on the step dict.
-    for key in ("reduce_stack", "need_hessian"):
-        if key in step and key not in state:
-            state = dict(state)
-            state[key] = step[key]
-    if "y_eff" in step and "y_eff" not in state:
-        state = dict(state)
-        state["y_eff"] = step["y_eff"]
-    if canonical_step_mode(step) == "cdfm_zbx":
-        for key in ("mode", "beta"):
-            if key in step and key not in state:
-                state = dict(state)
-                state[key] = step[key]
-    return _ops(step).finalize(state)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -752,16 +698,22 @@ def init_rdf_state(
     topology_arrays: "TopologyArrays",
 ) -> Dict[str, Any]:
     from ..analysis.rdf import init_distribution_state
-    from ..topology.types import InteractionKey
+    from ..topology.types import (
+        interaction_key_mapping_from_labels,
+        interaction_keys_from_labels,
+    )
 
     labels = step.get("interaction_keys")
-    interaction_keys = None if labels is None else [InteractionKey.from_label(str(label)) for label in labels]
+    interaction_keys = None if labels is None else interaction_keys_from_labels(labels)
     raw_mode_by_key = step.get("mode_by_key")
     mode_by_key = None
     if raw_mode_by_key is not None:
-        mode_by_key = {InteractionKey.from_label(str(k)): str(v) for k, v in raw_mode_by_key.items()}
+        mode_by_key = {
+            key: str(value)
+            for key, value in interaction_key_mapping_from_labels(raw_mode_by_key).items()
+        }
 
-    sel_indices = step.get("sel_indices")
+    sel_indices = step.get("_resolved_sel_indices")
     if sel_indices is not None:
         sel_indices = np.asarray(sel_indices, dtype=np.int32)
 
@@ -770,7 +722,7 @@ def init_rdf_state(
         forcefield_snapshot,
         interaction_keys=interaction_keys,
         mode_by_key=mode_by_key,
-        cutoff=float(step.get("cutoff", 30.0)),
+        cutoff=float(step["_resolved_cutoff"]),
         r_max=None if step.get("r_max") is None else float(step["r_max"]),
         nbins_pair=int(step.get("nbins_pair", 200)),
         nbins_bond=int(step.get("nbins_bond", 200)),
@@ -850,10 +802,7 @@ def reduce_plan_rdf(step: Dict[str, Any]) -> Dict[str, Tuple[str, ...]]:
             "angle_hist_by_key",
             "dihedral_hist_by_key",
         ),
-        # Static binning/configuration metadata is identical on every rank.
-        # Copy rank 0's values so finalize_distribution_state can reconstruct
-        # DistributionResult objects after the numeric partials are summed.
-        "root_copy": (
+        "root": (
             "pair_edges",
             "pair_centers",
             "pair_shell_vol",
@@ -884,6 +833,175 @@ def reduce_plan_rdf(step: Dict[str, Any]) -> Dict[str, Tuple[str, ...]]:
 def finalize_rdf_root(state: Dict[str, Any]) -> Dict[str, Any]:
     from ..analysis.rdf import finalize_distribution_state
     return finalize_distribution_state(state)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# spectral_rdf
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _spectral_geometry_keys(
+    step: Dict[str, Any],
+    forcefield_snapshot: "Forcefield",
+) -> list[Any]:
+    from ..topology.types import interaction_keys_from_labels
+
+    labels = step.get("_resolved_geometry_keys", step.get("interaction_keys"))
+    if labels is None:
+        keys = [key for key in forcefield_snapshot.keys() if key.style == "pair"]
+    else:
+        keys = interaction_keys_from_labels(labels)
+    keys = list(dict.fromkeys(keys))
+    if not keys:
+        raise ValueError("spectral_rdf requires at least one pair interaction key")
+    bad = [key for key in keys if key.style != "pair" or len(key.types) != 2]
+    if bad:
+        raise ValueError(f"spectral_rdf interaction_keys must all be pair keys: {bad}")
+    return keys
+
+
+def geometry_requirements_rdf(
+    step: Dict[str, Any],
+    forcefield_snapshot: "Forcefield",
+    topology_arrays: "TopologyArrays",
+) -> GeometryRequirements:
+    del topology_arrays
+    from ..topology.types import interaction_keys_from_labels
+
+    labels = step.get("interaction_keys")
+    if labels is None:
+        keys = list(forcefield_snapshot.keys())
+    else:
+        keys = interaction_keys_from_labels(labels)
+    keys = tuple(
+        dict.fromkeys(
+            key for key in keys
+            if key.style in {"pair", "bond", "angle", "dihedral"}
+        )
+    )
+    pair_cutoff = None
+    if any(key.style == "pair" for key in keys) and step.get("cutoff") is not None:
+        pair_cutoff = float(step["cutoff"])
+    return GeometryRequirements(keys=keys, pair_cutoff=pair_cutoff)
+
+
+def geometry_requirements_spectral_rdf(
+    step: Dict[str, Any],
+    forcefield_snapshot: "Forcefield",
+    topology_arrays: "TopologyArrays",
+) -> GeometryRequirements:
+    del topology_arrays
+    keys = _spectral_geometry_keys(step, forcefield_snapshot)
+    cutoff = float(step.get("r_max", step.get("cutoff", 30.0)))
+    sel_indices = step.get("sel_indices")
+    if sel_indices is not None:
+        sel_indices = np.asarray(sel_indices, dtype=np.int32)
+    exclude_option = step.get("exclude_option")
+    return GeometryRequirements(
+        keys=tuple(keys),
+        pair_cutoff=cutoff,
+        sel_indices=sel_indices,
+        exclude_option=None if exclude_option is None else str(exclude_option),
+    )
+
+
+def request_spectral_rdf(step: Dict[str, Any]) -> set[str]:
+    del step
+    return {"frame_cache"}
+
+
+def init_spectral_rdf_reducer_state(
+    step: Dict[str, Any],
+    forcefield_snapshot: "Forcefield",
+    topology_arrays: "TopologyArrays",
+) -> Dict[str, Any]:
+    from ..analysis.spectral_rdf import init_spectral_rdf_state
+
+    keys = _spectral_geometry_keys(step, forcefield_snapshot)
+    resolved_selection = step.get("_resolved_sel_indices", step.get("sel_indices"))
+    if resolved_selection is not None:
+        resolved_selection = np.asarray(resolved_selection, dtype=np.int32)
+    metadata = dict(step.get("metadata", {}))
+    metadata.update(dict(step.get("_resolved_metadata", {})))
+    return init_spectral_rdf_state(
+        topology_arrays,
+        forcefield_snapshot,
+        pair_keys=keys,
+        cutoff=float(step.get("cutoff", 30.0)),
+        r_min=float(step.get("r_min", 0.0)),
+        r_max=None if step.get("r_max") is None else float(step["r_max"]),
+        basis=str(step.get("basis", "cosine")),
+        max_modes=int(step.get("max_modes", 200)),
+        mode_cutoff=step.get("mode_cutoff", "auto"),
+        mode_cutoff_by_key=step.get("mode_cutoff_by_key"),
+        grid_size=int(step.get("grid_size", 2000)),
+        pair_chunk_size=int(step.get("pair_chunk_size", 100_000)),
+        exclude_option=str(
+            step.get("_resolved_exclude_option", step.get("exclude_option", "resid"))
+        ),
+        sel_indices=resolved_selection,
+        block_size=None if step.get("block_size") is None else int(step["block_size"]),
+        metadata=metadata,
+    )
+
+
+def consume_spectral_rdf_frame(
+    state: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    frame_weight: float,
+    reference_force: np.ndarray | None,
+) -> None:
+    del reference_force
+    from ..analysis.spectral_rdf import accumulate_spectral_rdf_frame
+
+    frame_cache = payload.get("frame_cache")
+    if frame_cache is None:
+        raise ValueError(
+            "spectral_rdf requires payload['frame_cache']; request frame_cache in compute()."
+        )
+    accumulate_spectral_rdf_frame(
+        state,
+        frame_cache,
+        frame_weight=float(frame_weight),
+        frame_idx=int(payload["frame_idx"]),
+    )
+
+
+def local_partials_spectral_rdf(state: Dict[str, Any]) -> Dict[str, Any]:
+    from ..analysis.spectral_rdf import spectral_rdf_local_partials
+
+    return spectral_rdf_local_partials(state)
+
+
+def reduce_plan_spectral_rdf(step: Dict[str, Any]) -> Dict[str, Tuple[str, ...]]:
+    del step
+    return {
+        "sum": (
+            "coefficient_sum",
+            "coefficient_square_sum",
+            "weight_sum",
+            "weight_square_sum",
+            "n_frames",
+            "volume_sum",
+        ),
+        "max": (
+            "negative_min_half_height",
+            "max_half_height_ratio",
+            "max_volume",
+            "negative_min_volume",
+            "max_frame_idx",
+            "negative_min_frame_idx",
+        ),
+        "stack": (),
+        "dict_sum": ("block_coefficient_sum", "block_weight_sum"),
+        "root": ("spectral_config",),
+    }
+
+
+def finalize_spectral_rdf_root(state: Dict[str, Any]) -> Dict[str, Any]:
+    from ..analysis.spectral_rdf import finalize_spectral_rdf_state
+
+    return finalize_spectral_rdf_state(state)
 
 
 
@@ -1167,6 +1285,16 @@ MODE_OPS: Dict[str, ReducerOps] = {
         local_partials=local_partials_rdf,
         reduce_plan=reduce_plan_rdf,
         finalize=finalize_rdf_root,
+        geometry_requirements=geometry_requirements_rdf,
+    ),
+    "spectral_rdf": ReducerOps(
+        init=init_spectral_rdf_reducer_state,
+        request=request_spectral_rdf,
+        consume=consume_spectral_rdf_frame,
+        local_partials=local_partials_spectral_rdf,
+        reduce_plan=reduce_plan_spectral_rdf,
+        finalize=finalize_spectral_rdf_root,
+        geometry_requirements=geometry_requirements_spectral_rdf,
     ),
     # CUSTOMIZE POINT: register new step_mode reducers here.
 }

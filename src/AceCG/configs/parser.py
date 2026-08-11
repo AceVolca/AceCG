@@ -26,10 +26,12 @@ from .models import (
 )
 from .utils import (
     extract_frame_id_from_data_file,
+    parse_bool_token,
     parse_exclude_setting,
     parse_pair_style_options,
 )
 from ..io.forcefield import ReadLmpFFBounds, ReadLmpFFMask
+from ..io.trajectory import format_for_path
 from ..topology.topology_array import TopologyArrays, collect_topology_arrays
 from ..topology.types import InteractionKey
 
@@ -53,6 +55,8 @@ _SUPPORTED_OPTIMIZER_TOKENS = frozenset(
         "adamwmaskedoptimizer",
         "rmsprop",
         "rmspropmaskedoptimizer",
+        "sgd",
+        "sgdmaskedoptimizer",
     }
 )
 _RESERVED_SECTIONS = frozenset({"vp", "conditioning"})
@@ -116,6 +120,7 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
             "engine_command",
             "trajectory_format",
             "init_config_pool",
+            "init_config_pool_rounds",
             "replay_mode",
             "ncores",
             "archive_trajectory",
@@ -192,17 +197,21 @@ _SECTION_ALLOWED_KEYS: Dict[str, frozenset] = {
         }
     ),
 }
-_FM_SPEC_ALLOWED_KEYS = frozenset({"pair_specs", "bond_specs", "angle_specs"})
+_FM_SPEC_ALLOWED_KEYS = frozenset(
+    {"pair_specs", "bond_specs", "angle_specs", "dihedral_specs"}
+)
 _FM_SPEC_MODELS = frozenset({"bspline", "multigaussian"})
 _FM_SPEC_STYLE_TO_KEY = {
     "pair": "pair_specs",
     "bond": "bond_specs",
     "angle": "angle_specs",
+    "dihedral": "dihedral_specs",
 }
 _AUTHORED_FM_EXPORT_RESOLUTION = {
     "pair": 0.1,
     "bond": 0.05,
     "angle": 0.5,
+    "dihedral": 0.5,
 }
 
 _BOLTZMANN_KCAL = 0.001987204  # kcal/(mol·K)
@@ -210,12 +219,29 @@ _BOLTZMANN_KCAL = 0.001987204  # kcal/(mol·K)
 
 # ─── Public API ───────────────────────────────────────────────────────
 
-def parse_acg_file(path: str | Path) -> ACGConfig:
+def parse_acg_file(
+    path: str | Path,
+    *,
+    overrides: Optional[Mapping[str, Any]] = None,
+) -> ACGConfig:
     """Load one ``.acg`` file and build the validated config model."""
     config_path = Path(path).expanduser().resolve()
     raw = parse_acg_text(
         config_path.read_text(encoding="utf-8"), source=str(config_path)
     )
+    for flat_key, value in (overrides or {}).items():
+        section, separator, field = str(flat_key).partition("__")
+        if not separator or not section or not field or "__" in field:
+            raise ACGConfigError(
+                f"Override key {flat_key!r} must use non-empty "
+                "section__field syntax."
+            )
+        if section not in _KNOWN_SECTIONS and section not in _KNOWN_NESTED_SECTIONS:
+            raise ACGConfigError(
+                f"Unknown config section {section!r} in override key "
+                f"{flat_key!r}."
+            )
+        raw.setdefault(section, {})[field] = value
     return build_acg_config(raw, path=config_path)
 
 
@@ -500,10 +526,16 @@ def build_acg_config(
         ).strip().lower(),
         input=_pop_optional_str(sampling_raw, "input"),
         engine_command=_pop_optional_str(sampling_raw, "engine_command"),
-        trajectory_format=_normalize_trajectory_format(
-            sampling_raw.pop("trajectory_format", None)
+        trajectory_format=format_for_path(
+            None,
+            explicit_format=sampling_raw.pop("trajectory_format", None),
         ),
-        init_config_pool=_pop_optional_str(sampling_raw, "init_config_pool"),
+        init_config_pool=_pop_optional_str_sequence(
+            sampling_raw, "init_config_pool"
+        ),
+        init_config_pool_rounds=_pop_optional_int_sequence(
+            sampling_raw, "init_config_pool_rounds"
+        ),
         replay_mode=str(
             sampling_raw.pop("replay_mode", "off")
         ).strip().lower(),
@@ -579,9 +611,10 @@ def build_acg_config(
 
     aa_ref = AARefConfig(
         trajectory_files=trajectory_files,
-        trajectory_format=_normalize_trajectory_format(
-            aa_ref_raw.pop("trajectory_format", "LAMMPSDUMP")
-        ) or "LAMMPSDUMP",
+        trajectory_format=format_for_path(
+            trajectory_files[0] if trajectory_files else None,
+            explicit_format=aa_ref_raw.pop("trajectory_format", None),
+        ),
         skip_frames=_pop_optional_int(aa_ref_raw, "skip_frames", default=0),
         every=_pop_optional_int(aa_ref_raw, "every", default=1),
         n_frames=_pop_optional_int(aa_ref_raw, "n_frames", default=0),
@@ -879,6 +912,22 @@ def _validate_config(config: ACGConfig) -> None:  # noqa: C901
             "prior xz checkpoints, or set sampling.replay_mode = off to draw "
             "from the configured init pool."
         )
+    if (
+        config.sampling.init_config_pool_rounds is not None
+        and config.sampling.init_config_pool is None
+    ):
+        raise ACGConfigError(
+            "sampling.init_config_pool_rounds requires sampling.init_config_pool."
+        )
+    if config.sampling.init_config_pool_rounds is not None:
+        n_pools = len(_as_string_sequence(config.sampling.init_config_pool))
+        n_rounds = len(config.sampling.init_config_pool_rounds)
+        if n_rounds != n_pools:
+            raise ACGConfigError(
+                "sampling.init_config_pool_rounds length must match "
+                "sampling.init_config_pool length; got "
+                f"{n_rounds} rounds for {n_pools} pool(s)."
+            )
 
     # Optional validation is simulation-only: no replay and no trajectory cleanup.
     validation = config.validation
@@ -967,34 +1016,8 @@ def _parse_section_header(line: str) -> Optional[str]:
     return None
 
 
-def _normalize_trajectory_format(value: Any) -> Optional[str]:
-    """Normalize common trajectory format aliases for MDAnalysis."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text or text.lower() == "auto":
-        return None
-    aliases = {
-        "lammpstrj": "LAMMPSDUMP",
-        "lammpsdump": "LAMMPSDUMP",
-        "lammps_dump": "LAMMPSDUMP",
-        "dump": "LAMMPSDUMP",
-        "xtc": "XTC",
-        "dcd": "DCD",
-        "h5md": "H5MD",
-        "trr": "TRR",
-        "xyz": "XYZ",
-    }
-    lowered = text.lower()
-    if lowered in aliases:
-        return aliases[lowered]
-    if all(char.isalnum() or char in {"_", "-"} for char in text):
-        return text.upper().replace("-", "_")
-    return text
-
-
 def _known_force_free_trajectory_format(value: Any) -> Optional[str]:
-    normalized = _normalize_trajectory_format(value)
+    normalized = format_for_path(None, explicit_format=value)
     if normalized is None:
         return None
     token = normalized.upper()
@@ -1339,6 +1362,10 @@ def _resolve_aa_ref_aliases(
 def validate_fm_spec_domain(
     spec_domain: Tuple[float, float],
     source_table_path: str,
+    *,
+    table_name: str | None = None,
+    style: str | None = None,
+    boundary_mode: str | None = None,
 ) -> Tuple[float, float, float]:
     """Validate that an FM spec domain matches the source table and return resolution.
 
@@ -1348,7 +1375,12 @@ def validate_fm_spec_domain(
     import numpy as np
     from ..io.tables import parse_lammps_table
 
-    r_values, _, _ = parse_lammps_table(source_table_path)
+    style_key = str(style or "").strip().lower()
+    r_values, _, _ = parse_lammps_table(
+        source_table_path,
+        table_name=table_name,
+        table_style=style_key or None,
+    )
     if r_values.size < 2:
         raise ACGConfigError(
             f"Source table {source_table_path} must contain at least "
@@ -1357,18 +1389,38 @@ def validate_fm_spec_domain(
     source_min = float(r_values[0])
     source_max = float(r_values[-1])
     spec_min, spec_max = spec_domain
+    resolution = float(np.median(np.diff(np.asarray(r_values, dtype=float))))
+    if not np.isfinite(resolution) or resolution <= 0.0:
+        raise ACGConfigError(
+            f"Source table {source_table_path} must use a strictly "
+            "increasing grid."
+        )
+    if style_key == "dihedral":
+        source_grid = np.asarray(r_values, dtype=float)
+        tol = 1.0e-8
+        if source_min < -180.0 - tol or source_max > 180.0 + tol:
+            raise ACGConfigError(
+                f"Dihedral table {source_table_path} must use signed degrees "
+                "within [-180, 180]."
+            )
+        if source_max - source_min >= 360.0 - tol:
+            raise ACGConfigError(
+                f"Dihedral table {source_table_path} must span strictly less "
+                "than 360 degrees and cannot contain both seam endpoints."
+            )
+        wrapped = (source_grid + 180.0) % 360.0 - 180.0
+        if np.unique(np.round(wrapped, decimals=10)).size != source_grid.size:
+            raise ACGConfigError(
+                f"Dihedral table {source_table_path} contains congruent "
+                "angle entries modulo 360 degrees."
+            )
+        return spec_min, spec_max, resolution
     tol = 1.0e-8
     if abs(spec_min - source_min) > tol or abs(spec_max - source_max) > tol:
         raise ACGConfigError(
             f"FM spec domain [{spec_min}, {spec_max}] does not match source "
             f"table domain [{source_min}, {source_max}] for "
             f"{source_table_path}."
-        )
-    resolution = float(np.median(np.diff(np.asarray(r_values, dtype=float))))
-    if not np.isfinite(resolution) or resolution <= 0.0:
-        raise ACGConfigError(
-            f"Source table {source_table_path} must use a strictly "
-            "increasing grid."
         )
     return spec_min, spec_max, resolution
 
@@ -1382,6 +1434,41 @@ def _pop_optional_str(
     return str(value)
 
 
+def _pop_optional_str_sequence(
+    mapping: MutableMapping[str, Any], key: str
+) -> Optional[str | Tuple[str, ...]]:
+    value = mapping.pop(key, None)
+    if value is None:
+        return None
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise ACGConfigError(f"{key} must not be an empty list.")
+        return tuple(str(item) for item in value)
+    return str(value)
+
+
+def _pop_optional_int_sequence(
+    mapping: MutableMapping[str, Any], key: str
+) -> Optional[Tuple[int, ...]]:
+    value = mapping.pop(key, None)
+    if value is None:
+        return None
+    raw_values = value if isinstance(value, (list, tuple)) else (value,)
+    if not raw_values:
+        raise ACGConfigError(f"{key} must not be an empty list.")
+    if any(type(item) is not int or item <= 0 for item in raw_values):
+        raise ACGConfigError(f"{key} values must be positive integers.")
+    return tuple(raw_values)
+
+
+def _as_string_sequence(value: Optional[str | Sequence[str]]) -> Tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(str(item) for item in value)
+
+
 def _pop_optional_float(
     mapping: MutableMapping[str, Any],
     key: str,
@@ -1389,9 +1476,9 @@ def _pop_optional_float(
     default: Optional[float] = None,
 ) -> Optional[float]:
     value = mapping.pop(key, default)
-    if value is None:
-        return None
-    return float(value)
+    if value is not None and (type(value) not in (int, float) or not math.isfinite(value)):
+        raise ACGConfigError(f"{key} must be a finite real number, got {value!r}.")
+    return None if value is None else float(value)
 
 
 def _pop_optional_int(
@@ -1401,9 +1488,9 @@ def _pop_optional_int(
     default: Optional[int] = None,
 ) -> Optional[int]:
     value = mapping.pop(key, default)
-    if value is None:
-        return None
-    return int(value)
+    if value is not None and type(value) is not int:
+        raise ACGConfigError(f"{key} must be an integer, got {value!r}.")
+    return value
 
 
 def _pop_optional_mapping(
@@ -1489,11 +1576,10 @@ def _pop_optional_bool(
     default: bool = False,
 ) -> bool:
     value = mapping.pop(key, default)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes")
-    return bool(value)
+    parsed = parse_bool_token(value)
+    if parsed is None:
+        raise ACGConfigError(f"{key} must be a boolean token, got {value!r}.")
+    return parsed
 
 
 # ─── FM spec parsing ─────────────────────────────────────────────────
@@ -1513,7 +1599,12 @@ def _build_fm_training_specs(
     angle_specs = _parse_fm_spec_group(
         fm_specs_raw.pop("angle_specs", ()), expected_style="angle"
     )
-    if method not in {"fm", "dsm"} and (pair_specs or bond_specs or angle_specs):
+    dihedral_specs = _parse_fm_spec_group(
+        fm_specs_raw.pop("dihedral_specs", ()), expected_style="dihedral"
+    )
+    if method not in {"fm", "dsm"} and (
+        pair_specs or bond_specs or angle_specs or dihedral_specs
+    ):
         raise ACGConfigError(
             "training.fm_specs is only supported when training.method is 'fm' or 'dsm'."
         )
@@ -1521,6 +1612,7 @@ def _build_fm_training_specs(
         pair_specs=pair_specs,
         bond_specs=bond_specs,
         angle_specs=angle_specs,
+        dihedral_specs=dihedral_specs,
     )
 
 
@@ -1614,6 +1706,11 @@ def _parse_one_fm_spec(
             f"[{entry_index}] model must be one of "
             f"{sorted(_FM_SPEC_MODELS)}, got {model!r}."
         )
+    if style == "dihedral" and model != "bspline":
+        raise ACGConfigError(
+            f"training.fm_specs.dihedral_specs[{entry_index}] only supports "
+            "model='bspline'."
+        )
 
     model_size = int(raw_spec[3])
     if model_size <= 0:
@@ -1668,6 +1765,29 @@ def _parse_one_fm_spec(
                 "slot; provide only optional model_overrides in position 6."
             )
         model_overrides = dict(raw_spec[5])
+
+    if style == "dihedral":
+        boundary_mode = str(
+            model_overrides.get("boundary_mode", "")
+        ).strip().lower()
+        if boundary_mode not in {"periodic", "cutoff"}:
+            raise ACGConfigError(
+                f"training.fm_specs.dihedral_specs[{entry_index}] requires "
+                "model_overrides.boundary_mode = 'periodic' or 'cutoff'."
+            )
+        if minimum < -180.0 or maximum > 180.0:
+            raise ACGConfigError(
+                f"training.fm_specs.dihedral_specs[{entry_index}] domain must "
+                "lie within [-180, 180]."
+            )
+        if boundary_mode == "periodic" and not (
+            math.isclose(minimum, -180.0, abs_tol=1.0e-10)
+            and math.isclose(maximum, 180.0, abs_tol=1.0e-10)
+        ):
+            raise ACGConfigError(
+                f"training.fm_specs.dihedral_specs[{entry_index}] periodic "
+                "mode requires domain [-180, 180]."
+            )
 
     return FMInteractionSpec(
         style=style,
@@ -1749,6 +1869,53 @@ def _parse_named_fm_spec(
     if degree <= 0:
         raise ACGConfigError(f"{key_prefix} degree must be positive.")
 
+    resolution = float(
+        raw_spec.get("resolution", _AUTHORED_FM_EXPORT_RESOLUTION[style])
+    )
+    if not math.isfinite(resolution) or resolution <= 0.0:
+        raise ACGConfigError(
+            f"{key_prefix} resolution must be finite and positive."
+        )
+
+    model_overrides: Dict[str, Any] = {"degree": degree}
+    if style == "dihedral":
+        boundary_mode = str(raw_spec.get("boundary_mode", "")).strip().lower()
+        if boundary_mode not in {"periodic", "cutoff"}:
+            raise ACGConfigError(
+                f"{key_prefix} must define boundary_mode as 'periodic' or 'cutoff'."
+            )
+        if minimum < -180.0 or maximum > 180.0:
+            raise ACGConfigError(
+                f"{key_prefix} domain must lie within [-180, 180] degrees."
+            )
+        if boundary_mode == "periodic":
+            if not (
+                math.isclose(minimum, -180.0, abs_tol=1.0e-10)
+                and math.isclose(maximum, 180.0, abs_tol=1.0e-10)
+            ):
+                raise ACGConfigError(
+                    f"{key_prefix} periodic mode requires domain [-180, 180]."
+                )
+        elif maximum - minimum >= 360.0 - 1.0e-10:
+            raise ACGConfigError(
+                f"{key_prefix} cutoff mode requires a domain narrower than 360 degrees."
+            )
+        if boundary_mode == "cutoff" and degree < 2:
+            raise ACGConfigError(
+                f"{key_prefix} cutoff mode requires degree >= 2."
+            )
+        n_table = int(round(360.0 / resolution))
+        if n_table < 2 or not math.isclose(
+            n_table * resolution,
+            360.0,
+            rel_tol=0.0,
+            abs_tol=1.0e-8,
+        ):
+            raise ACGConfigError(
+                f"{key_prefix} resolution must divide 360 degrees exactly."
+            )
+        model_overrides["boundary_mode"] = boundary_mode
+
     max_force: Optional[float] = None
     if style == "pair":
         if "max_force" not in raw_spec:
@@ -1773,9 +1940,9 @@ def _parse_named_fm_spec(
         model_size=n_coeffs,
         domain=(minimum, maximum),
         max_force=max_force,
-        model_overrides={"degree": degree},
+        model_overrides=model_overrides,
         init_mode="authored_zero",
-        resolution=_AUTHORED_FM_EXPORT_RESOLUTION[style],
+        resolution=resolution,
     )
 
 
@@ -1878,10 +2045,17 @@ def _normalize_fm_spec_types(
             f"training.fm_specs.angle_specs[{entry_index}] requires exactly "
             "3 types for style 'angle'."
         )
+    if style == "dihedral" and len(token_types) != 4:
+        raise ACGConfigError(
+            f"training.fm_specs.dihedral_specs[{entry_index}] requires exactly "
+            "4 types for style 'dihedral'."
+        )
     if style == "pair":
         return InteractionKey.pair(*token_types).types
     if style == "bond":
         return InteractionKey.bond(*token_types).types
     if style == "angle":
         return InteractionKey.angle(*token_types).types
+    if style == "dihedral":
+        return InteractionKey.dihedral(*token_types).types
     raise ACGConfigError(f"Unsupported FM spec style {style!r}.")

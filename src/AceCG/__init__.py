@@ -44,6 +44,10 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "MultiGaussianPotential": (".potentials.multi_gaussian", "MultiGaussianPotential"),
     "GaussianPotential": (".potentials.gaussian", "GaussianPotential"),
     "BSplinePotential": (".potentials.bspline", "BSplinePotential"),
+    "DihedralBSplinePotential": (
+        ".potentials.dihedral_bspline",
+        "DihedralBSplinePotential",
+    ),
     "LennardJonesPotential": (".potentials.lennardjones", "LennardJonesPotential"),
     "LennardJones96Potential": (".potentials.lennardjones96", "LennardJones96Potential"),
     "LennardJonesSoftPotential": (".potentials.lennardjones_soft", "LennardJonesSoftPotential"),
@@ -112,6 +116,7 @@ __all__ = [
     "MultiGaussianPotential",
     "GaussianPotential",
     "BSplinePotential",
+    "DihedralBSplinePotential",
     "LennardJonesPotential",
     "LennardJones96Potential",
     "LennardJonesSoftPotential",

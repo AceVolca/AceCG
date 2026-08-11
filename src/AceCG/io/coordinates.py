@@ -55,6 +55,7 @@ import numpy as np
 import yaml
 import MDAnalysis as mda
 from MDAnalysis.lib.distances import minimize_vectors, apply_PBC
+from MDAnalysis.lib.mdamath import triclinic_vectors
 
 from .coordinates_writers import write_gro, write_lammps_data, write_pdb
 
@@ -138,6 +139,119 @@ def has_valid_box(u: mda.Universe) -> bool:
     return np.all(dims[:3] > 0.0)
 
 
+def classify_box(
+    box: Optional[np.ndarray],
+) -> Tuple[str, Optional[np.ndarray], Optional[np.ndarray]]:
+    """Classify an MDAnalysis-style unit cell.
+
+    One place to answer "is this box usable, and is it triclinic?", a test that
+    used to be spelled out inline in several modules.
+
+    Parameters
+    ----------
+    box : np.ndarray or None
+        ``[lx, ly, lz]`` or ``[lx, ly, lz, alpha, beta, gamma]`` in Å/deg.
+
+    Returns
+    -------
+    kind : {"none", "ortho", "triclinic"}
+        ``"none"`` when the box is absent, non-finite, or has a non-positive
+        edge — callers should then skip all PBC work.
+    lengths : np.ndarray or None
+        ``(3,)`` float64 edge lengths; ``None`` when ``kind == "none"``.
+    matrix : np.ndarray or None
+        ``(3, 3)`` float64 lattice vectors as rows (``triclinic_vectors``
+        convention), only for ``kind == "triclinic"``.
+    """
+    if box is None:
+        return "none", None, None
+    arr = np.asarray(box, dtype=np.float64).ravel()
+    if arr.size < 3 or not np.all(np.isfinite(arr[:3])) or not np.all(arr[:3] > 0.0):
+        return "none", None, None
+    lengths = arr[:3].copy()
+    if arr.size < 6 or bool(np.allclose(arr[3:6], 90.0)):
+        return "ortho", lengths, None
+    return "triclinic", lengths, np.asarray(triclinic_vectors(arr[:6]), dtype=np.float64)
+
+
+def minimum_image_displacements(
+    displacements: np.ndarray,
+    box: np.ndarray,
+    *,
+    triclinic: str = "exact",
+    scratch: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Reduce displacement vectors to their minimum image, **in place**.
+
+    Works in the input dtype and returns the same array, so a float32 frame
+    buffer is imaged without a float64 round trip. This is the primitive behind
+    bead-level and molecule-level "make whole".
+
+    Parameters
+    ----------
+    displacements : np.ndarray
+        ``(..., 3)`` displacements, modified in place.
+    box : np.ndarray
+        Unit cell, see :func:`classify_box`. A ``"none"`` box is a no-op.
+    triclinic : {"exact", "fast"}, default "exact"
+        Strategy for non-orthorhombic cells. ``"exact"`` delegates to
+        :func:`MDAnalysis.lib.distances.minimize_vectors`, which is a true
+        minimum image even for displacements spanning several cells. ``"fast"``
+        rounds in fractional coordinates: ~9x cheaper, but it only guarantees
+        *a* lattice image whose fractional components lie in ``[-0.5, 0.5]``,
+        which is not the shortest vector for skewed cells (measured agreement
+        with the exact result: 100% orthorhombic, ~83% at gamma=60 deg, ~68%
+        for a 45/45/45 cell). Opt in only after verifying it is adequate.
+    scratch : np.ndarray, optional
+        Buffer shaped and typed like ``displacements``, reused for the
+        orthorhombic path's intermediate to avoid per-call allocation.
+
+    Returns
+    -------
+    np.ndarray
+        ``displacements``, imaged in place.
+
+    Notes
+    -----
+    ``d -= L * rint(d / L)`` is a true minimum image. OpenMSCG's ``cgmap``
+    instead applies at most a single +-1 box shift
+    (``d += (d/L > 0.5) * -L; d += (d/L < -0.5) * L``), equivalent to
+    ``d -= L * clip(rint(d / L), -1, 1)`` and therefore correct only while
+    ``|d| < L``. See ``unwrap="deprecated"`` in
+    :class:`AceCG.compute.cgmap.CGMapper` for the bit-compatible reproduction.
+    """
+    kind, lengths, matrix = classify_box(box)
+    if kind == "none":
+        return displacements
+    if kind == "ortho":
+        edges = lengths.astype(displacements.dtype, copy=False)
+        if (
+            scratch is None
+            or scratch.shape != displacements.shape
+            or scratch.dtype != displacements.dtype
+        ):
+            scratch = np.empty_like(displacements)
+        np.divide(displacements, edges, out=scratch)
+        np.rint(scratch, out=scratch)
+        np.multiply(scratch, edges, out=scratch)
+        np.subtract(displacements, scratch, out=displacements)
+        return displacements
+    flat = displacements.reshape(-1, 3)
+    if triclinic == "exact":
+        flat[:] = minimize_vectors(
+            np.ascontiguousarray(flat), box=np.asarray(box, dtype=np.float64).ravel()[:6]
+        )
+        return displacements
+    if triclinic != "fast":
+        raise ValueError(f"triclinic must be 'exact' or 'fast', got {triclinic!r}")
+    inverse = np.linalg.inv(matrix).astype(flat.dtype, copy=False)
+    lattice = matrix.astype(flat.dtype, copy=False)
+    fractional = flat @ inverse
+    np.subtract(fractional, np.rint(fractional), out=fractional)
+    flat[:] = fractional @ lattice
+    return displacements
+
+
 def make_bead_positions_whole(positions_A: np.ndarray, dimensions: np.ndarray) -> np.ndarray:
     """
     MIC-map all atoms in a bead relative to the first atom.
@@ -148,12 +262,17 @@ def make_bead_positions_whole(positions_A: np.ndarray, dimensions: np.ndarray) -
     if positions_A.shape[0] <= 1:
         return positions_A
     ref = positions_A[0].copy()
-    dr = positions_A - ref
-    dr_mic = minimize_vectors(dr, box=dimensions)
-    return ref + dr_mic
+    dr = np.array(positions_A - ref, dtype=np.float64)
+    minimum_image_displacements(dr, dimensions)
+    return ref + dr
 
 
-def wrap_positions_in_box(positions: np.ndarray, box: np.ndarray) -> np.ndarray:
+def wrap_positions_in_box(
+    positions: np.ndarray,
+    box: np.ndarray,
+    *,
+    out: Optional[np.ndarray] = None,
+) -> np.ndarray:
     """Wrap positions into the primary unit cell.
 
     Accepts a single frame ``(n_atoms, 3)`` with box ``(6,)`` or a batch
@@ -166,28 +285,64 @@ def wrap_positions_in_box(positions: np.ndarray, box: np.ndarray) -> np.ndarray:
     back to MDAnalysis ``apply_PBC`` (looped per frame). A box with any
     non-positive length is treated as absent and the positions are returned
     unchanged.
+
+    Parameters
+    ----------
+    out : np.ndarray, optional
+        Destination array. When supplied the result is written into it (casting
+        to its dtype), so passing the input array wraps in place — useful for a
+        float32 frame buffer. When omitted a new float64 array is returned,
+        preserving the historical contract.
+
+    Notes
+    -----
+    ``np.mod`` can return the box length itself instead of a value strictly
+    below it: in float32, ``np.mod(-1e-8, 338.07)`` is exactly ``338.07``. A
+    coordinate equal to ``L`` lies outside the half-open cell ``[0, L)`` and
+    trips downstream readers that bin by ``floor(x / L)``, so such values are
+    clamped to ``0``.
+
+    The clamp is applied again in *out*'s own dtype after the cast. Comparing
+    only in float64 is not enough: a float64 result one float32 ulp below ``L``
+    rounds up to exactly ``L`` on the way into a float32 buffer, which is the
+    buffer every TrajMap run wraps into (``CGMapper`` is built with
+    ``out_dtype=np.float32``). See FINDINGS.md F-034.
     """
     pos = np.asarray(positions, dtype=np.float64)
     box_arr = np.asarray(box, dtype=np.float64)
     lengths = box_arr[..., :3]
     if np.any(lengths <= 0.0):
+        if out is not None and out is not positions:
+            out[...] = positions
+            return out
         return positions
     orthorhombic = box_arr.shape[-1] < 6 or bool(np.allclose(box_arr[..., 3:6], 90.0))
     if orthorhombic:
         # Per-axis modulo; ``lengths[..., None, :]`` broadcasts the box over the
         # atom axis for both single ``(n,3)`` and batched ``(...,n,3)`` inputs.
-        return np.mod(pos, lengths[..., None, :])
-    # Triclinic-correct path via MDAnalysis apply_PBC.
-    if pos.ndim <= 2:
-        return apply_PBC(pos, box=box_arr)
-    flat_pos = pos.reshape((-1,) + pos.shape[-2:])
-    flat_box = np.broadcast_to(
-        box_arr, pos.shape[:-2] + (box_arr.shape[-1],)
-    ).reshape((-1, box_arr.shape[-1]))
-    out = np.empty_like(flat_pos)
-    for i in range(flat_pos.shape[0]):
-        out[i] = apply_PBC(flat_pos[i], box=flat_box[i])
-    return out.reshape(pos.shape)
+        edges = lengths[..., None, :]
+        wrapped = np.mod(pos, edges)
+        np.copyto(wrapped, 0.0, where=wrapped >= edges)
+    elif pos.ndim <= 2:
+        wrapped = apply_PBC(pos, box=box_arr)
+    else:
+        flat_pos = pos.reshape((-1,) + pos.shape[-2:])
+        flat_box = np.broadcast_to(
+            box_arr, pos.shape[:-2] + (box_arr.shape[-1],)
+        ).reshape((-1, box_arr.shape[-1]))
+        wrapped = np.empty_like(flat_pos)
+        for i in range(flat_pos.shape[0]):
+            wrapped[i] = apply_PBC(flat_pos[i], box=flat_box[i])
+        wrapped = wrapped.reshape(pos.shape)
+    if out is None:
+        return wrapped
+    out[...] = wrapped
+    if orthorhombic:
+        # Re-clamp in out's dtype: the cast above can round a value that was
+        # strictly below L up onto L exactly.
+        np.copyto(out, 0.0, where=out >= lengths[..., None, :].astype(out.dtype))
+    return out
+
 
 def bead_position_and_mass(
     u: mda.Universe,

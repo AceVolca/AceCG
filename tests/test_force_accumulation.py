@@ -180,7 +180,7 @@ def test_cdfm_baseline_preprocess_temporarily_uses_real_key_mask(tmp_path, monke
     seen_masks = []
 
     def fake_compute(**kwargs):
-        mask = dict(kwargs["interaction_mask"])
+        mask = dict(kwargs["geometry_mask"])
         seen_masks.append(mask)
         assert mask[real_key] is True
         assert mask[vp_key] is False
@@ -196,7 +196,7 @@ def test_cdfm_baseline_preprocess_temporarily_uses_real_key_mask(tmp_path, monke
     ]
 
     engine._preprocess_cdfm_zbx_steps(
-        one_pass_steps=steps,
+        steps=steps,
         work_dir=tmp_path,
         init_topology=str(tmp_path / "init.data"),
         rank=0,

@@ -8,8 +8,6 @@ This module supports an optional light-weight per-frame geometry cache:
   ``{frame_idx: FrameCache}``.
 - ``compute(..., request={"frame_cache", ...})`` returns the sliced
   per-frame cache under ``results["frame_cache"]``.
-- ``compute(..., return_observables=True)`` keeps the legacy
-  ``results["frame_observables"]`` spelling as a compatibility alias.
 - ``run_post(spec)`` reads observable-cache options from ``spec`` and can
   optionally collect these frame observables locally and, under MPI, gather
   them to rank 0, merge them into a single trajectory cache, and write that
@@ -26,7 +24,7 @@ import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -36,22 +34,25 @@ from .frame_geometry import FrameGeometry, compute_frame_geometry
 from .reducers import (
     accumulate_cdfm_zbx_stats,
     canonical_step_mode,
-    consume_step_payload,
-    finalize_step_root,
-    init_step_state,
-    local_step_partials,
+    reducer_ops,
     slice_observed_rows,
-    step_reduce_plan,
-    step_request,
 )
 from .requests import normalize_compute_request, request_kwargs
 from ..configs.energy_mask import accumulate_mask_diagnostics, normalize_energy_mask_spec
 from ..io.coordinates import wrap_positions_in_box
 from ..io.logger import get_screen_logger
+from ..io.trajectory import (
+    FrameRecord,
+    MPITrajReader,
+    reference_force_scale_to_lammps_real,
+    select_frame_ids,
+)
 from ..topology.forcefield import Forcefield
-from ..topology.neighbor import compute_pairs_by_type
+from ..topology.neighbor import compute_pairs_by_type, parse_exclude_option
 from ..topology.topology_array import TopologyArrays
-from ..topology.types import InteractionKey
+from ..topology.types import (
+    InteractionKey,
+)
 
 SCREEN_LOGGER = get_screen_logger("mpi_engine")
 
@@ -110,55 +111,61 @@ class TrajectoryCache:
 
 
 
-def _labels_to_interaction_keys(
-    labels: Optional[Sequence[str]],
-) -> Optional[List[InteractionKey]]:
-    """Parse JSON-friendly interaction-key labels into ``InteractionKey`` objects.
-
-    Parameters
-    ----------
-    labels
-        Optional sequence of labels such as ``["pair:A:B", "bond:C:D"]``.
-        ``None`` is returned unchanged so callers can distinguish between
-        "no selection provided" and an explicit empty list.
-    """
-    if labels is None:
-        return None
-    return [InteractionKey.from_label(str(label)) for label in labels]
-
-
-def _labels_to_mode_by_key(
-    mapping: Optional[Mapping[str, str]],
-) -> Optional[Dict[InteractionKey, str]]:
-    """Parse a JSON-friendly ``{label: mode}`` mapping for RDF/PDF selection."""
-    if mapping is None:
-        return None
-    return {InteractionKey.from_label(str(key)): str(value) for key, value in mapping.items()}
-
-
 def _selected_frame_ids_from_spec(
     shared_spec: Dict[str, Any],
     total_frames: int,
 ) -> List[int]:
-    """Return the global frame ids selected by the current post-processing spec."""
-    discrete_ids = shared_spec.get("frame_ids")
-    if discrete_ids is not None:
-        selected = [int(fid) for fid in discrete_ids]
-        return _subsample_frame_ids_from_noise_spec(selected, shared_spec)
+    """Return the global frame ids selected by the current post-processing spec.
 
-    frame_start = 0 if shared_spec.get("frame_start") is None else int(shared_spec["frame_start"])
-    frame_end = int(total_frames) if shared_spec.get("frame_end") is None else int(shared_spec["frame_end"])
-    every = int(shared_spec.get("every", 1))
-    n_subsample = _noise_subsample_per_epoch_from_spec(shared_spec)
-    selected_range = range(frame_start, frame_end, every)
-    n_selected = len(selected_range)
-    if n_subsample <= 0 or n_subsample >= n_selected:
-        return list(selected_range)
+    Window resolution is delegated to :func:`AceCG.io.trajectory.select_frame_ids`
+    — the shared implementation every AceCG trajectory consumer uses — and only
+    the AA-noise subsampling on top of it is specific to this engine.
+    """
+    selected = select_frame_ids(
+        int(total_frames),
+        start=0 if shared_spec.get("frame_start") is None else int(shared_spec["frame_start"]),
+        end=None if shared_spec.get("frame_end") is None else int(shared_spec["frame_end"]),
+        every=int(shared_spec.get("every", 1)),
+        frame_ids=shared_spec.get("frame_ids"),
+    )
+    return _subsample_frame_ids_from_noise_spec(selected, shared_spec)
 
-    rng = np.random.default_rng(_noise_subsample_seed_from_spec(shared_spec))
-    picked_offsets = rng.choice(n_selected, size=n_subsample, replace=False)
-    picked_offsets.sort()
-    return [selected_range[int(offset)] for offset in picked_offsets]
+
+# One frame as this engine accepts it: either a FrameRecord straight from
+# `iter_frames`, or a *same-frame batch* — the 4-tuple of stacked arrays that
+# `add_noise` produces, whose leading axis is the sample axis rather than one
+# frame. Both go through `_unpack_frame`.
+FrameLike = Union[
+    FrameRecord,
+    Mapping[str, Any],
+    Tuple[Any, np.ndarray, np.ndarray, Optional[np.ndarray]],
+]
+
+
+def _unpack_frame(
+    frame: FrameLike,
+) -> Tuple[Any, np.ndarray, np.ndarray, Optional[np.ndarray]]:
+    """``(frame_id, positions, box, reference_forces)`` from either frame form.
+
+    ``FrameRecord`` is a mapping with fixed keys, so the record path reads them
+    by name; the batch path is already positional.
+    """
+    if isinstance(frame, Mapping):
+        return frame["frame_id"], frame["positions"], frame["box"], frame["forces"]
+    frame_id, positions, box, reference_forces = frame
+    return frame_id, positions, box, reference_forces
+
+
+def _replace_reference_forces(frame: FrameLike, forces: np.ndarray) -> FrameLike:
+    """Return *frame* with only its reference-force payload replaced."""
+    if isinstance(frame, FrameRecord):
+        return frame.replace(forces=forces)
+    if isinstance(frame, Mapping):
+        updated = dict(frame)
+        updated["forces"] = forces
+        return updated
+    frame_id, positions, box, _ = frame
+    return frame_id, positions, box, forces
 
 
 def _noise_subsample_per_epoch_from_spec(shared_spec: Mapping[str, Any]) -> int:
@@ -243,6 +250,7 @@ def _load_frame_weight_file(
 def _frame_weight_array_from_spec(
     shared_spec: Dict[str, Any],
     total_frames: int,
+    selected_frame_ids: Sequence[int],
     *,
     loaded_frame_weight: Optional[np.ndarray] = None,
 ) -> Optional[np.ndarray]:
@@ -256,7 +264,7 @@ def _frame_weight_array_from_spec(
     if raw is None:
         return None
 
-    selected_ids = _selected_frame_ids_from_spec(shared_spec, total_frames)
+    selected_ids = [int(frame_id) for frame_id in selected_frame_ids]
     selected = np.asarray(selected_ids, dtype=np.int64)
     if selected.size and (np.any(selected < 0) or np.any(selected >= int(total_frames))):
         raise ValueError("selected frame ids must be within the input trajectory length")
@@ -291,59 +299,6 @@ def _frame_weight_array_from_spec(
         full_weights[selected] = weights
     return full_weights
 
-
-def _run_rdf_step(
-    step: Dict[str, Any],
-    *,
-    source: Any,
-    topology_arrays: TopologyArrays,
-    forcefield_snapshot: Forcefield,
-    frame_weights: Optional[Sequence[float]],
-    default_cutoff: Optional[float],
-    default_sel_indices: Optional[np.ndarray],
-    default_exclude_option: str,
-) -> Dict[InteractionKey, Any]:
-    """Execute one ``step_mode='rdf'`` step via ``analysis.rdf``.
-
-    The step is JSON-friendly. Any interaction-key selections or per-key modes
-    must therefore be supplied using string labels such as ``"pair:A:B"``.
-    """
-    from ..analysis.rdf import interaction_distributions
-
-    interaction_keys = _labels_to_interaction_keys(step.get("interaction_keys"))
-    mode_by_key = _labels_to_mode_by_key(step.get("mode_by_key"))
-    cutoff = default_cutoff if step.get("cutoff") is None else float(step["cutoff"])
-    if cutoff is None:
-        cutoff = 30.0
-
-    sel_indices = default_sel_indices
-    if step.get("sel_indices") is not None:
-        sel_indices = np.asarray(step["sel_indices"], dtype=np.int32)
-
-    return interaction_distributions(
-        source,
-        topology_arrays,
-        forcefield_snapshot,
-        interaction_keys=interaction_keys,
-        frame_weights=frame_weights,
-        mode_by_key=mode_by_key,
-        start=int(step.get("frame_start", 0)),
-        end=None if step.get("frame_end") is None else int(step["frame_end"]),
-        every=int(step.get("every", 1)),
-        cutoff=float(cutoff),
-        r_max=None if step.get("r_max") is None else float(step["r_max"]),
-        nbins_pair=int(step.get("nbins_pair", 200)),
-        nbins_bond=int(step.get("nbins_bond", 200)),
-        nbins_angle=int(step.get("nbins_angle", 180)),
-        nbins_dihedral=int(step.get("nbins_dihedral", 180)),
-        exclude_option=str(step.get("exclude_option", default_exclude_option)),
-        sel_indices=sel_indices,
-        angle_degrees=bool(step.get("angle_degrees", True)),
-        dihedral_degrees=bool(step.get("dihedral_degrees", True)),
-        dihedral_periodic=bool(step.get("dihedral_periodic", True)),
-        default_pair_mode=str(step.get("default_pair_mode", "rdf")),
-        default_bonded_mode=str(step.get("default_bonded_mode", "pdf")),
-    )
 
 def _env_flag(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -651,14 +606,14 @@ def _write_timing_report(
 
 def _has_enabled_style(
     keys: Sequence[Any],
-    interaction_mask: Optional[Dict[InteractionKey, bool]],
+    geometry_mask: Optional[Dict[InteractionKey, bool]],
     style: str,
 ) -> bool:
     """Return ``True`` if at least one enabled key of ``style`` exists."""
     for key in keys:
         if getattr(key, "style", None) != style:
             continue
-        if interaction_mask is not None and not interaction_mask.get(key, False):
+        if geometry_mask is not None and not geometry_mask.get(key, False):
             continue
         return True
     return False
@@ -719,18 +674,17 @@ class MPIComputeEngine:
     def compute(
         self,
         request: Iterable[str],
-        frame: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]],
+        frame: FrameLike,
         topology_arrays: TopologyArrays,
         forcefield_snapshot: Forcefield,
         frame_weight: float = 1.0,
         frame_weights: Optional[np.ndarray] = None,
-        interaction_mask: Optional[np.ndarray] = None,
+        geometry_mask: Optional[Mapping[InteractionKey, bool]] = None,
         pair_type_list: Optional[List[Any]] = None,
         pair_cutoff: Optional[float] = None,
         sel_indices: Optional[np.ndarray] = None,
         exclude_option: str = "resid",
         timing: Optional[Dict[str, Any]] = None,
-        return_observables: bool = False,
         frame_idx: Optional[int] = None,
         pair_cache_override: Optional[Dict[InteractionKey, Tuple[np.ndarray, np.ndarray]]] = None,
         batch_size: Optional[int] = None,
@@ -739,7 +693,6 @@ class MPIComputeEngine:
         neighbor_reference_positions: Optional[np.ndarray] = None,
         neighbor_reference_box: Optional[np.ndarray] = None,
         coordinate_mask: Optional[Mapping[str, Any]] = None,
-        **kwargs,
     ) -> Dict[str, Any]:
         """Compute registered observables for one frame or same-frame batch.
 
@@ -750,21 +703,18 @@ class MPIComputeEngine:
             trainers / post-processing steps. Legacy ``need_*`` boolean
             mappings are normalized for compatibility.
         frame
-            Frame tuple in the format ``(frame_id, positions, box,
-            reference_forces)``. ``positions`` may have shape ``(n_atoms, 3)``
-            or ``(..., n_atoms, 3)``.
+            Either a :class:`~AceCG.io.trajectory.FrameRecord` from
+            :func:`~AceCG.io.trajectory.iter_frames`, or a same-frame batch as
+            the ``(frame_ids, positions, boxes, reference_forces)`` tuple
+            :meth:`add_noise` returns. ``positions`` may have shape
+            ``(n_atoms, 3)`` or ``(..., n_atoms, 3)``.
         frame_weights
             Optional sample weights for batched coordinates. They are normalized
             within this compute call. The scalar ``frame_weight`` remains the
             outer per-base-frame weight used by reducers.
-        return_observables
-            If ``True``, append a light-weight ``FrameCache`` object to the
-            returned payload under the legacy key
-            ``results["frame_observables"]``.
         frame_idx
             Optional explicit frame index to use when constructing
-            ``FrameCache``. If omitted, the first entry of ``frame`` is
-            used, which matches the normal iter_frames contract.
+            ``FrameCache``. If omitted, the frame's own ``frame_id`` is used.
         neighbor_mode
             Pair-cache policy for batched same-frame coordinates. ``"shared"``
             builds one cache from the first sample, ``"skin"`` builds one
@@ -777,7 +727,7 @@ class MPIComputeEngine:
 
         Notes
         -----
-        ``interaction_mask`` defaults to ``forcefield_snapshot.key_mask`` when
+        ``geometry_mask`` defaults to ``forcefield_snapshot.key_mask`` when
         not provided.
         """
 
@@ -790,7 +740,7 @@ class MPIComputeEngine:
         energy_result: Dict[str, Any] = {}
         force_result: Dict[str, Any] = {}
 
-        frame_id, positions, box, reference_forces = frame
+        frame_id, positions, box, reference_forces = _unpack_frame(frame)
         # Normalize both single frames and same-frame batches to one flat sample
         # axis. Single-frame chunks are later passed back as the original 2D
         # shape to preserve the public compute() contract.
@@ -847,17 +797,17 @@ class MPIComputeEngine:
             frame_idx = int(frame_ids_arr[0]) if frame_ids_arr.size else int(frame_id)
         results["frame_idx"] = int(frame_idx)
 
-        active_interaction_mask = (
-            interaction_mask
-            if interaction_mask is not None
+        active_geometry_mask = (
+            geometry_mask
+            if geometry_mask is not None
             else forcefield_snapshot.key_mask
         )
         ff_keys = list(forcefield_snapshot.keys())
 
         build_pairs = bool(pair_type_list) and pair_cutoff is not None
-        build_bonds = _has_enabled_style(ff_keys, active_interaction_mask, "bond")
-        build_angles = _has_enabled_style(ff_keys, active_interaction_mask, "angle")
-        build_dihedrals = _has_enabled_style(ff_keys, active_interaction_mask, "dihedral")
+        build_bonds = _has_enabled_style(ff_keys, active_geometry_mask, "bond")
+        build_angles = _has_enabled_style(ff_keys, active_geometry_mask, "angle")
+        build_dihedrals = _has_enabled_style(ff_keys, active_geometry_mask, "dihedral")
 
         pair_cache = pair_cache_override if build_pairs else None
         pair_search_skin = neighbor_skin if neighbor_mode in {"skin", "chunk"} else 0.0
@@ -870,7 +820,7 @@ class MPIComputeEngine:
         frame_cache_requested = geometry_kwargs["frame_cache"]
         # Current cache semantics are per real trajectory frame, not per noisy
         # same-frame sample. Noisy FM/REM therefore keep cache requests off.
-        if is_batch and (return_observables or frame_cache_requested):
+        if is_batch and frame_cache_requested:
             raise ValueError("batched compute does not support frame-cache requests.")
 
         weights = _normalize_sample_weights(frame_weights, n_samples)
@@ -966,12 +916,12 @@ class MPIComputeEngine:
                 chunk_positions,
                 chunk_boxes,
                 topology_arrays,
-                interaction_mask=active_interaction_mask,
+                interaction_mask=active_geometry_mask,
                 pair_cache=chunk_pair_cache,
             )
             if timing is not None:
                 _add_timing(timing, "geometry", time.monotonic() - t0)
-            if start == 0 and not is_batch and (return_observables or frame_cache_requested):
+            if start == 0 and not is_batch and frame_cache_requested:
                 cache_geom = geom
 
             # Step 3: Compute energy-related observables if requested.
@@ -1051,10 +1001,7 @@ class MPIComputeEngine:
                 include_dihedral=build_dihedrals,
                 include_box=True,
             )
-            if frame_cache_requested:
-                results["frame_cache"] = frame_cache
-            if return_observables:
-                results["frame_observables"] = frame_cache
+            results["frame_cache"] = frame_cache
 
         # Add other observable requests from registered functions.
         # Placeholder for future registered observable requests.
@@ -1063,7 +1010,7 @@ class MPIComputeEngine:
 
     def add_noise(
         self,
-        frame: Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]],
+        frame: FrameLike,
         noise: Mapping[str, Any],
         topology_arrays: TopologyArrays,
     ) -> Tuple[Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]], np.ndarray]:
@@ -1071,7 +1018,7 @@ class MPIComputeEngine:
 
         ``noise`` is an epoch-local runtime spec, passed from workflow to engine via post_spec dict.
         """
-        frame_id, positions, box, reference_forces = frame
+        frame_id, positions, box, reference_forces = _unpack_frame(frame)
         pos = np.asarray(positions, dtype=np.float64)
         if pos.ndim != 2 or pos.shape[-1] != 3:
             raise ValueError(f"frame positions must have shape (n_atoms, 3), got {pos.shape}")
@@ -1179,16 +1126,10 @@ class MPIComputeEngine:
         weights = np.full(total_samples, 1.0 / float(total_samples), dtype=np.float64)
         return (frame_ids, positions_batch, box_batch, reference_force_batch), weights
 
-    def _shared_step_requests(self, steps: Sequence[dict]) -> frozenset[str]:
-        request: set[str] = set()
-        for step in steps:
-            request.update(step_request(step))
-        return frozenset(request)
-
     def _reduce_step_partials(
         self,
-        step: dict,
         local_result: Dict[str, Any],
+        plan: Dict[str, Tuple[str, ...]],
         *,
         discrete_frame_ids: bool = False,
     ) -> Optional[Dict[str, Any]]:
@@ -1208,13 +1149,12 @@ class MPIComputeEngine:
         comm = self.comm
         rank = 0 if comm is None else comm.Get_rank()
         size = 1 if comm is None else comm.Get_size()
-        plan = step_reduce_plan(step)
         sum_keys = list(plan["sum"])
         max_keys = set(plan["max"])
         stack_keys = list(plan["stack"])
         dict_sum_keys = list(plan.get("dict_sum", ()))
         dict_update_keys = list(plan.get("dict_update", ()))
-        root_copy_keys = list(plan.get("root_copy", ()))
+        root_keys = list(plan.get("root", ()))
 
         if comm is not None and size > 1:
             from mpi4py import MPI
@@ -1271,8 +1211,8 @@ class MPIComputeEngine:
                         merged.update(dict(item))
                     reduced[key] = merged
             if rank == 0:
-                for key in root_copy_keys:
-                    reduced[key] = local_result.get(key)
+                for key in root_keys:
+                    reduced[key] = local_result[key]
         else:
             reduced = dict(local_result)
 
@@ -1298,7 +1238,7 @@ class MPIComputeEngine:
     def _preprocess_cdfm_zbx_steps(
         self,
         *,
-        one_pass_steps: Sequence[Dict[str, Any]],
+        steps: Sequence[Dict[str, Any]],
         work_dir: Path,
         init_topology: str,
         rank: int,
@@ -1319,7 +1259,7 @@ class MPIComputeEngine:
         # every rank. The forcefield mask is temporarily flipped to CG-only
         # during the baseline force call and fully restored before the main
         # frame loop, so downstream reducers see the original training mask.
-        for step in one_pass_steps:
+        for step in steps:
             mode = str(step["step_mode"]).strip().lower()
             if mode != "cdfm_zbx":
                 continue
@@ -1377,7 +1317,7 @@ class MPIComputeEngine:
                         topology_arrays=topology_arrays,
                         forcefield_snapshot=forcefield_snapshot,
                         frame_weight=1.0,
-                        interaction_mask=forcefield_snapshot.key_mask,
+                        geometry_mask=forcefield_snapshot.key_mask,
                         pair_type_list=pair_type_list,
                         pair_cutoff=pair_cutoff,
                         sel_indices=sel_indices,
@@ -1434,9 +1374,6 @@ class MPIComputeEngine:
         post-processing outputs: when an output path is provided, rank 0 writes
         the pickle payload and ``run_post()`` itself returns ``None``.
         """
-        import MDAnalysis as mda
-
-        from ..io.trajectory import iter_frames
         from ..topology.topology_array import collect_topology_arrays
 
         collect_observables = bool(spec.get("collect_observables", False))
@@ -1469,21 +1406,33 @@ class MPIComputeEngine:
             if not bool(noise_spec.get("enabled", True)):
                 noise_spec = None
         all_steps = [dict(step) for step in spec.get("steps", [])]
-        # RDF historically used a rank-0 compatibility path below.  The reducer
-        # registry also provides a true one-pass MPI RDF reducer; keep the old
-        # behaviour by default and let large analyses opt into distributed
-        # frame processing without materialising/gathering a TrajectoryCache.
-        mpi_reduce_rdf = bool(shared_spec.get("mpi_reduce_rdf", False))
-        one_pass_steps = [
-            step
-            for step in all_steps
-            if canonical_step_mode(step) != "rdf" or mpi_reduce_rdf
-        ]
-        rdf_steps = [
-            step
-            for step in all_steps
-            if canonical_step_mode(step) == "rdf" and not mpi_reduce_rdf
-        ]
+        step_ops = [reducer_ops(step) for step in all_steps]
+        for step in all_steps:
+            if canonical_step_mode(step) != "rdf":
+                continue
+            removed_fields = [
+                field
+                for field in (
+                    "rdf_source",
+                    "frame_start",
+                    "frame_end",
+                    "every",
+                    "sel_indices",
+                    "exclude_option",
+                )
+                if field in step
+            ]
+            if removed_fields:
+                raise ValueError(
+                    "rdf step fields "
+                    f"{removed_fields!r} were removed; ordinary RDF uses the shared "
+                    "trajectory pass and top-level frame_start, frame_end, every, sel, "
+                    "and exclude_option."
+                )
+        if noise_spec is not None and any(
+            canonical_step_mode(step) == "rdf" for step in all_steps
+        ):
+            raise ValueError("noise is not supported with ordinary rdf steps.")
         perf_trace = bool(shared_spec.get("perf_trace", _env_flag("ACECG_POST_PERF_TRACE")))
         trace_all_ranks = bool(
             shared_spec.get(
@@ -1501,103 +1450,104 @@ class MPIComputeEngine:
         heartbeat_start = time.monotonic()
         _trace(perf_trace, rank, f"run_post start, MPI size={size}", all_ranks=trace_all_ranks)
         t0 = time.monotonic()
-        with open(shared_spec["forcefield_path"], "rb") as handle:
-            forcefield_snapshot = pickle.load(handle)
+        forcefield_path = shared_spec.get("forcefield_path")
+        if forcefield_path is None:
+            unsupported_without_forcefield = [
+                canonical_step_mode(step)
+                for step in all_steps
+                if canonical_step_mode(step) != "spectral_rdf"
+            ]
+            if unsupported_without_forcefield:
+                raise ValueError(
+                    "spec['forcefield_path'] is required unless every post step is "
+                    f"spectral_rdf; got {unsupported_without_forcefield}"
+                )
+            forcefield_snapshot = Forcefield()
+        else:
+            with open(forcefield_path, "rb") as handle:
+                forcefield_snapshot = pickle.load(handle)
         _add_timing(local_timing, "load_forcefield", time.monotonic() - t0)
 
+        trajectory = shared_spec["trajectory"]
+        if isinstance(trajectory, str):
+            trajectory = [trajectory]
+        trajectory_paths = [str(path) for path in trajectory]
+        topology = str(shared_spec["topology"])
+        exclude_option = parse_exclude_option(
+            shared_spec.get("exclude_option", "none")
+        )
+        reader = MPITrajReader(
+            topology=topology,
+            trajectory_files=trajectory_paths,
+            trajectory_format=shared_spec.get("trajectory_format"),
+            topology_format=shared_spec.get("topology_format"),
+            comm=comm,
+            strategy="broadcast",
+        )
+
+        context_outcome = None
         if rank == 0:
-            _trace(perf_trace, rank, "opening root universe", all_ranks=trace_all_ranks)
-            t0 = time.monotonic()
-            topology = str(shared_spec["topology"])
-            traj = shared_spec["trajectory"]
-            if isinstance(traj, str):
-                traj = [traj]
-            topology_format = shared_spec.get("topology_format")
-            if topology_format is None and Path(topology).suffix.lower() == ".data":
-                topology_format = "DATA"
-            universe = mda.Universe(
-                topology,
-                *[str(path) for path in traj],
-                format=shared_spec.get("trajectory_format", "LAMMPSDUMP"),
-                topology_format=topology_format,
-            )
-            _add_timing(local_timing, "root_open_universe", time.monotonic() - t0)
-            t0 = time.monotonic()
-            topology_arrays = collect_topology_arrays(
-                universe,
-                exclude_bonded=shared_spec.get("exclude_bonded", "111"),
-                exclude_option=shared_spec.get("exclude_option", "resid"),
-                atom_type_name_aliases=shared_spec.get("atom_type_name_aliases"),
-                vp_names=shared_spec.get("vp_names", shared_spec.get("vp_types")),
-            )
-            _add_timing(local_timing, "collect_topology_arrays", time.monotonic() - t0)
-            t0 = time.monotonic()
-            sel_indices = np.asarray(
-                universe.select_atoms(str(shared_spec.get("sel", "all"))).indices,
-                dtype=np.int32,
-            )
-            total_frames = len(universe.trajectory)
-            _add_timing(local_timing, "select_atoms", time.monotonic() - t0)
+            try:
+                _trace(perf_trace, rank, "opening root universe", all_ranks=trace_all_ranks)
+                t0 = time.monotonic()
+                universe = reader.open_full()
+                _add_timing(local_timing, "root_open_universe", time.monotonic() - t0)
+                t0 = time.monotonic()
+                topology_arrays = collect_topology_arrays(
+                    universe,
+                    exclude_bonded=shared_spec.get("exclude_bonded", "111"),
+                    exclude_option=exclude_option,
+                    atom_type_name_aliases=shared_spec.get("atom_type_name_aliases"),
+                    vp_names=shared_spec.get("vp_names", shared_spec.get("vp_types")),
+                )
+                _add_timing(local_timing, "collect_topology_arrays", time.monotonic() - t0)
+                t0 = time.monotonic()
+                sel_indices = np.asarray(
+                    universe.select_atoms(str(shared_spec.get("sel", "all"))).indices,
+                    dtype=np.int32,
+                )
+                root_selected_frame_ids = _selected_frame_ids_from_spec(
+                    shared_spec,
+                    len(universe.trajectory),
+                )
+                _add_timing(local_timing, "select_atoms", time.monotonic() - t0)
+                context_outcome = (
+                    (topology_arrays, sel_indices, root_selected_frame_ids),
+                    None,
+                )
+            except Exception as exc:
+                universe = None
+                context_outcome = (None, exc)
         else:
             universe = None
-            topology_arrays = None
-            sel_indices = None
-            total_frames = None
 
         if comm is not None and size > 1:
             t0 = time.monotonic()
-            universe, topology_arrays, sel_indices, total_frames = comm.bcast(
-                (universe, topology_arrays, sel_indices, total_frames)
-                if rank == 0
-                else None,
-                root=0,
-            )
+            context_outcome = comm.bcast(context_outcome, root=0)
             _add_timing(local_timing, "broadcast_shared_context", time.monotonic() - t0)
+        if context_outcome is None:
+            raise RuntimeError("MPIComputeEngine.run_post() produced no topology context.")
+        topology_context, context_error = context_outcome
+        if context_error is not None:
+            raise context_error
+        if topology_context is None:
+            raise RuntimeError("MPIComputeEngine.run_post() produced no topology context.")
+        topology_arrays, sel_indices, root_selected_frame_ids = topology_context
 
-        if universe is None:
-            raise RuntimeError("MPIComputeEngine.run_post() requires a local Universe.")
+        t0 = time.monotonic()
+        plan = reader.scan(
+            frame_ids=root_selected_frame_ids,
+            inspection_universe=universe,
+        )
+        _add_timing(local_timing, "broadcast_shared_context", time.monotonic() - t0)
+        total_frames = int(plan.total_frames)
+        n_selected = len(plan.frame_ids)
+        selected_frame_ids = reader.local_frame_ids
+        local_count = len(selected_frame_ids)
 
-        # Frame distribution.
-        # Two modes: (a) discrete frame_ids list, (b) contiguous range.
-        # Mode (a) is opt-in via spec["frame_ids"] — it lets a caller process
-        # an arbitrary non-contiguous subset of frames, e.g. a K-frame
-        # subsample out of a longer trajectory.
         discrete_ids = shared_spec.get("frame_ids")
         noise_subsample_per_epoch = _noise_subsample_per_epoch_from_spec(shared_spec)
         use_discrete_frame_ids = discrete_ids is not None or noise_subsample_per_epoch > 0
-        if use_discrete_frame_ids:
-            all_selected_frame_ids = _selected_frame_ids_from_spec(
-                shared_spec,
-                int(total_frames),
-            )
-            all_ids = all_selected_frame_ids
-            n_selected = len(all_ids)
-            base_count, remainder = divmod(n_selected, size)
-            local_count = base_count + (1 if rank < remainder else 0)
-            local_offset = rank * base_count + min(rank, remainder)
-            local_ids = all_ids[local_offset : local_offset + local_count]
-            # Contiguous-range variables are unused on this path.
-            local_start = local_end = every = None
-            selected_frame_ids = list(local_ids)
-        else:
-            local_ids = None
-            frame_start = (
-                0 if shared_spec.get("frame_start") is None else int(shared_spec["frame_start"])
-            )
-            frame_end = (
-                int(total_frames)
-                if shared_spec.get("frame_end") is None
-                else int(shared_spec["frame_end"])
-            )
-            every = int(shared_spec.get("every", 1))
-
-            n_selected = len(range(frame_start, frame_end, every))
-            base_count, remainder = divmod(n_selected, size)
-            local_count = base_count + (1 if rank < remainder else 0)
-            local_offset = rank * base_count + min(rank, remainder)
-            local_start = frame_start + local_offset * every
-            local_end = frame_start + (local_offset + local_count) * every
-            selected_frame_ids = list(range(local_start, local_end, every))
 
         if heartbeat_interval > 0:
             _write_rank_heartbeat(
@@ -1635,6 +1585,7 @@ class MPIComputeEngine:
         frame_weight_all = _frame_weight_array_from_spec(
             shared_spec,
             int(total_frames),
+            plan.frame_ids,
             loaded_frame_weight=loaded_frame_weight,
         )
         if frame_weight_all is None:
@@ -1642,24 +1593,106 @@ class MPIComputeEngine:
         else:
             frame_weight_local = frame_weight_all[np.asarray(selected_frame_ids, dtype=np.int64)]
 
-        pair_cutoff = (
+        top_level_pair_cutoff = (
             None if shared_spec.get("cutoff") is None else float(shared_spec["cutoff"])
         )
-        exclude_option = shared_spec.get("exclude_option", "none")
-
+        pair_cutoff = top_level_pair_cutoff
         # These are needed by the cdfm_zbx baseline preprocessing block below
         # (and reused in the main frame loop). They depend only on
         # ``forcefield_snapshot`` and ``shared_spec``, so they are safe to
         # compute here before per-step preprocessing.
-        pair_type_list = [
+        forcefield_pair_keys = [
             key
             for key in forcefield_snapshot.keys()
             if getattr(key, "style", None) == "pair"
         ]
-        interaction_mask = getattr(forcefield_snapshot, "key_mask", None)
+        pair_type_list = list(forcefield_pair_keys)
+        geometry_keys: list[InteractionKey] = []
+        for step, ops in zip(all_steps, step_ops):
+            if ops.geometry_requirements is None:
+                requirement = None
+            else:
+                requirement = ops.geometry_requirements(
+                    step,
+                    forcefield_snapshot,
+                    topology_arrays,
+                )
+            if requirement is None:
+                continue
+            requested_selection = (
+                sel_indices
+                if requirement.sel_indices is None
+                else np.asarray(requirement.sel_indices, dtype=np.int32)
+            )
+            if not np.array_equal(requested_selection, sel_indices):
+                raise ValueError(
+                    "All pair-consuming post steps must use the shared top-level selection. "
+                    "Set spec['sel'] rather than a different step sel_indices."
+                )
+            requested_exclusion = (
+                exclude_option
+                if requirement.exclude_option is None
+                else parse_exclude_option(requirement.exclude_option)
+            )
+            if requested_exclusion != exclude_option:
+                raise ValueError(
+                    "All pair-consuming post steps must use the shared top-level "
+                    f"exclude_option={exclude_option!r}; got {requested_exclusion!r}."
+                )
+            geometry_keys.extend(requirement.keys)
+            required_pair_keys = [key for key in requirement.keys if key.style == "pair"]
+            pair_type_list.extend(required_pair_keys)
+            if canonical_step_mode(step) == "rdf":
+                rdf_cutoff = requirement.pair_cutoff
+                if rdf_cutoff is None:
+                    rdf_cutoff = (
+                        30.0
+                        if top_level_pair_cutoff is None
+                        else top_level_pair_cutoff
+                    )
+                step["_resolved_cutoff"] = float(rdf_cutoff)
+                if required_pair_keys:
+                    pair_cutoff = (
+                        float(rdf_cutoff)
+                        if pair_cutoff is None
+                        else max(float(pair_cutoff), float(rdf_cutoff))
+                    )
+            elif required_pair_keys and requirement.pair_cutoff is not None:
+                pair_cutoff = (
+                    float(requirement.pair_cutoff)
+                    if pair_cutoff is None
+                    else max(float(pair_cutoff), float(requirement.pair_cutoff))
+                )
+            step["_resolved_geometry_keys"] = [key.label() for key in requirement.keys]
+            step["_resolved_sel_indices"] = np.asarray(sel_indices, dtype=np.int32)
+            step["_resolved_exclude_option"] = exclude_option
+            step["_resolved_metadata"] = {
+                "frame_selection": {
+                    "frame_start": shared_spec.get("frame_start", 0),
+                    "frame_end": shared_spec.get("frame_end", int(total_frames)),
+                    "every": shared_spec.get("every", 1),
+                    "n_selected": int(n_selected),
+                },
+                "selection": str(shared_spec.get("sel", "all")),
+                "exclude_bonded": str(shared_spec.get("exclude_bonded", "111")),
+                "mpi_size": int(size),
+            }
+        pair_type_list = list(dict.fromkeys(pair_type_list))
+
+        def _geometry_mask_with_required_keys(raw_mask):
+            if raw_mask is None:
+                return None
+            merged = dict(raw_mask)
+            for key in geometry_keys:
+                merged[key] = True
+            return merged
+
+        geometry_mask = _geometry_mask_with_required_keys(
+            getattr(forcefield_snapshot, "key_mask", None)
+        )
 
         self._preprocess_cdfm_zbx_steps(
-            one_pass_steps=one_pass_steps,
+            steps=all_steps,
             work_dir=work_dir,
             init_topology=str(shared_spec["topology"]),
             rank=rank,
@@ -1671,49 +1704,39 @@ class MPIComputeEngine:
             sel_indices=sel_indices,
             exclude_option=exclude_option,
         )
-        # Refresh the cached interaction_mask in case preprocessing changed
+        # Refresh the geometry-only mask in case preprocessing changed
         # forcefield key-mask metadata.
-        interaction_mask = getattr(forcefield_snapshot, "key_mask", None)
+        geometry_mask = _geometry_mask_with_required_keys(
+            getattr(forcefield_snapshot, "key_mask", None)
+        )
         
         step_states = [
-            init_step_state(step, forcefield_snapshot, topology_arrays) for step in one_pass_steps
+            ops.init(step, forcefield_snapshot, topology_arrays)
+            for step, ops in zip(all_steps, step_ops)
         ]
-        request = self._shared_step_requests(one_pass_steps)
-        coordinate_mask = _shared_energy_mask_from_steps(one_pass_steps, shared_spec)
+        request = normalize_compute_request(
+            {name for step, ops in zip(all_steps, step_ops) for name in ops.request(step)}
+            | ({"frame_cache"} if collect_observables else set())
+        )
+        coordinate_mask = _shared_energy_mask_from_steps(all_steps, shared_spec)
         geometry_kwargs = request_kwargs("geometry", request)
         traj_reader_kwargs = request_kwargs("traj_reader", request)
-        if noise_spec is not None and (collect_observables or geometry_kwargs["frame_cache"]):
+        if noise_spec is not None and geometry_kwargs["frame_cache"]:
             raise ValueError(
-                "spec['noise'] batch processing does not support frame-cache or observables requests."
+                "spec['noise'] batch processing does not support frame-cache requests."
             )
         include_reference_forces = traj_reader_kwargs["include_forces"]
+        reference_force_scale = reference_force_scale_to_lammps_real(
+            reader.trajectory_format
+        )
 
-        if local_ids is not None:
-            _trace(
-                perf_trace,
-                rank,
-                f"frame loop start (discrete) local_count={len(local_ids)}",
-                all_ranks=trace_all_ranks,
-            )
-            frame_iter = iter_frames(
-                universe,
-                frame_ids=local_ids,
-                include_forces=include_reference_forces,
-            )
-        else:
-            _trace(
-                perf_trace,
-                rank,
-                f"frame loop start local_count={local_count} local_start={local_start} local_end={local_end}",
-                all_ranks=trace_all_ranks,
-            )
-            frame_iter = iter_frames(
-                universe,
-                start=local_start,
-                end=local_end,
-                every=every,
-                include_forces=include_reference_forces,
-            )
+        _trace(
+            perf_trace,
+            rank,
+            f"frame loop start local_count={local_count}",
+            all_ranks=trace_all_ranks,
+        )
+        frame_iter = reader.iter_local(include_forces=include_reference_forces)
 
         frame_iter_obj = iter(frame_iter)
         i = 0
@@ -1726,8 +1749,13 @@ class MPIComputeEngine:
             _add_timing(local_timing, "frame_fetch", time.monotonic() - t0)
             frame_total_start = time.monotonic()
             frame_fetch_sec = frame_total_start - t0
-            frame_id, positions, box, reference_forces = frame
-            local_timing["local_frame_count"] = int(local_timing.get("local_frame_count", 0)) + 1
+            frame_id, positions, box, reference_forces = _unpack_frame(frame)
+            if reference_forces is not None and reference_force_scale != 1.0:
+                reference_forces = np.asarray(reference_forces) * reference_force_scale
+                frame = _replace_reference_forces(frame, reference_forces)
+            local_timing["local_frame_count"] = (
+                int(local_timing.get("local_frame_count", 0)) + 1
+            )
             wi = 1.0 if frame_weight_local is None else float(frame_weight_local[i])
 
             if noise_spec is None:
@@ -1738,13 +1766,12 @@ class MPIComputeEngine:
                     topology_arrays=topology_arrays,
                     forcefield_snapshot=forcefield_snapshot,
                     frame_weight=wi,
-                    interaction_mask=interaction_mask,
+                    geometry_mask=geometry_mask,
                     pair_type_list=pair_type_list,
                     pair_cutoff=pair_cutoff,
                     sel_indices=sel_indices,
                     exclude_option=exclude_option,
                     timing=local_timing,
-                    return_observables=collect_observables,
                     frame_idx=frame_id,
                     coordinate_mask=coordinate_mask,
                 )
@@ -1769,7 +1796,7 @@ class MPIComputeEngine:
                     forcefield_snapshot=forcefield_snapshot,
                     frame_weight=wi,
                     frame_weights=sample_weights,
-                    interaction_mask=interaction_mask,
+                    geometry_mask=geometry_mask,
                     pair_type_list=pair_type_list,
                     pair_cutoff=pair_cutoff,
                     sel_indices=sel_indices,
@@ -1791,21 +1818,15 @@ class MPIComputeEngine:
                 _add_timing(local_timing, "compute_noisy_total", compute_sec)
 
             if local_observables is not None:
-                frame_cache = frame_result.get("frame_observables", frame_result.get("frame_cache"))
-                if frame_cache is None:
-                    raise RuntimeError(
-                        "collect_observables requested, but compute() did not return a frame cache."
-                    )
-                local_observables.add(frame_cache)
+                local_observables.add(frame_result["frame_cache"])
 
             t0 = time.monotonic()
-            for step, state in zip(one_pass_steps, step_states):
+            for state, ops in zip(step_states, step_ops):
                 # Reducers see the same payload shape for ordinary frames and
                 # noisy batches; compute() has already folded sample axes away.
-                consume_step_payload(
-                    step,
+                ops.consume(
                     state,
-                    payload=frame_result,
+                    frame_result,
                     frame_weight=wi,
                     reference_force=reference_forces,
                 )
@@ -1842,21 +1863,24 @@ class MPIComputeEngine:
 
         _trace(perf_trace, rank, "frame loop finished", all_ranks=trace_all_ranks)
 
-        for step, state in zip(one_pass_steps, step_states):
+        for step, state, ops in zip(all_steps, step_states, step_ops):
             t0 = time.monotonic()
-            local_result = local_step_partials(step, state)
+            local_result = ops.local_partials(state)
             reduced = self._reduce_step_partials(
-                step,
                 local_result,
+                ops.reduce_plan(step),
                 discrete_frame_ids=use_discrete_frame_ids,
             )
             _add_timing(local_timing, "reduce", time.monotonic() - t0)
             if rank != 0 or reduced is None:
                 continue
             t0 = time.monotonic()
-            result = finalize_step_root(step, reduced)
+            final_state = dict(state)
+            final_state.update(reduced)
+            result = ops.finalize(final_state)
             if (
                 isinstance(result, dict)
+                and canonical_step_mode(step) != "rdf"
                 and "step_index" in shared_spec
                 and "step_index" not in result
             ):
@@ -1909,48 +1933,6 @@ class MPIComputeEngine:
                     all_ranks=trace_all_ranks,
                 )
 
-        if rank == 0 and rdf_steps:
-            for step in rdf_steps:
-                rdf_source_mode = str(step.get("rdf_source", "auto")).strip().lower()
-                if rdf_source_mode not in {"auto", "cache", "universe"}:
-                    raise ValueError(
-                        f"rdf step rdf_source must be 'auto', 'cache', or 'universe', got {rdf_source_mode!r}"
-                    )
-                if rdf_source_mode == "cache":
-                    if merged_observables is None:
-                        raise ValueError(
-                            "rdf step requested rdf_source='cache', but no merged observables cache is available."
-                        )
-                    rdf_source = merged_observables
-                elif rdf_source_mode == "universe":
-                    rdf_source = universe
-                else:
-                    rdf_source = merged_observables if merged_observables is not None else universe
-
-                rdf_result = _run_rdf_step(
-                    step,
-                    source=rdf_source,
-                    topology_arrays=topology_arrays,
-                    forcefield_snapshot=forcefield_snapshot,
-                    frame_weights=frame_weight_all,
-                    default_cutoff=pair_cutoff,
-                    default_sel_indices=sel_indices,
-                    default_exclude_option=exclude_option,
-                )
-                output_path = Path(str(step["output_file"]))
-                if not output_path.is_absolute():
-                    output_path = work_dir / output_path
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                _backup_existing_output(output_path)
-                with open(output_path, "wb") as handle:
-                    pickle.dump(rdf_result, handle, protocol=pickle.HIGHEST_PROTOCOL)
-                _trace(
-                    perf_trace,
-                    rank,
-                    f"wrote rdf output {output_path}",
-                    all_ranks=trace_all_ranks,
-                )
-
         if perf_trace:
             if comm is not None and size > 1:
                 gathered = comm.gather(local_timing, root=0)
@@ -1963,7 +1945,7 @@ class MPIComputeEngine:
                     metadata={
                         "size": size,
                         "n_steps": len(all_steps),
-                        "include_reference_forces": include_reference_forces,
+                        "need_reference_forces": include_reference_forces,
                     },
                 )
                 _trace(perf_trace, rank, f"wrote timing report {report}", all_ranks=trace_all_ranks)

@@ -17,11 +17,13 @@ from ..topology.topology_array import TopologyArrays
 from ..topology.types import InteractionKey
 from .lammps_input import iter_commands, tokenize_line
 from .tables import (
-    cap_table_forces,
+    LammpsTableSection,
+    _read_lammps_table_sections,
+    _write_lammps_table_sections,
     estimate_table_fp,
     find_equilibrium,
+    integrate_force_to_potential,
     parse_lammps_table,
-    write_lammps_table,
 )
 _BOUND_SECTION_TOKENS = frozenset({"lb", "ub"})
 
@@ -72,7 +74,11 @@ def _parse_bonded_mask_spec(
     *,
     topology_arrays: TopologyArrays,
 ) -> Optional[tuple[InteractionKey, Optional[str], list[str]]]:
-    if len(tokens) < 3 or tokens[0] not in {"bond_coeff", "angle_coeff"}:
+    if len(tokens) < 3 or tokens[0] not in {
+        "bond_coeff",
+        "angle_coeff",
+        "dihedral_coeff",
+    }:
         return None
     kind = tokens[0].split("_", 1)[0]
     potential_style = str(tokens[2]).strip().lower()
@@ -281,6 +287,42 @@ def _append_lmpff_potential(
     forcefield.setdefault(key, []).append(_set_lmpff_potential_style(pot, style))
 
 
+def _bonded_style_and_table_offset(
+    tokens: Sequence[str],
+    kind: str,
+) -> tuple[str, int]:
+    """Return AceCG's bonded style and the table filename token offset.
+
+    AceCG intentionally continues to represent a LAMMPS ``table/cut``
+    dihedral as the existing one-coordinate ``table`` potential. The cutoff
+    is therefore a sampling-only concern: this helper merely skips the
+    ``aat K theta_on theta_off`` fields while reading or rewriting the table.
+    The original coefficient line is otherwise preserved verbatim.
+    """
+    source_style = str(tokens[2]).strip().lower()
+    if kind != "dihedral":
+        return source_style, 3
+    if source_style == "aat":
+        if len(tokens) < 8:
+            raise ValueError(
+                "dihedral_coeff table/cut aat requires "
+                "'ID aat K theta_on theta_off FILE KEYWORD'."
+            )
+        return "table", 6
+    if source_style == "table/cut":
+        if len(tokens) < 9 or str(tokens[3]).strip().lower() != "aat":
+            raise ValueError(
+                "hybrid dihedral table/cut coefficients require "
+                "'ID table/cut aat K theta_on theta_off FILE KEYWORD'."
+            )
+        return "table", 7
+    if source_style != "table" and len(tokens) == 4:
+        # Pure ``dihedral_style table`` omits the style token:
+        # dihedral_coeff ID FILE KEYWORD.
+        return "table", 2
+    return source_style, 3
+
+
 def _select_lmpff_potential(
     value: BasePotential | List[BasePotential],
     style: str,
@@ -407,7 +449,12 @@ def ReadLmpFF(
                     if table_fit == "bspline":
                         fitter_overrides["bonded"] = False
                     fitter = TABLE_FITTERS.create(table_fit, **fitter_overrides)
-                    pot = fitter.fit(table_file, typ1=pair.types[0], typ2=pair.types[1])
+                    pot = fitter.fit(
+                        table_file,
+                        typ1=pair.types[0],
+                        typ2=pair.types[1],
+                        table_name=tmp[param_offset + 1],
+                    )
                     _append_lmpff_potential(forcefield, pair, pot, style)
                 elif style in POTENTIAL_REGISTRY:
                     constructor = POTENTIAL_REGISTRY[style]
@@ -432,32 +479,71 @@ def ReadLmpFF(
                         pot = constructor(pair.types[0], pair.types[1], *params)
                     _append_lmpff_potential(forcefield, pair, pot, style)
 
-        elif keyword in {"bond_coeff", "angle_coeff"}:
-            if len(tmp) < 4:
+        elif keyword in {"bond_coeff", "angle_coeff", "dihedral_coeff"}:
+            if len(tmp) < 3:
                 continue
             kind = keyword.split("_", 1)[0]
             type_num = tmp[1]
-            bonded_style = tmp[2]
+            bonded_style, table_offset = _bonded_style_and_table_offset(tmp, kind)
             bonded_type_id_to_key = getattr(topology_arrays, f"{kind}_type_id_to_key", None)
             key = InteractionKey(style=kind, types=(type_num,))
             if bonded_type_id_to_key is not None and str(type_num).isdigit():
                 key = bonded_type_id_to_key.get(int(type_num) - 1, key)
 
-            if bonded_style == "table" and len(tmp) >= 5:
-                table_file = tmp[3]
+            if bonded_style == "table" and len(tmp) > table_offset:
+                table_file = tmp[table_offset]
                 if not os.path.isabs(table_file):
                     table_file = os.path.join(base_dir, table_file)
+                table_name = (
+                    tmp[table_offset + 1]
+                    if len(tmp) > table_offset + 1
+                    else Path(table_file).stem
+                )
                 fitter_overrides = dict(table_fit_overrides or {})
-                if table_fit == "bspline":
-                    fitter_overrides["bonded"] = True
-                    # Bonded tables often rely on their outer padding as a
-                    # restoring tail; do not flatten them at the table edge.
-                    fitter_overrides["anchor_to_cutoff"] = False
-                fitter = TABLE_FITTERS.create(table_fit, **fitter_overrides)
-                pot = fitter.fit(table_file, typ1=key.types[0], typ2=key.types[-1])
+                if kind == "dihedral":
+                    if table_fit != "bspline":
+                        raise ValueError(
+                            "AceCG v1 dihedral tables require table_fit='bspline'."
+                        )
+                    allowed = {
+                        "degree",
+                        "n_coeffs",
+                        "boundary_mode",
+                        "minimum",
+                        "maximum",
+                    }
+                    dihedral_overrides = {
+                        name: value
+                        for name, value in fitter_overrides.items()
+                        if name in allowed
+                    }
+                    fitter = TABLE_FITTERS.create(
+                        "dihedral_bspline",
+                        **dihedral_overrides,
+                    )
+                    pot = fitter.fit(
+                        table_file,
+                        typ1=key.types[0],
+                        typ2=key.types[-1],
+                        types=key.types,
+                        table_name=table_name,
+                    )
+                else:
+                    if table_fit == "bspline":
+                        fitter_overrides["bonded"] = True
+                        # Bonded tables often rely on their outer padding as a
+                        # restoring tail; do not flatten them at the table edge.
+                        fitter_overrides["anchor_to_cutoff"] = False
+                    fitter = TABLE_FITTERS.create(table_fit, **fitter_overrides)
+                    pot = fitter.fit(
+                        table_file,
+                        typ1=key.types[0],
+                        typ2=key.types[-1],
+                        table_name=table_name,
+                    )
                 forcefield[key] = [_set_lmpff_potential_style(pot, bonded_style)]
 
-            elif bonded_style == "harmonic" and len(tmp) >= 5:
+            elif kind in {"bond", "angle"} and bonded_style == "harmonic" and len(tmp) >= 5:
                 from ..potentials.harmonic import HarmonicPotential
 
                 k_val = float(tmp[3])
@@ -517,6 +603,9 @@ def WriteLmpFF(
         lines = f.readlines()
 
     pair_occurrences: Dict[Tuple[InteractionKey, str], int] = {}
+    table_updates: Dict[Path, Dict[str, Dict[str, Any]]] = {}
+    table_sources: Dict[Path, Path] = {}
+    source_styles: Dict[Path, Dict[str, str]] = {}
     for i, line in enumerate(lines):
         tmp = list(tokenize_line(line))
         if not tmp:
@@ -552,33 +641,49 @@ def WriteLmpFF(
                         if len(tmp) <= param_offset + 1:
                             continue
                         table_token = tmp[param_offset]
-                        source_table_file = table_token
-                        dest_table_file = table_token
-                        if not os.path.isabs(table_token):
-                            source_table_file = os.path.join(old_base_dir, table_token)
-                            dest_table_file = os.path.join(new_base_dir, table_token)
-
-                        Path(dest_table_file).parent.mkdir(parents=True, exist_ok=True)
-                        r, _, _ = parse_lammps_table(source_table_file)
-                        write_lammps_table(
-                            filename=dest_table_file,
-                            r=r,
-                            V=pot.value(r),
-                            F=pot.force(r),
-                            comment=f"Table {table_token}: id, r, potential, force",
-                            table_name=tmp[param_offset + 1],
-                            table_style="pair",
+                        source_table_file = Path(table_token)
+                        dest_table_file = Path(table_token)
+                        if not source_table_file.is_absolute():
+                            source_table_file = Path(old_base_dir) / source_table_file
+                            dest_table_file = Path(new_base_dir) / dest_table_file
+                        source_table_file = source_table_file.resolve()
+                        dest_table_file = dest_table_file.resolve()
+                        table_name = str(tmp[param_offset + 1])
+                        prior_source = table_sources.get(dest_table_file)
+                        if prior_source is not None and prior_source != source_table_file:
+                            raise ValueError(
+                                f"Table destination {dest_table_file} is referenced from "
+                                f"different sources: {prior_source} and {source_table_file}"
+                            )
+                        table_sources[dest_table_file] = source_table_file
+                        declared_style = source_styles.setdefault(
+                            source_table_file, {}
+                        ).get(table_name)
+                        if declared_style is not None and declared_style != "pair":
+                            raise ValueError(
+                                f"Table section {table_name!r} in {source_table_file} "
+                                f"has conflicting styles {declared_style!r} and 'pair'"
+                            )
+                        source_styles[source_table_file][table_name] = "pair"
+                        previous = table_updates.setdefault(dest_table_file, {}).get(
+                            table_name
                         )
-                        max_force = getattr(pot, "_acecg_max_force", None)
-                        if max_force is not None:
-                            cap_table_forces(dest_table_file, max_force=max_force)
+                        if previous is not None and previous["style"] != "pair":
+                            raise ValueError(
+                                f"Table destination {dest_table_file} section "
+                                f"{table_name!r} has conflicting styles"
+                            )
+                        table_updates[dest_table_file][table_name] = {
+                            "style": "pair",
+                            "pot": pot,
+                        }
                     else:
                         params = pot.lammps_params() if hasattr(pot, "lammps_params") else pot.get_params()
                         n_param = len(params)
                         tmp[param_offset : param_offset + n_param] = map(str, params)
                         lines[i] = "   ".join(tmp) + "\n"
 
-        elif keyword in {"bond_coeff", "angle_coeff"}:
+        elif keyword in {"bond_coeff", "angle_coeff", "dihedral_coeff"}:
             if len(tmp) < 3:
                 continue
             kind = keyword.split("_", 1)[0]
@@ -589,49 +694,203 @@ def WriteLmpFF(
                 lookup_key = bonded_type_id_to_key.get(int(type_num) - 1, lookup_key)
             if lookup_key not in forcefield:
                 continue
-            bonded_style = tmp[2]
+            bonded_style, table_offset = _bonded_style_and_table_offset(tmp, kind)
             pot = _select_lmpff_potential(forcefield[lookup_key], bonded_style, lookup_key)
             if bonded_style == "table":
-                if len(tmp) < 4:
+                if len(tmp) <= table_offset:
                     continue
-                table_token = tmp[3]
-                source_table_file = table_token
-                dest_table_file = table_token
-                if not os.path.isabs(table_token):
-                    source_table_file = os.path.join(old_base_dir, table_token)
-                    dest_table_file = os.path.join(new_base_dir, table_token)
-                Path(dest_table_file).parent.mkdir(parents=True, exist_ok=True)
-                r, _, _ = parse_lammps_table(source_table_file)
-                V = pot.value(r)
-                F = pot.force(r)
-                table_name = tmp[4] if len(tmp) > 4 else Path(dest_table_file).stem
-                eq = find_equilibrium(r, F)
-                fp = estimate_table_fp(r, F)
-                write_lammps_table(
-                    filename=dest_table_file,
-                    r=r,
-                    V=V,
-                    F=F,
-                    comment=f"AceCG updated {kind} {table_name}",
-                    table_name=table_name,
-                    table_style=kind,
-                    eq=eq,
-                    fp=fp,
+                table_token = tmp[table_offset]
+                source_table_file = Path(table_token)
+                dest_table_file = Path(table_token)
+                if not source_table_file.is_absolute():
+                    source_table_file = Path(old_base_dir) / source_table_file
+                    dest_table_file = Path(new_base_dir) / dest_table_file
+                source_table_file = source_table_file.resolve()
+                dest_table_file = dest_table_file.resolve()
+                table_name = (
+                    tmp[table_offset + 1]
+                    if len(tmp) > table_offset + 1
+                    else Path(dest_table_file).stem
                 )
+                table_name = str(table_name)
+                prior_source = table_sources.get(dest_table_file)
+                if prior_source is not None and prior_source != source_table_file:
+                    raise ValueError(
+                        f"Table destination {dest_table_file} is referenced from "
+                        f"different sources: {prior_source} and {source_table_file}"
+                    )
+                table_sources[dest_table_file] = source_table_file
+                declared_style = source_styles.setdefault(
+                    source_table_file, {}
+                ).get(table_name)
+                if declared_style is not None and declared_style != kind:
+                    raise ValueError(
+                        f"Table section {table_name!r} in {source_table_file} "
+                        f"has conflicting styles {declared_style!r} and {kind!r}"
+                    )
+                source_styles[source_table_file][table_name] = kind
+                previous = table_updates.setdefault(dest_table_file, {}).get(
+                    table_name
+                )
+                if previous is not None and previous["style"] != kind:
+                    raise ValueError(
+                        f"Table destination {dest_table_file} section "
+                        f"{table_name!r} has conflicting styles"
+                    )
+                table_updates[dest_table_file][table_name] = {
+                    "style": kind,
+                    "pot": pot,
+                }
             elif bonded_style == "harmonic":
                 params = list(pot.lammps_params() if hasattr(pot, "lammps_params") else pot.get_params())
                 tmp[3:] = [f"{p:.8g}" for p in params]
                 lines[i] = "   ".join(tmp) + "\n"
 
-    Path(new_file).parent.mkdir(parents=True, exist_ok=True)
-    with open(new_file, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    settings_target = Path(new_file).resolve()
+    final_targets = set(table_updates)
+    if settings_target in final_targets:
+        raise ValueError(
+            f"LAMMPS settings target {settings_target} conflicts with a table target"
+        )
+    final_targets.add(settings_target)
+    stage_by_target = {
+        target: target.with_name(f".{target.name}.acecg-stage")
+        for target in final_targets
+    }
+    stage_paths = set(stage_by_target.values())
+    if len(stage_paths) != len(final_targets) or stage_paths & final_targets:
+        raise ValueError("LAMMPS forcefield staging paths conflict with final targets")
+    existing_stages = [stage for stage in stage_paths if stage.exists()]
+    if existing_stages:
+        raise FileExistsError(str(sorted(existing_stages, key=str)[0]))
+
+    source_sections: Dict[Path, list[LammpsTableSection]] = {}
+    for source_table_file, styles in source_styles.items():
+        source_sections[source_table_file] = _read_lammps_table_sections(
+            source_table_file,
+            table_styles=styles,
+        )
+
+    destination_sections: Dict[Path, list[LammpsTableSection]] = {}
+    for dest_table_file, updates in table_updates.items():
+        source_table_file = table_sources[dest_table_file]
+        original_sections = source_sections[source_table_file]
+        original_by_name = {
+            section.keyword: section for section in original_sections
+        }
+        missing = [name for name in updates if name not in original_by_name]
+        if missing:
+            raise KeyError(
+                f"Table keywords {missing} were not found in {source_table_file}"
+            )
+        replacements: Dict[str, LammpsTableSection] = {}
+        for table_name, update in updates.items():
+            original = original_by_name[table_name]
+            style = str(update["style"])
+            pot = update["pot"]
+            grid = np.asarray(original.x, dtype=float).copy()
+            potential = np.asarray(pot.value(grid), dtype=float)
+            force = np.asarray(pot.force(grid), dtype=float)
+            if style == "pair":
+                max_force = getattr(pot, "_acecg_max_force", None)
+                if max_force is not None:
+                    limit = abs(float(max_force))
+                    force = np.clip(force, -limit, limit)
+                    potential = integrate_force_to_potential(grid, force)
+                header_tokens = (
+                    "N",
+                    str(grid.size),
+                    "R",
+                    f"{grid[0]:.6f}",
+                    f"{grid[-1]:.6f}",
+                )
+            elif style in {"bond", "angle"}:
+                eq = find_equilibrium(grid, force)
+                fp = estimate_table_fp(grid, force)
+                header_parts = ["N", str(grid.size)]
+                if fp is not None:
+                    header_parts.extend(
+                        ("FP", f"{fp[0]:.8e}", f"{fp[1]:.8e}")
+                    )
+                header_parts.extend(("EQ", f"{eq:.8f}"))
+                header_tokens = tuple(header_parts)
+            else:
+                header_tokens = ("N", str(grid.size), "DEGREES")
+            metadata = dict(original.metadata)
+            if hasattr(pot, "table_metadata"):
+                table_metadata = pot.table_metadata()
+                if table_metadata:
+                    metadata.update(
+                        {
+                            str(key): str(value)
+                            for key, value in table_metadata.items()
+                        }
+                    )
+            replacements[table_name] = LammpsTableSection(
+                keyword=table_name,
+                header_tokens=header_tokens,
+                x=grid,
+                potential=potential,
+                force=force,
+                metadata=metadata,
+            )
+        destination_sections[dest_table_file] = [
+            replacements.get(section.keyword, section)
+            for section in original_sections
+        ]
+
+    owned_stages: set[Path] = set()
+    try:
+        for target in sorted(destination_sections, key=str):
+            target.parent.mkdir(parents=True, exist_ok=True)
+            stage = stage_by_target[target]
+            _write_lammps_table_sections(
+                stage,
+                destination_sections[target],
+            )
+            owned_stages.add(stage)
+
+        settings_target.parent.mkdir(parents=True, exist_ok=True)
+        settings_stage = stage_by_target[settings_target]
+        settings_created = False
+        try:
+            with settings_stage.open("x", encoding="utf-8") as handle:
+                settings_created = True
+                handle.writelines(lines)
+        except Exception as exc:
+            if settings_created and settings_stage.exists():
+                try:
+                    settings_stage.unlink()
+                except Exception as cleanup_exc:
+                    exc.add_note(
+                        f"Failed to remove settings stage {settings_stage}: "
+                        f"{cleanup_exc}"
+                    )
+            raise
+        owned_stages.add(settings_stage)
+
+        for target in sorted(destination_sections, key=str):
+            stage = stage_by_target[target]
+            os.replace(stage, target)
+            owned_stages.remove(stage)
+        os.replace(settings_stage, settings_target)
+        owned_stages.remove(settings_stage)
+    except Exception as exc:
+        for stage in sorted(owned_stages, key=str):
+            if not stage.exists():
+                continue
+            try:
+                stage.unlink()
+            except Exception as cleanup_exc:
+                exc.add_note(f"Failed to remove forcefield stage {stage}: {cleanup_exc}")
+        raise
 
 
 def resolve_source_table_entries(
     source_forcefield_path: str,
     *,
     pair_style: str = "table",
+    topology_arrays: Optional[TopologyArrays] = None,
 ) -> Dict[InteractionKey, Dict[str, str]]:
     """Parse a LAMMPS settings file to extract table-style interaction entries.
 
@@ -667,17 +926,29 @@ def resolve_source_table_entries(
             }
             continue
 
-        if keyword in {"bond_coeff", "angle_coeff"}:
-            if len(tokens) < 5:
+        if keyword in {"bond_coeff", "angle_coeff", "dihedral_coeff"}:
+            if len(tokens) < 4:
                 continue
             kind = keyword.split("_", 1)[0]
-            source_style = tokens[2].lower()
+            source_style, table_offset = _bonded_style_and_table_offset(tokens, kind)
             if source_style != "table":
                 continue
             key = InteractionKey(style=kind, types=(str(tokens[1]),))
-            table_path = _resolve_table_path(settings_path, tokens[3])
+            type_map = getattr(
+                topology_arrays,
+                f"{kind}_type_id_to_key",
+                None,
+            )
+            if type_map is not None and str(tokens[1]).isdigit():
+                key = type_map.get(int(tokens[1]) - 1, key)
+            table_path = _resolve_table_path(
+                settings_path,
+                tokens[table_offset],
+            )
             table_name = (
-                tokens[4] if len(tokens) > 4 else Path(str(tokens[3])).stem
+                tokens[table_offset + 1]
+                if len(tokens) > table_offset + 1
+                else Path(str(tokens[table_offset])).stem
             )
             entries[key] = {
                 "table_path": str(table_path),

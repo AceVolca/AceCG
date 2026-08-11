@@ -5,7 +5,13 @@ from ..potentials.base import BasePotential
 class BaseTableFitter(ABC):
     """Interface for turning a LAMMPS table into a potential instance."""
     @abstractmethod
-    def fit(self, table_path: str, typ1: str, typ2: str) -> BasePotential:
+    def fit(
+        self,
+        table_path: str,
+        typ1: str,
+        typ2: str,
+        **kwargs,
+    ) -> BasePotential:
         """Fit a potential from a LAMMPS table file."""
         ...
 

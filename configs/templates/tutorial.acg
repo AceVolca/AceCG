@@ -20,7 +20,13 @@
 #   - Inline comments start with #, unless the # is inside quotes.
 #   - Values may be plain strings, numbers, booleans, None/null, Python-style
 #     lists / dicts / tuples, or quoted strings.
-#   - For boolean fields, true/false/yes/no/1/0 are all acceptable in practice.
+#   - Core-workflow boolean fields accept true/false, yes/no, on/off, and 1/0.
+#   - Core-workflow integer fields require unquoted integer literals; booleans,
+#     floats, and quoted numbers are not converted to integers.
+#   - Core-workflow real fields require finite, unquoted integer or float
+#     literals. Integers normalize to floats; booleans, strings, NaN, and
+#     infinities are rejected.
+#   - Standalone transformation parsers retain their documented field rules.
 #
 # Main parser sections:
 #   [system]

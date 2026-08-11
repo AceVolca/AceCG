@@ -394,8 +394,12 @@ def compute_frame_geometry(
                     bx,
                     backend=neighbor_backend,
                 )
-                # calc_dihedrals returns [-π, π] rad; convert to [0, 360) deg
-                phi_deg = np.degrees(phi_rad % (2.0 * np.pi)).astype(np.float32, copy=False)
+                # LAMMPS tabulated dihedrals use signed angles. Normalize the
+                # MDAnalysis result to the half-open seam convention
+                # [-180, 180), so +180 is represented only as -180.
+                phi_deg = (
+                    (np.degrees(phi_rad) + 180.0) % 360.0 - 180.0
+                ).astype(np.float32, copy=False)
                 # Mark degenerate dihedrals as NaN
                 b1 = _min_image_batch(pos[..., i2, :] - pos[..., i1, :], bx)
                 b2 = _min_image_batch(pos[..., i3, :] - pos[..., i2, :], bx)

@@ -24,7 +24,7 @@ Canonical public entry points:
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Iterable, List, Optional
 
 from MDAnalysis.lib.nsgrid import FastNS
 import numpy as np
@@ -55,6 +55,168 @@ def parse_exclude_option(exclude_option: str) -> str:
     if token not in VALID_EXCLUDE_OPTIONS:
         raise ValueError(f"Invalid exclude_option: {exclude_option}")
     return token
+
+
+def _normalize_selection_indices(
+    topology_arrays: TopologyArrays,
+    sel_indices: Optional[np.ndarray],
+) -> np.ndarray:
+    """Return a validated, duplicate-free global atom selection."""
+    if sel_indices is None:
+        return np.arange(topology_arrays.n_atoms, dtype=np.int32)
+    indices = np.asarray(sel_indices, dtype=np.int32)
+    if indices.ndim != 1:
+        raise ValueError(f"sel_indices must be one-dimensional, got shape {indices.shape}")
+    if np.any(indices < 0) or np.any(indices >= int(topology_arrays.n_atoms)):
+        raise ValueError("sel_indices contains atom indices outside the topology")
+    if np.unique(indices).size != indices.size:
+        raise ValueError("sel_indices must not contain duplicate atom indices")
+    return indices
+
+
+def _bonded_exclusion_pairs(topology_arrays: TopologyArrays) -> np.ndarray:
+    """Return unique canonical bonded-exclusion pairs as ``(i, j)`` rows."""
+    parts = [
+        np.asarray(pairs, dtype=np.int32).reshape(-1, 2)
+        for pairs in (
+            topology_arrays.exclude_12,
+            topology_arrays.exclude_13,
+            topology_arrays.exclude_14,
+        )
+        if np.asarray(pairs).size
+    ]
+    if not parts:
+        return np.empty((0, 2), dtype=np.int32)
+    encoded = np.unique(
+        np.concatenate(
+            [_encode_pairs(pairs, topology_arrays.n_atoms) for pairs in parts]
+        )
+    )
+    return np.column_stack(
+        (
+            encoded // np.int32(topology_arrays.n_atoms),
+            encoded % np.int32(topology_arrays.n_atoms),
+        )
+    ).astype(np.int32, copy=False)
+
+
+def _group_labels_for_exclusion(
+    topology_arrays: TopologyArrays,
+    exclude_option: str,
+) -> np.ndarray | None:
+    """Return per-atom group labels for the canonical exclusion mode."""
+    mode = parse_exclude_option(exclude_option)
+    if mode == "resid":
+        return np.asarray(topology_arrays.resids)[
+            np.asarray(topology_arrays.atom_resindex, dtype=np.int32)
+        ]
+    if mode == "molid":
+        return np.asarray(topology_arrays.molnums)
+    return None
+
+
+def count_eligible_pairs_by_type(
+    topology_arrays: TopologyArrays,
+    pair_type_list: Iterable[InteractionKey],
+    *,
+    sel_indices: Optional[np.ndarray] = None,
+    exclude_option: str = "resid",
+) -> dict[InteractionKey, int]:
+    """Count topology-eligible unordered pairs without building an ``N^2`` table.
+
+    The result follows the same selection, bonded-exclusion, residue, and
+    molecule contract as :func:`compute_pairs_by_type`.  Group exclusions are
+    counted combinatorially from per-group type populations.  Only the sparse
+    bonded-exclusion arrays are materialized, and overlap with a group
+    exclusion is removed before subtraction.
+    """
+    mode = parse_exclude_option(exclude_option)
+    indices = _normalize_selection_indices(topology_arrays, sel_indices)
+    keys = list(dict.fromkeys(pair_type_list))
+    for key in keys:
+        if key.style != "pair" or len(key.types) != 2:
+            raise ValueError(f"Expected pair InteractionKey, got {key!r}")
+
+    selected = np.zeros(topology_arrays.n_atoms, dtype=bool)
+    selected[indices] = True
+    type_codes = np.asarray(topology_arrays.atom_type_codes, dtype=np.int32)
+    name_to_code = topology_arrays.atom_type_name_to_code
+    selected_codes = type_codes[indices]
+
+    counts_by_code = {
+        int(code): int(count)
+        for code, count in zip(*np.unique(selected_codes, return_counts=True))
+    }
+    eligible: dict[InteractionKey, int] = {}
+    code_pairs: dict[InteractionKey, tuple[int | None, int | None]] = {}
+    for key in keys:
+        code_a = name_to_code.get(str(key.types[0]))
+        code_b = name_to_code.get(str(key.types[1]))
+        code_pairs[key] = (code_a, code_b)
+        if code_a is None or code_b is None:
+            eligible[key] = 0
+            continue
+        n_a = counts_by_code.get(int(code_a), 0)
+        n_b = counts_by_code.get(int(code_b), 0)
+        if int(code_a) == int(code_b):
+            eligible[key] = n_a * max(n_a - 1, 0) // 2
+        else:
+            eligible[key] = n_a * n_b
+
+    group_labels = _group_labels_for_exclusion(topology_arrays, mode)
+
+    if group_labels is not None and indices.size:
+        selected_groups = group_labels[indices]
+        for group in np.unique(selected_groups):
+            group_codes = selected_codes[selected_groups == group]
+            group_counts = {
+                int(code): int(count)
+                for code, count in zip(*np.unique(group_codes, return_counts=True))
+            }
+            for key, (code_a, code_b) in code_pairs.items():
+                if code_a is None or code_b is None:
+                    continue
+                n_a = group_counts.get(int(code_a), 0)
+                n_b = group_counts.get(int(code_b), 0)
+                if int(code_a) == int(code_b):
+                    eligible[key] -= n_a * max(n_a - 1, 0) // 2
+                else:
+                    eligible[key] -= n_a * n_b
+
+    bonded_pairs = _bonded_exclusion_pairs(topology_arrays)
+    if bonded_pairs.size:
+        in_selection = selected[bonded_pairs[:, 0]] & selected[bonded_pairs[:, 1]]
+        bonded_pairs = bonded_pairs[in_selection]
+        if group_labels is not None and bonded_pairs.size:
+            already_group_excluded = (
+                group_labels[bonded_pairs[:, 0]] == group_labels[bonded_pairs[:, 1]]
+            )
+            bonded_pairs = bonded_pairs[~already_group_excluded]
+
+        if bonded_pairs.size:
+            first_codes = type_codes[bonded_pairs[:, 0]]
+            second_codes = type_codes[bonded_pairs[:, 1]]
+            for key, (code_a, code_b) in code_pairs.items():
+                if code_a is None or code_b is None:
+                    continue
+                if int(code_a) == int(code_b):
+                    excluded = np.count_nonzero(
+                        (first_codes == int(code_a)) & (second_codes == int(code_a))
+                    )
+                else:
+                    excluded = np.count_nonzero(
+                        ((first_codes == int(code_a)) & (second_codes == int(code_b)))
+                        | ((first_codes == int(code_b)) & (second_codes == int(code_a)))
+                    )
+                eligible[key] -= int(excluded)
+
+    for key, count in eligible.items():
+        if count < 0:
+            raise RuntimeError(
+                f"Eligible pair count became negative for {key}: {count}; "
+                "selection/exclusion metadata is inconsistent"
+            )
+    return eligible
 
 
 
@@ -100,11 +262,9 @@ def _build_exclusion_mask(
         mask = np.zeros(n, dtype=bool)
 
     # nonbonded exclusion
-    if exclude_option == "resid":
-        atom_resids = topo.resids[topo.atom_resindex] 
-        mask |= atom_resids[pair_indices[:, 0]] == atom_resids[pair_indices[:, 1]]
-    elif exclude_option == "molid":
-        mask |= topo.molnums[pair_indices[:, 0]] == topo.molnums[pair_indices[:, 1]]
+    group_labels = _group_labels_for_exclusion(topo, exclude_option)
+    if group_labels is not None:
+        mask |= group_labels[pair_indices[:, 0]] == group_labels[pair_indices[:, 1]]
 
     return mask
 
@@ -144,11 +304,7 @@ def compute_neighbor_list(
     pos = np.asarray(positions, dtype=np.float32)
     bx = np.asarray(box, dtype=np.float32)
     n_atoms = pos.shape[0]
-    indices = (
-        np.arange(n_atoms, dtype=np.int32)
-        if sel_indices is None
-        else np.asarray(sel_indices, dtype=np.int32)
-    )
+    indices = _normalize_selection_indices(topology_arrays, sel_indices)
     if indices.size == 0:
         return [[] for _ in range(n_atoms)]
 
@@ -226,11 +382,7 @@ def compute_pairs_by_type(
 
     pos = np.asarray(positions, dtype=np.float32)
     bx = np.asarray(box, dtype=np.float32)
-    indices = (
-        np.arange(pos.shape[0], dtype=np.int32)
-        if sel_indices is None
-        else np.asarray(sel_indices, dtype=np.int32)
-    )
+    indices = _normalize_selection_indices(topology_arrays, sel_indices)
     if indices.size == 0:
         return out
 

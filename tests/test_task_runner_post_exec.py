@@ -105,3 +105,41 @@ def test_run_post_builds_launch_from_resource_pool(monkeypatch, tmp_path):
     assert captured["env"]["OMP_NUM_THREADS"] == "1"
     assert captured["env"]["FROM_POOL"] == "yes"
     assert Path(tmp_path / "mpi_post_spec.json").exists()
+
+
+def test_run_post_resolves_relative_run_dir_before_backend_realize(
+    monkeypatch, tmp_path
+):
+    realized = {}
+
+    class _Result:
+        returncode = 0
+
+    class _Backend:
+        def realize(self, placement, payload_cmd, run_dir):
+            realized["run_dir"] = run_dir
+            return LaunchSpec(argv=("launcher", *payload_cmd))
+
+    class _Pool:
+        hosts = [HostInventory("node-a", (0,))]
+        backend = _Backend()
+        extra_env = {}
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        task_runner.subprocess,
+        "run",
+        lambda *args, **kwargs: _Result(),
+    )
+    task_runner.run_post(
+        {"post_mode": "one_pass", "work_dir": "relative-run", "steps": []},
+        _Pool(),
+        run_dir=Path("relative-run"),
+        python_exe="python",
+    )
+
+    assert realized["run_dir"] == (tmp_path / "relative-run").resolve()
+    spec_path = tmp_path / "relative-run" / "mpi_post_spec.json"
+    assert spec_path.exists()
+    serialized = json.loads(spec_path.read_text(encoding="utf-8"))
+    assert serialized["work_dir"] == str((tmp_path / "relative-run").resolve())

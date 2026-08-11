@@ -59,6 +59,11 @@ They should not own:
 - frame chunking
 - reducer internals
 
+`io/trajectory.py` also supplies the shared collective failure boundary: a
+root `(value, error)` broadcast and lowest-rank rank-local error consensus.
+They operate on already-computed outcomes only; they do not create a generic
+workflow or transformation terminal.
+
 ---
 
 ## Stage 2: `task_runner.py`
@@ -160,7 +165,7 @@ spec = {
 | `fm` | Force-matching statistics | `JtJ`, `Jty`, `y_sumsq`, `Jtf`, `f_sumsq`, `fty`, `nframe` |
 | `dsm` | DSM score-matching statistics; uses the FM reducer state with synthetic noise targets | Same as `fm` |
 | `cdfm_zbx` | CDFM conditioned sampling replica; rank 0 first computes `y_eff` from `(init_config, init_force)` | `grad_direct`, `grad_reinforce`, `sse`, `obs_rows`, `n_samples` |
-| `rdf` | RDF / PDF distributions; does not enter the one-pass pipeline | `{InteractionKey: distribution_array}` |
+| `rdf` | RDF / PDF distributions through the shared reducer terminal | `{InteractionKey: DistributionResult}` |
 
 `cdfm_y_eff` has been removed from the active repository. `y_eff` preprocessing is now folded into the rank-0 setup logic of `cdfm_zbx`.
 
@@ -180,27 +185,26 @@ run_post(spec):
 
   all ranks:
     assign frames, either contiguous chunks or balanced discrete_ids
-    split steps into one_pass_steps and rdf_steps
 
-  one-pass pipeline:
+  shared reducer pipeline:
+    resolve one ReducerOps bundle for each step
+    union reducer requests, then normalize once
     for each local frame:
       if spec has noise:
         frame_batch, sample_weights = engine.add_noise(...)
         result = engine.compute(request, frame_batch, frame_weights=sample_weights, ...)
       else:
         result = engine.compute(request, frame)
-      for step in one_pass_steps:
-        consume_*_frame(state, result)
+      for step + cached bundle:
+        bundle.consume(state, result)
 
   MPI reduce:
     comm.reduce(local_partials, root=0)
 
   rank 0:
-    finalize_*_root(state)
+    finalize cached bundle with initialized state overlaid by reduced partials
     pickle.dump(result, output_file)
 
-  rdf_steps:
-    run separately through analysis.rdf, outside the one-pass pipeline
 ```
 
 ---
@@ -233,15 +237,16 @@ selected the AA-reference frame universe.
 
 ## Reducer Pipeline API
 
-`reducers.py` provides five functions for each `step_mode`:
+`reducers.py` provides a six-function finite `ReducerOps` bundle for each
+`step_mode`:
 
 ```text
-init_*_state(step) -> state dict
-request_*(step) -> {need_energy_grad: bool, need_force_grad: bool, ...}
-consume_*_frame(state, frame_result, ...) -> mutates state
-local_partials_*(state) -> partial dict for comm.reduce
-reduce_plan_*(step) -> {key: "sum" | "gather" | ...}
-finalize_*_root(state) -> final result dict
+init(step) -> state dict
+request(step) -> canonical request names
+consume(state, frame_result, ...) -> mutates state
+local_partials(state) -> partial dict for comm.reduce
+reduce_plan(step) -> {key: "sum" | "gather" | ...}
+finalize(state) -> final result dict
 ```
 
 Current reducers:
@@ -252,13 +257,15 @@ Current reducers:
 | `init_fm_state` + `request_dsm` | `dsm` |
 | `init_rem_state` / ... | `rem`, `cdrem` |
 | `init_cdfm_zbx_state` / ... | `cdfm_zbx` |
-| direct `analysis.rdf` path | `rdf` |
+| `init_rdf_state` / `consume_rdf_frame` | `rdf` |
 
 The `cdfm_zbx` reducer performs `y_eff` preprocessing before entering the main one-pass loop.
 
 Benefits of this design:
 
 - each step accumulates local state independently
+- `run_post()` resolves the bundle once per step and reuses it through the
+  lifecycle without another mode dispatch
 - MPI reduce behavior is declared by `reduce_plan_*` and executed uniformly by the engine
 - reducer functions are pure local math and perform no MPI or I/O
 - same-frame noisy batches are already folded by `engine.compute()` into
@@ -282,8 +289,6 @@ spec["observables_output_file"] = "traj_cache.pkl"
 | `TrajectoryCache` | `compute/mpi_engine.py` | Collection of many `FrameCache` objects |
 | `geometry_to_observables()` | `compute/mpi_engine.py` | Extracts `FrameCache` from `FrameGeometry` |
 
-The old names `FrameObservables` and `TrajectoryObservablesCache` remain as compatibility aliases. New code and docs should prefer `FrameCache` and `TrajectoryCache`.
-
 Observable cache requests are valid for ordinary frames. They are rejected for
 noisy same-frame batches because current cache semantics are per real
 trajectory frame, not per noisy sample.
@@ -301,7 +306,7 @@ Inside `MPIComputeEngine.run_post()`:
 
 Inside the reducer loop, still owned by `run_post()`:
 
-- for each one-pass step: `comm.reduce(local_partials, root=0)` or `comm.gather()`
+- for each post step: `comm.reduce(local_partials, root=0)` or `comm.gather()`
 - rank 0 calls `finalize_*_root()` and writes pickle output
 
 Not inside reducers:

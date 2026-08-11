@@ -32,12 +32,23 @@ from AceCG.compute.mpi_engine import (
     build_default_engine,
 )
 from AceCG.compute.reducers import (
-    consume_step_payload,
-    finalize_step_root,
-    init_step_state,
-    local_step_partials,
-    step_request,
+    consume_cdfm_zbx_frame,
+    consume_fm_frame,
+    consume_rem_frame,
+    finalize_cdfm_zbx_root,
+    finalize_fm_root,
+    finalize_rem_root,
+    init_cdfm_zbx_state,
+    init_fm_state,
+    init_rem_state,
+    local_partials_fm,
+    local_partials_rem,
+    reducer_ops,
+    reduce_plan_fm,
+    request_dsm,
+    request_rem,
 )
+from AceCG.io.trajectory import FrameRecord
 from AceCG.potentials.bspline import BSplinePotential
 from AceCG.potentials.harmonic import HarmonicPotential
 from AceCG.topology.forcefield import Forcefield
@@ -55,12 +66,21 @@ class _DummyForcefield:
         return []
 
 
-def test_compute_skin_neighbor_mode_uses_reference_frame(monkeypatch):
-    pair_key = InteractionKey.pair("A", "A")
-    calls = []
-    geometry_caches = []
+def _spy_on_pair_search(monkeypatch):
+    """Record every `compute_pairs_by_type` call and let the real one run.
 
-    def fake_pairs_by_type(**kwargs):
+    Per FINDINGS.md F-007 / F-036: the neighbour-mode policy below is a real
+    decision in `MPIComputeEngine.compute` — which coordinates the pair search
+    sees, what cutoff it is given, and how often it is rebuilt — and the only
+    place to observe it is at the call. Observing it must not mean *replacing*
+    the pair search, which is on §10.2's forbidden list. This spy calls
+    through, so the real neighbour list is built from the real topology and
+    only the arguments are recorded.
+    """
+    calls = []
+    real = mpi_engine_module.compute_pairs_by_type
+
+    def spy(**kwargs):
         calls.append(
             {
                 "positions": np.asarray(kwargs["positions"]).copy(),
@@ -68,26 +88,52 @@ def test_compute_skin_neighbor_mode_uses_reference_frame(monkeypatch):
                 "cutoff": float(kwargs["cutoff"]),
             }
         )
-        return {pair_key: (np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64))}
+        return real(**kwargs)
 
-    def fake_compute_frame_geometry(*args, **kwargs):
+    monkeypatch.setattr(mpi_engine_module, "compute_pairs_by_type", spy)
+    return calls
+
+
+def _dopc_batch(n_samples):
+    """`(topology, forcefield, positions, box)` from the shipped DOPC fixture.
+
+    A real 576-site periodic frame, tiled into a same-frame batch with each
+    sample rigidly displaced so the chunk boundaries are identifiable.
+    """
+    from real_frames import dopc_forcefield, dopc_topology_arrays, dopc_universe
+
+    topology = dopc_topology_arrays()
+    forcefield = dopc_forcefield(12)
+    timestep = dopc_universe().trajectory[0]
+    base = np.asarray(timestep.positions, dtype=np.float64)
+    box = np.asarray(timestep.dimensions, dtype=np.float64)
+    positions = np.repeat(base[None, ...], n_samples, axis=0)
+    positions[:, 0, 0] += np.arange(n_samples, dtype=np.float64)
+    return topology, forcefield, positions, box
+
+
+def test_compute_skin_neighbor_mode_uses_reference_frame(monkeypatch):
+    """`skin` mode searches once, from the reference frame, at cutoff + skin."""
+    topology, forcefield, positions, box = _dopc_batch(3)
+    reference_positions = positions[0] + 0.05
+    calls = _spy_on_pair_search(monkeypatch)
+    pair_keys = [key for key in forcefield if key.style == "pair"]
+
+    geometry_caches = []
+    real_geometry = mpi_engine_module.compute_frame_geometry
+
+    def counted_geometry(*args, **kwargs):
         geometry_caches.append(kwargs.get("pair_cache"))
-        return SimpleNamespace()
+        return real_geometry(*args, **kwargs)
 
-    monkeypatch.setattr(mpi_engine_module, "compute_pairs_by_type", fake_pairs_by_type)
-    monkeypatch.setattr(mpi_engine_module, "compute_frame_geometry", fake_compute_frame_geometry)
-
-    positions = np.zeros((3, 2, 3), dtype=np.float64)
-    positions[0, :, 0] = 1.0
-    reference_positions = np.full((2, 3), 7.0, dtype=np.float64)
-    box = np.array([20.0, 20.0, 20.0, 90.0, 90.0, 90.0], dtype=np.float64)
+    monkeypatch.setattr(mpi_engine_module, "compute_frame_geometry", counted_geometry)
 
     MPIComputeEngine().compute(
         request=_request(),
         frame=(0, positions, box, None),
-        topology_arrays=SimpleNamespace(),
-        forcefield_snapshot=_DummyForcefield(),
-        pair_type_list=[pair_key],
+        topology_arrays=topology,
+        forcefield_snapshot=forcefield,
+        pair_type_list=pair_keys,
         pair_cutoff=10.0,
         batch_size=2,
         neighbor_mode="skin",
@@ -101,54 +147,45 @@ def test_compute_skin_neighbor_mode_uses_reference_frame(monkeypatch):
     assert calls[0]["cutoff"] == pytest.approx(10.5)
     assert len(geometry_caches) == 2
     assert geometry_caches[0] is geometry_caches[1]
+    # The skin-expanded search really did find pairs on the real frame, so the
+    # identity assertions above are about a populated cache, not an empty one.
+    assert sum(len(value[0]) for value in geometry_caches[0].values()) > 1000
 
 
 def test_compute_chunk_neighbor_mode_rebuilds_per_batch_chunk(monkeypatch):
-    pair_key = InteractionKey.pair("A", "A")
-    starts = []
-
-    def fake_pairs_by_type(**kwargs):
-        positions = np.asarray(kwargs["positions"])
-        starts.append(float(positions[0, 0]))
-        assert float(kwargs["cutoff"]) == pytest.approx(10.25)
-        return {pair_key: (np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64))}
-
-    monkeypatch.setattr(mpi_engine_module, "compute_pairs_by_type", fake_pairs_by_type)
-    monkeypatch.setattr(
-        mpi_engine_module,
-        "compute_frame_geometry",
-        lambda *args, **kwargs: SimpleNamespace(),
-    )
-
-    positions = np.zeros((5, 2, 3), dtype=np.float64)
-    positions[:, 0, 0] = np.arange(5, dtype=np.float64)
-    box = np.array([20.0, 20.0, 20.0, 90.0, 90.0, 90.0], dtype=np.float64)
+    """`chunk` mode rebuilds once per chunk, from that chunk's first sample."""
+    topology, forcefield, positions, box = _dopc_batch(5)
+    calls = _spy_on_pair_search(monkeypatch)
+    pair_keys = [key for key in forcefield if key.style == "pair"]
+    origin = float(positions[0, 0, 0])
 
     MPIComputeEngine().compute(
         request=_request(),
         frame=(0, positions, box, None),
-        topology_arrays=SimpleNamespace(),
-        forcefield_snapshot=_DummyForcefield(),
-        pair_type_list=[pair_key],
+        topology_arrays=topology,
+        forcefield_snapshot=forcefield,
+        pair_type_list=pair_keys,
         pair_cutoff=10.0,
         batch_size=2,
         neighbor_mode="chunk",
         neighbor_skin=0.25,
     )
 
+    starts = [float(call["positions"][0, 0]) - origin for call in calls]
     assert starts == [0.0, 2.0, 4.0]
+    assert all(call["cutoff"] == pytest.approx(10.25) for call in calls)
 
 
 def test_dsm_reducer_requests_fm_stats_without_reference_force():
-    request = step_request({"step_mode": "dsm"})
+    request = request_dsm({"step_mode": "dsm"})
 
     assert "fm_stats" in request
     assert "reference_force" not in request
 
 
 def test_rem_reducer_requests_gauge_free_gradient_but_cdrem_uses_physical():
-    rem_request = step_request({"step_mode": "rem", "need_hessian": True})
-    cdrem_request = step_request({"step_mode": "cdrem", "need_hessian": True})
+    rem_request = request_rem({"step_mode": "rem", "need_hessian": True})
+    cdrem_request = request_rem({"step_mode": "cdrem", "need_hessian": True})
 
     assert "gauge_free_energy_grad" in rem_request
     assert "gauge_free_energy_grad_outer" in rem_request
@@ -160,18 +197,23 @@ def test_rem_reducer_requests_gauge_free_gradient_but_cdrem_uses_physical():
     assert "gauge_free_energy_grad" not in cdrem_request
 
 
+def test_reducer_ops_resolves_cdrem_alias_and_rejects_unknown_mode():
+    assert reducer_ops({"step_mode": "cdrem"}) is reducer_ops({"step_mode": "rem"})
+    with pytest.raises(NotImplementedError, match="Unsupported step_mode 'unknown'"):
+        reducer_ops({"step_mode": "unknown"})
+
+
 def test_rem_reducer_consumes_gauge_free_payload_and_marks_convention():
     bond_key = InteractionKey.bond("A", "B")
     ff = Forcefield({bond_key: [_bonded_bspline()]})
     topo = SimpleNamespace()
     step = {"step_mode": "rem", "need_hessian": True}
     grad = np.array([1.0, 2.0], dtype=np.float64)
-    state = init_step_state(step, ff, topo)
+    state = init_rem_state(step, ff, topo)
 
-    consume_step_payload(
-        step,
+    consume_rem_frame(
         state,
-        payload={
+        {
             "frame_idx": 7,
             "gauge_free_energy_grad": grad,
             "gauge_free_energy_grad_outer": np.outer(grad, grad),
@@ -180,7 +222,7 @@ def test_rem_reducer_consumes_gauge_free_payload_and_marks_convention():
         frame_weight=2.0,
         reference_force=None,
     )
-    result = finalize_step_root(step, local_step_partials(step, state))
+    result = finalize_rem_root(local_partials_rem(state))
 
     np.testing.assert_allclose(result["energy_grad_avg"], grad)
     assert result["gradient_convention"] == "gauge_free"
@@ -192,29 +234,25 @@ def test_cdrem_reducer_keeps_physical_gradient_convention():
     ff = Forcefield({bond_key: [_bonded_bspline()]})
     step = {"step_mode": "cdrem", "need_hessian": False}
     grad = np.array([3.0, 4.0], dtype=np.float64)
-    state = init_step_state(step, ff, SimpleNamespace())
+    state = init_rem_state(step, ff, SimpleNamespace())
 
-    consume_step_payload(
-        step,
+    consume_rem_frame(
         state,
-        payload={"frame_idx": 3, "energy_grad": grad},
+        {"frame_idx": 3, "energy_grad": grad},
         frame_weight=1.0,
         reference_force=None,
     )
-    result = finalize_step_root(step, local_step_partials(step, state))
+    result = finalize_rem_root(local_partials_rem(state))
 
     np.testing.assert_allclose(result["energy_grad_avg"], grad)
     assert result["gradient_convention"] == "physical"
 
 
-def test_cdfm_zbx_finalize_reinjects_reinforce_controls_after_reduction():
-    step = {
-        "step_mode": "cdfm_zbx",
+def test_cdfm_zbx_finalize_uses_reinforce_controls_from_reducer_state():
+    state = {
         "y_eff": np.zeros(2, dtype=np.float64),
         "mode": "reinforce",
         "beta": 0.5,
-    }
-    reduced_state = {
         "J_sum": np.zeros((2, 2), dtype=np.float64),
         "f_sum": np.array([1.0, 2.0], dtype=np.float64),
         "gu_sum": np.array([3.0, 5.0], dtype=np.float64),
@@ -224,7 +262,7 @@ def test_cdfm_zbx_finalize_reinjects_reinforce_controls_after_reduction():
         "obs_rows": 2,
     }
 
-    result = finalize_step_root(step, reduced_state)
+    result = finalize_cdfm_zbx_root(state)
 
     np.testing.assert_allclose(result["grad_direct"], np.zeros(2, dtype=np.float64))
     np.testing.assert_allclose(
@@ -939,7 +977,7 @@ class TestMPIComputeEngine:
         assert stats["n_frames"] == 1
         assert stats["weight_sum"] == pytest.approx(1.5)
 
-    def test_compute_frame_cache_uses_canonical_and_observable_names(self, bond_key, harmonic_bond):
+    def test_compute_frame_cache_uses_canonical_name(self, bond_key, harmonic_bond):
         engine = build_default_engine()
         topo = _bond_topo(
             bond_key,
@@ -958,10 +996,9 @@ class TestMPIComputeEngine:
             ),
             topology_arrays=topo,
             forcefield_snapshot=ff,
-            return_observables=True,
         )
 
-        assert result["frame_cache"] is result["frame_observables"]
+        assert "frame_observables" not in result
         assert isinstance(result["frame_cache"], FrameCache)
         assert result["frame_cache"].frame_idx == 7
         np.testing.assert_allclose(result["frame_cache"].bond_distances[bond_key], [4.0])
@@ -1191,15 +1228,14 @@ class TestMPIComputeEngine:
         payload = {"frame_idx": 10, "fm_stats": stats_result["fm_stats_sum"]}
 
         step = {"step_mode": "fm"}
-        state = init_step_state(step, ff, topo)
-        consume_step_payload(
-            step,
+        state = init_fm_state(step, ff, topo)
+        consume_fm_frame(
             state,
             payload,
             frame_weight=1.0,
             reference_force=None,
         )
-        reduced = finalize_step_root(step, state)
+        reduced = finalize_fm_root(local_partials_fm(state))
         partial = payload["fm_stats"]
         scale = 1.0 / partial["weight_sum"]
         np.testing.assert_allclose(reduced["JtJ"], partial["JtJ"] * scale)
@@ -1257,51 +1293,42 @@ class TestMPIComputeEngine:
             np.tensordot(weights, grad_stack, axes=(0, 0)),
         )
 
-    def test_batched_compute_pair_cache_uses_first_sample_cutoff(
-        self,
-        bond_key,
-        harmonic_bond,
-        monkeypatch,
-    ):
-        engine = build_default_engine()
-        positions = np.array(
-            [
-                [[0.0, 0.0, 0.0], [4.0, 0.0, 0.0]],
-                [[0.0, 0.0, 0.0], [4.2, 0.0, 0.0]],
-            ],
-            dtype=np.float64,
-        )
-        box = np.array([100.0, 100.0, 100.0, 90.0, 90.0, 90.0], dtype=np.float64)
-        topo = _bond_topo(
-            bond_key,
-            bonds=np.array([[0, 1]], dtype=np.int64),
-            bond_key_index=np.array([0], dtype=np.int32),
-        )
-        ff = Forcefield({bond_key: [harmonic_bond]})
-        pair_key = InteractionKey.pair("A", "B")
-        seen = {}
+    def test_batched_compute_pair_cache_uses_first_sample_cutoff(self, monkeypatch):
+        """Default (`shared`) mode builds one cache, from the first sample.
 
-        def fake_compute_pairs_by_type(**kwargs):
+        Uses the shipped DOPC frame and a call-through spy rather than a stand-in
+        pair search: `compute_pairs_by_type` is on §10.2's forbidden-to-mock list,
+        so the real search runs and only its arguments are recorded (F-036).
+        """
+        engine = build_default_engine()
+        topology, forcefield, positions, box = _dopc_batch(2)
+        pair_keys = [key for key in forcefield if key.style == "pair"]
+        seen = {}
+        real_pairs_by_type = mpi_engine_module.compute_pairs_by_type
+
+        def spy_compute_pairs_by_type(**kwargs):
+            seen.setdefault("calls", 0)
+            seen["calls"] += 1
             seen["cutoff"] = kwargs["cutoff"]
             seen["positions"] = np.asarray(kwargs["positions"]).copy()
-            empty = np.empty(0, dtype=np.int32)
-            return {pair_key: (empty, empty)}
+            return real_pairs_by_type(**kwargs)
 
         monkeypatch.setattr(
             mpi_engine_module,
             "compute_pairs_by_type",
-            fake_compute_pairs_by_type,
+            spy_compute_pairs_by_type,
         )
 
         engine.compute(
             request=_request("energy_grad"),
             frame=(np.array([10, 10], dtype=np.int64), positions, box, None),
-            topology_arrays=topo,
-            forcefield_snapshot=ff,
-            pair_type_list=[pair_key],
+            topology_arrays=topology,
+            forcefield_snapshot=forcefield,
+            pair_type_list=pair_keys,
             pair_cutoff=6.0,
         )
 
+        assert seen["calls"] == 1
         assert seen["cutoff"] == pytest.approx(6.0)
         np.testing.assert_allclose(seen["positions"], positions[0])
 
@@ -1339,17 +1366,16 @@ class TestMPIComputeEngine:
             frame_weights=weights,
             batch_size=2,
         )
-        batch_state = init_step_state(step, ff, topo)
-        consume_step_payload(
-            step,
+        batch_state = init_cdfm_zbx_state(step, ff, topo)
+        consume_cdfm_zbx_frame(
             batch_state,
             batched_payload,
             frame_weight=1.0,
             reference_force=None,
         )
-        batch_result = finalize_step_root(step, batch_state)
+        batch_result = finalize_cdfm_zbx_root(batch_state)
 
-        single_state = init_step_state(step, ff, topo)
+        single_state = init_cdfm_zbx_state(step, ff, topo)
         for coords, sample_weight in zip(positions, weights):
             single_payload = engine.compute(
                 request=request,
@@ -1357,14 +1383,13 @@ class TestMPIComputeEngine:
                 topology_arrays=topo,
                 forcefield_snapshot=ff,
             )
-            consume_step_payload(
-                step,
+            consume_cdfm_zbx_frame(
                 single_state,
                 single_payload,
                 frame_weight=float(sample_weight),
                 reference_force=None,
             )
-        single_result = finalize_step_root(step, single_state)
+        single_result = finalize_cdfm_zbx_root(single_state)
 
         np.testing.assert_allclose(batch_result["grad_direct"], single_result["grad_direct"])
         np.testing.assert_allclose(batch_result["grad_reinforce"], single_result["grad_reinforce"])
@@ -1496,7 +1521,6 @@ class TestMPIComputeEngine:
         engine = MPIComputeEngine(comm=comm)
 
         reduced = engine._reduce_step_partials(
-            {"step_mode": "fm"},
             {
                 "JtJ_sum": np.zeros((2, 2), dtype=np.float32),
                 "Jty_sum": np.zeros(2, dtype=np.float32),
@@ -1508,6 +1532,7 @@ class TestMPIComputeEngine:
                 "weight_sum": 0.0,
                 "n_atoms_obs": 0,
             },
+            reduce_plan_fm({"step_mode": "fm"}),
         )
 
         assert reduced is None
@@ -1553,6 +1578,10 @@ class TestIntegration:
             def __len__(self):
                 return 1
 
+            def __getitem__(self, frame_id):
+                assert int(frame_id) == 0
+                return SimpleNamespace(has_forces=True, has_velocities=False)
+
         class _DummyUniverse:
             def __init__(self):
                 self.trajectory = _DummyTrajectory()
@@ -1568,8 +1597,14 @@ class TestIntegration:
         monkeypatch.setattr(
             trajectory_module,
             "iter_frames",
-            lambda universe, *, start=0, end=None, every=1, include_forces=False: iter(
-                [(0, positions, box, None)]
+            lambda universe, *, frame_ids, include_forces=False: iter(
+                FrameRecord(
+                    frame_id=int(frame_id),
+                    positions=positions,
+                    box=box,
+                    forces=None,
+                )
+                for frame_id in frame_ids
             ),
         )
         monkeypatch.setattr(
@@ -1629,6 +1664,10 @@ class TestIntegration:
             def __len__(self):
                 return 1
 
+            def __getitem__(self, frame_id):
+                assert int(frame_id) == 0
+                return SimpleNamespace(has_forces=True, has_velocities=False)
+
         class _DummyUniverse:
             def __init__(self):
                 self.trajectory = _DummyTrajectory()
@@ -1644,8 +1683,14 @@ class TestIntegration:
         monkeypatch.setattr(
             trajectory_module,
             "iter_frames",
-            lambda universe, *, start=0, end=None, every=1, include_forces=False: iter(
-                [(0, positions, box, None)]
+            lambda universe, *, frame_ids, include_forces=False: iter(
+                FrameRecord(
+                    frame_id=int(frame_id),
+                    positions=positions,
+                    box=box,
+                    forces=None,
+                )
+                for frame_id in frame_ids
             ),
         )
         monkeypatch.setattr(
@@ -1717,6 +1762,10 @@ class TestIntegration:
             def __len__(self):
                 return 1
 
+            def __getitem__(self, frame_id):
+                assert int(frame_id) == 0
+                return SimpleNamespace(has_forces=True, has_velocities=False)
+
         class _DummyUniverse:
             def __init__(self):
                 self.trajectory = _DummyTrajectory()
@@ -1732,8 +1781,14 @@ class TestIntegration:
         monkeypatch.setattr(
             trajectory_module,
             "iter_frames",
-            lambda universe, *, start=0, end=None, every=1, include_forces=False: iter(
-                [(0, positions, box, reference_forces)]
+            lambda universe, *, frame_ids, include_forces=False: iter(
+                FrameRecord(
+                    frame_id=int(frame_id),
+                    positions=positions,
+                    box=box,
+                    forces=reference_forces,
+                )
+                for frame_id in frame_ids
             ),
         )
         monkeypatch.setattr(
@@ -1788,7 +1843,7 @@ class TestIntegration:
         assert payload["nframe"] == 1
         assert payload["weight_sum"] == pytest.approx(1.0)
 
-    def test_run_post_cache_step_writes_trajectory_cache(self, tmp_path, bond_key, harmonic_bond, monkeypatch):
+    def test_run_post_cache_step_and_collection_write_trajectory_caches(self, tmp_path, bond_key, harmonic_bond, monkeypatch):
         ff = Forcefield({bond_key: [harmonic_bond]})
         ff_path = tmp_path / "ff.pkl"
         with ff_path.open("wb") as fh:
@@ -1807,6 +1862,10 @@ class TestIntegration:
             def __len__(self):
                 return 1
 
+            def __getitem__(self, frame_id):
+                assert int(frame_id) == 0
+                return SimpleNamespace(has_forces=True, has_velocities=False)
+
         class _DummyUniverse:
             def __init__(self):
                 self.trajectory = _DummyTrajectory()
@@ -1822,8 +1881,14 @@ class TestIntegration:
         monkeypatch.setattr(
             trajectory_module,
             "iter_frames",
-            lambda universe, *, start=0, end=None, every=1, include_forces=False: iter(
-                [(0, positions, box, None)]
+            lambda universe, *, frame_ids, include_forces=False: iter(
+                FrameRecord(
+                    frame_id=int(frame_id),
+                    positions=positions,
+                    box=box,
+                    forces=None,
+                )
+                for frame_id in frame_ids
             ),
         )
         monkeypatch.setattr(
@@ -1857,7 +1922,23 @@ class TestIntegration:
         assert sorted(cache.frames) == [0]
         np.testing.assert_allclose(cache.frames[0].bond_distances[bond_key], [3.0])
 
-    @pytest.mark.skip(reason="run_post no longer auto-backs up existing output files (Ace merge; see MERGE_REPORT.md).")
+        collection_spec = dict(spec)
+        collection_spec.update(
+            steps=[],
+            collect_observables=True,
+            observables_output_file="collected_cache.pkl",
+        )
+        build_default_engine().run_post(collection_spec)
+
+        with (tmp_path / "collected_cache.pkl").open("rb") as handle:
+            collected_cache = pickle.load(handle)
+        assert isinstance(collected_cache, TrajectoryCache)
+        assert sorted(collected_cache.frames) == [0]
+        np.testing.assert_allclose(
+            collected_cache.frames[0].bond_distances[bond_key],
+            [3.0],
+        )
+
     def test_run_post_backs_up_existing_output_file(self, tmp_path, bond_key, harmonic_bond, monkeypatch):
         ff = Forcefield({bond_key: [harmonic_bond]})
         ff_path = tmp_path / "ff.pkl"
@@ -1877,6 +1958,10 @@ class TestIntegration:
             def __len__(self):
                 return 1
 
+            def __getitem__(self, frame_id):
+                assert int(frame_id) == 0
+                return SimpleNamespace(has_forces=True, has_velocities=False)
+
         class _DummyUniverse:
             def __init__(self):
                 self.trajectory = _DummyTrajectory()
@@ -1892,8 +1977,14 @@ class TestIntegration:
         monkeypatch.setattr(
             trajectory_module,
             "iter_frames",
-            lambda universe, *, start=0, end=None, every=1, include_forces=False: iter(
-                [(0, positions, box, None)]
+            lambda universe, *, frame_ids, include_forces=False: iter(
+                FrameRecord(
+                    frame_id=int(frame_id),
+                    positions=positions,
+                    box=box,
+                    forces=None,
+                )
+                for frame_id in frame_ids
             ),
         )
         monkeypatch.setattr(

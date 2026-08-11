@@ -1,0 +1,19 @@
+   pair_coeff   1  1 table   Pair_HG-HG.table HG-HG 25.0
+   pair_coeff   1  2 table   Pair_HG-MG.table HG-MG 25.0
+   pair_coeff   1  3 table   Pair_HG-T1.table HG-T1 25.0
+   pair_coeff   1  4 table   Pair_HG-T2.table HG-T2 25.0
+
+   pair_coeff   2  2 table   Pair_MG-MG.table MG-MG 25.0
+   pair_coeff   2  3 table   Pair_MG-T1.table MG-T1 25.0
+   pair_coeff   2  4 table   Pair_MG-T2.table MG-T2 25.0
+   pair_coeff   3  3 table   Pair_T1-T1.table T1-T1 25.0
+   pair_coeff   3  4 table   Pair_T1-T2.table T1-T2 25.0
+   pair_coeff   4  4 table   Pair_T2-T2.table T2-T2 25.0
+
+   bond_coeff   1 table  HG_MG_bon.table HG_MG_bon
+   bond_coeff   2 table  MG_T1_bon.table MG_T1_bon
+   bond_coeff   3 table  T1_T2_bon.table T1_T2_bon
+
+   angle_coeff   1 table  HG_MG_T1_ang.table HG_MG_T1_ang
+   angle_coeff   2 table  T1_MG_T1_ang.table T1_MG_T1_ang
+   angle_coeff   3 table  MG_T1_T2_ang.table MG_T1_T2_ang

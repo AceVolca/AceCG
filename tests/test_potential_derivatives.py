@@ -6,6 +6,7 @@ import pytest
 from AceCG.potentials import POTENTIAL_REGISTRY
 from AceCG.potentials.base import BasePotential
 from AceCG.potentials.bspline import BSplinePotential
+from AceCG.potentials.dihedral_bspline import DihedralBSplinePotential
 from AceCG.potentials.gaussian import GaussianPotential
 from AceCG.potentials.harmonic import HarmonicPotential
 from AceCG.potentials.lennardjones import LennardJonesPotential
@@ -55,9 +56,41 @@ def build_bspline_off_grid_minimum_gauge():
     )
 
 
+def build_dihedral_periodic():
+    return DihedralBSplinePotential(
+        ("A", "B", "C", "D"),
+        minimum=-180.0,
+        maximum=180.0,
+        coefficients=np.array([0.7, -1.3, 0.4, 0.9, -0.2, 1.1], dtype=float),
+        degree=3,
+        boundary_mode="periodic",
+    )
+
+
+def build_dihedral_cutoff():
+    return DihedralBSplinePotential(
+        ("A", "B", "C", "D"),
+        minimum=-120.0,
+        maximum=100.0,
+        coefficients=np.array([0.5, -0.8, 0.3, 1.2, -0.6], dtype=float),
+        degree=3,
+        boundary_mode="cutoff",
+    )
+
+
 def build_potential_cases():
     return [
         ("bspline", build_bspline(), np.array([True, True], dtype=bool)),
+        (
+            "dihedral_bspline_periodic",
+            build_dihedral_periodic(),
+            np.ones(6, dtype=bool),
+        ),
+        (
+            "dihedral_bspline_cutoff",
+            build_dihedral_cutoff(),
+            np.ones(5, dtype=bool),
+        ),
         (
             "harmonic",
             HarmonicPotential("A", "B", k=2.0, r0=1.25),
@@ -170,7 +203,12 @@ def test_force_grad_matches_finite_difference(name, potential, expected_mask):
     np.testing.assert_allclose(force_grad, numeric, atol=1.0e-5, rtol=1.0e-4)
 
 
-@pytest.mark.parametrize("name,potential,expected_mask", build_potential_cases())
+def build_batch_dimension_cases():
+    """Cases for the batch-shape contract."""
+    return build_potential_cases()
+
+
+@pytest.mark.parametrize("name,potential,expected_mask", build_batch_dimension_cases())
 def test_potential_evaluators_preserve_leading_batch_dimensions(name, potential, expected_mask):
     del name, expected_mask
     r = np.array(
@@ -392,3 +430,205 @@ def test_registered_potentials_override_base_force_grad_method():
     assert registry_types <= covered_types
     for pot_type in registry_types:
         assert pot_type.force_grad is not BasePotential.force_grad
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Dihedral parameter derivatives (F-003)
+#
+# The shared parametrization above samples only phi in [0.75, 1.35] degrees,
+# which never approaches the +-180 seam or a cutoff endpoint. These tests sweep
+# a dense grid across the whole model domain, including both sides of the seam,
+# so a branch error in the periodic bank cannot hide between sample points.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def finite_difference_energy_grad(potential, phi, rel_step=1.0e-6):
+    phi_arr = np.asarray(phi, dtype=float)
+    params0 = potential.get_params()
+    scale = np.maximum(1.0, np.abs(params0))
+    numeric = np.empty(phi_arr.shape + (params0.size,), dtype=float)
+    try:
+        for idx in range(params0.size):
+            step = rel_step * scale[idx]
+            delta = np.zeros_like(params0)
+            delta[idx] = step
+            potential.set_params(params0 + delta)
+            plus = np.asarray(potential.value(phi_arr), dtype=float)
+            potential.set_params(params0 - delta)
+            minus = np.asarray(potential.value(phi_arr), dtype=float)
+            numeric[..., idx] = (plus - minus) / (2.0 * step)
+    finally:
+        potential.set_params(params0)
+    return numeric
+
+
+@pytest.mark.parametrize(
+    "builder,phi",
+    [
+        (build_dihedral_periodic, np.linspace(-179.9, 179.9, 181)),
+        (build_dihedral_periodic, np.array([-180.0, -179.99, -90.0, 0.0, 90.0, 179.99])),
+        (build_dihedral_cutoff, np.linspace(-119.9, 99.9, 151)),
+        (build_dihedral_cutoff, np.array([-120.0, -119.99, -60.0, 0.0, 50.0, 99.99])),
+    ],
+)
+def test_dihedral_force_grad_matches_finite_difference(builder, phi):
+    potential = builder()
+    analytic = np.asarray(potential.force_grad(phi), dtype=float)
+    numeric = finite_difference_force_grad(potential, phi)
+    np.testing.assert_allclose(analytic, numeric, atol=1.0e-6, rtol=1.0e-5)
+
+
+@pytest.mark.parametrize(
+    "builder,phi",
+    [
+        (build_dihedral_periodic, np.linspace(-179.9, 179.9, 181)),
+        (build_dihedral_cutoff, np.linspace(-119.9, 99.9, 151)),
+    ],
+)
+def test_dihedral_energy_grad_matches_finite_difference(builder, phi):
+    potential = builder()
+    analytic = np.asarray(potential.energy_grad(phi), dtype=float)
+    numeric = finite_difference_energy_grad(potential, phi)
+    np.testing.assert_allclose(analytic, numeric, atol=1.0e-6, rtol=1.0e-5)
+
+
+@pytest.mark.parametrize(
+    "builder,phi",
+    [
+        (build_dihedral_periodic, np.linspace(-179.5, 179.5, 121)),
+        (build_dihedral_cutoff, np.linspace(-119.5, 99.5, 121)),
+    ],
+)
+def test_dihedral_force_is_negative_energy_derivative(builder, phi):
+    """force(phi) == -dU/dphi, checked against a central difference in phi."""
+    potential = builder()
+    step = 1.0e-4
+    numeric = -(
+        np.asarray(potential.value(phi + step), dtype=float)
+        - np.asarray(potential.value(phi - step), dtype=float)
+    ) / (2.0 * step)
+    np.testing.assert_allclose(
+        np.asarray(potential.force(phi), dtype=float), numeric, atol=1.0e-6, rtol=1.0e-5
+    )
+
+
+@pytest.mark.parametrize(
+    "builder,phi",
+    [
+        (build_dihedral_periodic, np.linspace(-179.5, 179.5, 97)),
+        (build_dihedral_cutoff, np.linspace(-119.5, 99.5, 97)),
+    ],
+)
+def test_dihedral_basis_derivatives_match_finite_difference(builder, phi):
+    """``basis_derivatives`` is d/dphi of ``basis_values``.
+
+    This is not a spare API: ``fitters/fit_bspline.py:182`` builds the
+    zero-slope anchor rows of the fit design matrix out of it, so an error here
+    silently biases every fitted dihedral force basis.
+    """
+    potential = builder()
+    step = 1.0e-4
+    numeric = (
+        np.asarray(potential.basis_values(phi + step), dtype=float)
+        - np.asarray(potential.basis_values(phi - step), dtype=float)
+    ) / (2.0 * step)
+    np.testing.assert_allclose(
+        np.asarray(potential.basis_derivatives(phi), dtype=float),
+        numeric,
+        atol=1.0e-8,
+        rtol=1.0e-6,
+    )
+
+
+@pytest.mark.parametrize(
+    "builder,end",
+    [
+        (build_dihedral_periodic, 180.0 - 1.0e-9),
+        (build_dihedral_cutoff, 100.0),
+    ],
+)
+def test_dihedral_force_bases_integrate_to_zero_over_the_model_domain(builder, end):
+    """Every trainable force basis must have zero integral over a full turn.
+
+    ``basis_integrals`` measures from the -180 seam, so its value at the far
+    end of the model domain *is* the full-domain integral of each basis. The
+    module docstring states this constraint is what makes the integrated energy
+    single-valued at the LAMMPS cyclic seam; if it is lost, U picks up a
+    parameter-dependent jump every time a dihedral crosses +-180.
+    """
+    potential = builder()
+    full_turn = np.asarray(
+        potential.basis_integrals(np.array([end], dtype=float)), dtype=float
+    )[0]
+    np.testing.assert_allclose(full_turn, np.zeros(potential.n_params()), atol=1.0e-8)
+
+
+def test_dihedral_periodic_bank_is_continuous_across_the_seam():
+    """The +180 limit must meet the -180 value, not merely alias onto it."""
+    potential = build_dihedral_periodic()
+    left = np.array([-180.0], dtype=float)
+    # +180 normalizes onto -180 by convention, so comparing the two is
+    # tautological. Approach the seam from below instead, which is the case a
+    # broken periodic fold or a lost integral constraint would actually break.
+    limit = np.array([180.0 - 1.0e-7], dtype=float)
+    np.testing.assert_allclose(potential.value(left), potential.value(limit), atol=1.0e-6)
+    np.testing.assert_allclose(potential.force(left), potential.force(limit), atol=1.0e-6)
+    np.testing.assert_allclose(
+        np.asarray(potential.force_grad(left), dtype=float),
+        np.asarray(potential.force_grad(limit), dtype=float),
+        atol=1.0e-6,
+    )
+    # The convention itself: +180 is represented only as -180.
+    np.testing.assert_allclose(
+        potential.normalize_angles(np.array([180.0, 540.0, -180.0], dtype=float)),
+        np.array([-180.0, -180.0, -180.0], dtype=float),
+    )
+
+
+def test_dihedral_cutoff_bank_vanishes_outside_the_model_window():
+    """Force, energy and every parameter derivative are zero outside the window.
+
+    The class docstring promises this. Because the bases integrate to zero over
+    the window, the energy is continuous at both edges rather than stepping.
+    """
+    potential = build_dihedral_cutoff()
+    outside = np.array([-179.0, -130.0, 110.0, 179.0], dtype=float)
+    np.testing.assert_allclose(potential.value(outside), np.zeros(outside.size), atol=1.0e-12)
+    np.testing.assert_allclose(potential.force(outside), np.zeros(outside.size), atol=1.0e-12)
+    np.testing.assert_allclose(
+        np.asarray(potential.force_grad(outside), dtype=float),
+        np.zeros((outside.size, potential.n_params())),
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        np.asarray(potential.energy_grad(outside), dtype=float),
+        np.zeros((outside.size, potential.n_params())),
+        atol=1.0e-12,
+    )
+    edges = np.array([-120.0, 100.0], dtype=float)
+    np.testing.assert_allclose(potential.value(edges), np.zeros(2), atol=1.0e-9)
+
+
+@pytest.mark.parametrize("builder", [build_dihedral_periodic, build_dihedral_cutoff])
+def test_dihedral_energy_grad_sum_matches_base_batch_contract(builder):
+    """F-017: dihedral ``energy_grad_sum`` must sum over the last axis only.
+
+    ``BasePotential.energy_grad_sum`` documents "summed over the last
+    coordinate axis" and every registered potential must honour it, so a
+    ``(n_frames, n_terms)`` input yields ``(n_frames, n_params)``.
+    ``DihedralBSplinePotential.energy_grad_sum`` now delegates rank>1 input to
+    ``energy_grad_sum_by_sample`` (the same pattern ``BSplinePotential`` uses)
+    instead of flattening every axis.
+    """
+    potential = builder()
+    phi = np.array([[-90.0, 0.0, 45.0], [-30.0, 10.0, 60.0]], dtype=float)
+    n_params = potential.n_params()
+
+    per_frame = np.asarray(potential.energy_grad_sum(phi), dtype=float)
+    assert per_frame.shape == (2, n_params)
+
+    per_sample = np.asarray(potential.energy_grad_sum_by_sample(phi), dtype=float)
+    np.testing.assert_allclose(per_sample, per_frame, rtol=1.0e-12)
+
+    reference = np.asarray(potential.energy_grad(phi), dtype=float).sum(axis=-2)
+    np.testing.assert_allclose(per_frame, reference, rtol=1.0e-10, atol=1.0e-12)

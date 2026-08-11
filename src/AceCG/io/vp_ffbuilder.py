@@ -14,7 +14,9 @@ Pipeline
 2. :func:`render_vp_latent_template` — render the final LAMMPS include
     text directly from that :class:`Forcefield` using canonical
     :class:`InteractionKey` lookups.
-3. :func:`write_latent_settings` — emit the table files required by
+3. :func:`vp_forcefield_inventory` — enumerate the exact relative output
+   names used by both the renderer and writer.
+4. :func:`write_latent_settings` — emit the table files required by
     ``astable=yes`` / bare ``table`` interactions and write the final
     ``latent.settings`` include alongside them.
 """
@@ -80,6 +82,68 @@ def build_vp_forcefield(vp_config: VPConfig, template: VPTopologyTemplate) -> Fo
     return Forcefield(ff)
 
 
+def vp_forcefield_inventory(
+    vp_config: VPConfig,
+    template: VPTopologyTemplate,
+    *,
+    include_name: str = "latent.settings",
+) -> Tuple[str, ...]:
+    """Relative settings/table names emitted by :func:`write_latent_settings`.
+
+    Order follows the writer: settings first, then pair, bond, and angle
+    tables.  Duplicates are retained so the VP terminal can reject colliding
+    configured targets before any writer runs.
+    """
+    names = [str(include_name)]
+    vp_names = set(vp_config.vp_names)
+    for key, interaction in sorted(
+        _resolve_vp_pair_definitions(vp_config, template).items(),
+        key=lambda item: tuple(
+            sorted(
+                (template.type2id[item[0].types[0]], template.type2id[item[0].types[1]])
+            )
+        ),
+    ):
+        if not _is_table(interaction):
+            continue
+        display_types = key.types
+        if key.types[0] not in vp_names and key.types[1] in vp_names:
+            display_types = (key.types[1], key.types[0])
+        default_filename = f"Pair_{display_types[0]}-{display_types[1]}.table"
+        names.append(
+            default_filename
+            if interaction is vp_config.default_pair
+            else str(interaction.pot_kwargs.get("file", default_filename))
+        )
+
+    bond_type_ids = {
+        key: int(tid) for tid, key in template.bond_type_key_by_id.items()
+    }
+    seen_bond_ids: set[int] = set()
+    for spec in template.vp_bond_specs:
+        tid = bond_type_ids.get(InteractionKey.bond(spec.vp_name, spec.carrier_name))
+        if tid is None or tid in seen_bond_ids:
+            continue
+        seen_bond_ids.add(tid)
+        if spec.astable:
+            names.append(
+                f"{interaction_table_stem('bond', (spec.vp_name, spec.carrier_name))}.table"
+            )
+
+    angle_type_ids = {
+        key: int(tid) for tid, key in template.angle_type_key_by_id.items()
+    }
+    seen_angle_ids: set[int] = set()
+    for spec in template.vp_angle_specs:
+        tid = angle_type_ids.get(InteractionKey.angle(*spec.labels))
+        if tid is None or tid in seen_angle_ids:
+            continue
+        seen_angle_ids.add(tid)
+        if spec.astable:
+            names.append(f"{interaction_table_stem('angle', spec.labels)}.table")
+    return tuple(names)
+
+
 def render_vp_latent_template(
     vp_config: VPConfig,
     template: VPTopologyTemplate,
@@ -97,6 +161,7 @@ def render_vp_latent_template(
     vp_names = set(vp_config.vp_names)
     pair_defs = _resolve_vp_pair_definitions(vp_config, template)
     vp_ff = build_vp_forcefield(vp_config, template)
+    table_names = iter(vp_forcefield_inventory(vp_config, template)[1:])
     for key, interaction in sorted(
         pair_defs.items(),
         key=lambda item: tuple(
@@ -117,12 +182,7 @@ def render_vp_latent_template(
                 if token in interaction.pot_kwargs:
                     cutoff = float(interaction.pot_kwargs[token])
                     break
-            default_filename = f"Pair_{display_types[0]}-{display_types[1]}.table"
-            table_filename = str(
-                default_filename
-                if interaction is vp_config.default_pair
-                else interaction.pot_kwargs.get("file", default_filename)
-            )
+            table_filename = next(table_names)
             table_name = f"{display_types[0]}-{display_types[1]}"
             lines.append(
                 f"   pair_coeff   {pair_ids[0]}  {pair_ids[1]} table   "
@@ -160,7 +220,7 @@ def render_vp_latent_template(
         seen_bond_ids.add(tid)
         if spec.astable:
             stem = interaction_table_stem("bond", (spec.vp_name, spec.carrier_name))
-            lines.append(f"   bond_coeff   {tid}  table  {stem}.table {stem}")
+            lines.append(f"   bond_coeff   {tid}  table  {next(table_names)} {stem}")
         else:
             params = " ".join(_format_lammps_token(value) for value in vp_ff[key][0].get_params())
             lines.append(f"   bond_coeff   {tid}  harmonic  {params}")
@@ -176,7 +236,7 @@ def render_vp_latent_template(
         seen_angle_ids.add(tid)
         if spec.astable:
             stem = interaction_table_stem("angle", spec.labels)
-            lines.append(f"   angle_coeff  {tid}  table  {stem}.table {stem}")
+            lines.append(f"   angle_coeff  {tid}  table  {next(table_names)} {stem}")
         else:
             params = " ".join(_format_lammps_token(value) for value in vp_ff[key][0].get_params())
             lines.append(f"   angle_coeff  {tid}  harmonic  {params}")
@@ -215,6 +275,11 @@ def write_latent_settings(
     vp_names = set(vp_config.vp_names)
     pair_defs = _resolve_vp_pair_definitions(vp_config, template)
     vp_ff = build_vp_forcefield(vp_config, template)
+    table_names = iter(
+        vp_forcefield_inventory(
+            vp_config, template, include_name=include_name,
+        )[1:]
+    )
 
     for key, interaction in sorted(
         pair_defs.items(),
@@ -229,12 +294,7 @@ def write_latent_settings(
         display_types = key.types
         if key.types[0] not in vp_names and key.types[1] in vp_names:
             display_types = (key.types[1], key.types[0])
-        default_filename = f"Pair_{display_types[0]}-{display_types[1]}.table"
-        table_filename = str(
-            default_filename
-            if interaction is vp_config.default_pair
-            else interaction.pot_kwargs.get("file", default_filename)
-        )
+        table_filename = next(table_names)
         table_name = f"{display_types[0]}-{display_types[1]}"
         pot = vp_ff[key][0]
         write_lammps_table(
@@ -266,7 +326,7 @@ def write_latent_settings(
         values = pot.value(pair_grid)
         forces = pot.force(pair_grid)
         write_lammps_table(
-            filename=output_dir / f"{stem}.table",
+            filename=output_dir / next(table_names),
             r=pair_grid,
             V=values,
             F=forces,
@@ -293,7 +353,7 @@ def write_latent_settings(
         values = pot.value(angle_grid)
         forces = pot.force(angle_grid)
         write_lammps_table(
-            filename=output_dir / f"{stem}.table",
+            filename=output_dir / next(table_names),
             r=angle_grid,
             V=values,
             F=forces,

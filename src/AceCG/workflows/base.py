@@ -35,6 +35,7 @@ from ..optimizers import (
     BaseOptimizer,
     NewtonRaphsonOptimizer,
     RMSpropMaskedOptimizer,
+    SGDMaskedOptimizer,
 )
 from ..samplers.base import BaseSampler, InitConfigRecord
 from ..schedulers.resource_pool import ResourcePool
@@ -135,8 +136,12 @@ def _run_workflow_cli(
     parser = _build_workflow_cli_parser(prog=prog, description=description)
     args, unknown = parser.parse_known_args(argv)
     overrides = _parse_cli_overrides(unknown)
-    config = parse_acg_file(args.config) if args.config else ACGConfig()
-    config = _apply_config_overrides(config, overrides)
+    if args.config:
+        config = parse_acg_file(args.config, overrides=overrides)
+    else:
+        if overrides:
+            raise ValueError("Core workflow CLI overrides require a config path.")
+        config = ACGConfig()
 
     workflow = workflow_cls(config)
     result = workflow.run()
@@ -161,7 +166,7 @@ class BaseWorkflow(ABC):
     workflow_rng: random.Random
 
     def __init__(self, config: ACGConfig, **kwargs: Any) -> None:
-        self.config = self._apply_overrides(config, kwargs)
+        self.config = _apply_config_overrides(config, kwargs)
         self.workflow_rng = random.Random(int(self.config.training.seed))
         self.validation_rng = random.Random(int(self.config.training.seed) + 7919)
         self._validation_sampler: Optional[BaseSampler] = None
@@ -169,13 +174,6 @@ class BaseWorkflow(ABC):
         self._validation_records: list[dict[str, Any]] = []
         self.output_dir = self._build_output_dir()
         self.topology = self._build_topology()
-
-    # ── builders ────────────────────────────────────────────────
-
-    @classmethod
-    def _apply_overrides(cls, config: ACGConfig, overrides: dict) -> ACGConfig:
-        """Apply keyword overrides to frozen sub-configs via ``dataclasses.replace``."""
-        return _apply_config_overrides(config, overrides)
 
     # ── builders ────────────────────────────────────────────────
 
@@ -217,6 +215,19 @@ class BaseWorkflow(ABC):
         raw = Path(pattern).expanduser()
         query = str(raw if raw.is_absolute() else self._config_base_dir() / raw)
         return [Path(match).resolve(strict=False) for match in sorted(glob.glob(query))]
+
+    def _glob_config_path_groups(
+        self,
+        patterns: Optional[str | Path | Sequence[str | Path]],
+    ) -> list[list[Path]]:
+        if patterns is None:
+            return []
+        raw_patterns = (
+            (patterns,)
+            if isinstance(patterns, (str, Path))
+            else tuple(patterns)
+        )
+        return [self._glob_config_paths(pattern) for pattern in raw_patterns]
 
     # ── validation helpers ──────────────────────────────────────
 
@@ -527,6 +538,20 @@ class BaseWorkflow(ABC):
             if float_match is not None:
                 weight_decay = float(float_match.group(1))
 
+        clip_grad_value = None
+        clip_match = re.search(
+            r"clip_grad_value\s*=?\s*([0-9.eE+-]+)", spec
+        )
+        if clip_match is not None:
+            clip_grad_value = float(clip_match.group(1))
+
+        clip_grad_norm = None
+        norm_clip_match = re.search(
+            r"clip_grad_norm\s*=?\s*([0-9.eE+-]+)", spec
+        )
+        if norm_clip_match is not None:
+            clip_grad_norm = float(norm_clip_match.group(1))
+
         if token in {"newton", "newtonraphson", "newton_raphson"}:
             return NewtonRaphsonOptimizer(L=params, mask=mask, lr=lr)
         if token in {"adam", "adammaskedoptimizer"}:
@@ -541,6 +566,21 @@ class BaseWorkflow(ABC):
             )
         if token in {"rmsprop", "rmspropmaskedoptimizer"}:
             return RMSpropMaskedOptimizer(L=params, mask=mask, lr=lr)
+        if token in {"sgd", "sgdmaskedoptimizer"}:
+            clip_blocks = None
+            if clip_grad_norm is not None:
+                clip_blocks = [
+                    (key.label(), block_slice.start, block_slice.stop)
+                    for key, _potential, block_slice in forcefield.param_blocks()
+                ]
+            return SGDMaskedOptimizer(
+                L=params,
+                mask=mask,
+                lr=lr,
+                clip_grad_value=clip_grad_value,
+                clip_grad_norm=clip_grad_norm,
+                clip_blocks=clip_blocks,
+            )
         raise ValueError(f"Unsupported optimizer/trainer spec: {spec!r}")
 
     def _build_resource_pool(

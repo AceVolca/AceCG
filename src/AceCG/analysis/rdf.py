@@ -125,12 +125,16 @@ def _binning(
             raise ValueError("x_max/r_max must be provided for distance distributions.")
         edges = np.linspace(0.0, float(x_max), int(nbins) + 1, dtype=np.float64)
     elif variable == "angle":
-        edges = np.linspace(0.0, np.pi, int(nbins) + 1, dtype=np.float64)
+        # Native scale is degrees, matching compute_frame_geometry's
+        # angle_values (F-033: this used to be radians while the values fed
+        # in were always degrees, so every real sample fell outside the bin
+        # range and the histogram was silently empty).
+        edges = np.linspace(0.0, 180.0, int(nbins) + 1, dtype=np.float64)
     elif variable == "dihedral":
         if periodic_dihedral:
-            edges = np.linspace(-np.pi, np.pi, int(nbins) + 1, dtype=np.float64)
+            edges = np.linspace(-180.0, 180.0, int(nbins) + 1, dtype=np.float64)
         else:
-            edges = np.linspace(0.0, np.pi, int(nbins) + 1, dtype=np.float64)
+            edges = np.linspace(0.0, 180.0, int(nbins) + 1, dtype=np.float64)
     else:
         raise ValueError(f"Unknown variable: {variable!r}")
     centers = 0.5 * (edges[:-1] + edges[1:])
@@ -183,52 +187,6 @@ def _distance_pbc(ri: np.ndarray, rj: np.ndarray, box: np.ndarray) -> np.ndarray
         if L > 0:
             dr[:, dim] -= np.round(dr[:, dim] / L) * L
     return np.sqrt(np.einsum("ij,ij->i", dr, dr))
-
-
-def _angle_values(ra: np.ndarray, rb: np.ndarray, rc: np.ndarray) -> np.ndarray:
-    """Row-wise bend angle (radians) for triplets ``(a, b, c)`` around the middle atom."""
-    v1 = ra - rb
-    v2 = rc - rb
-    n1 = np.linalg.norm(v1, axis=1)
-    n2 = np.linalg.norm(v2, axis=1)
-    denom = n1 * n2
-    cosang = np.divide(
-        np.einsum("ij,ij->i", v1, v2),
-        denom,
-        out=np.zeros_like(denom, dtype=np.float64),
-        where=denom > 0.0,
-    )
-    cosang = np.clip(cosang, -1.0, 1.0)
-    return np.arccos(cosang)
-
-
-def _dihedral_values(
-    r1: np.ndarray,
-    r2: np.ndarray,
-    r3: np.ndarray,
-    r4: np.ndarray,
-) -> np.ndarray:
-    """Row-wise signed dihedral angle (radians) for quadruplets ``(1, 2, 3, 4)``."""
-    b1 = r2 - r1
-    b2 = r3 - r2
-    b3 = r4 - r3
-
-    n1 = np.cross(b1, b2)
-    n2 = np.cross(b2, b3)
-
-    n1_norm = np.linalg.norm(n1, axis=1)
-    n2_norm = np.linalg.norm(n2, axis=1)
-    b2_norm = np.linalg.norm(b2, axis=1)
-
-    n1u = np.divide(n1, n1_norm[:, None], out=np.zeros_like(n1), where=n1_norm[:, None] > 0.0)
-    n2u = np.divide(n2, n2_norm[:, None], out=np.zeros_like(n2), where=n2_norm[:, None] > 0.0)
-    b2u = np.divide(b2, b2_norm[:, None], out=np.zeros_like(b2), where=b2_norm[:, None] > 0.0)
-
-    m1 = np.cross(n1u, b2u)
-
-    x = np.einsum("ij,ij->i", n1u, n2u)
-    y = np.einsum("ij,ij->i", m1, n2u)
-    return np.arctan2(y, x)
 
 
 def _as_cache_mapping(source: Any) -> Optional[Mapping[int, Any]]:
@@ -300,7 +258,7 @@ def _accumulate_from_source(
             include_forces=False,
         )
         for iframe, frame in enumerate(frame_iter):
-            _, positions, box, _ = frame
+            positions, box = frame["positions"], frame["box"]
             pair_cache = None
             if pair_keys:
                 pair_cache = compute_pairs_by_type(
@@ -588,11 +546,15 @@ def finalize_distribution_state(state: dict[str, Any]) -> Dict[InteractionKey, D
             meta=dict(state["bond_meta_by_key"][key]),
         )
 
+    # angle_edges/angle_centers are stored in degrees (native to _binning and
+    # to compute_frame_geometry's angle_values); angle_degrees selects the
+    # *output* unit, so convert to radians only when degrees were not asked
+    # for, rather than converting-to-degrees-from-degrees.
     angle_degrees = bool(state.get("angle_degrees", True))
     angle_edges = np.asarray(state.get("angle_edges", np.empty(0)), dtype=np.float64)
     angle_centers = np.asarray(state.get("angle_centers", np.empty(0)), dtype=np.float64)
-    plot_angle_edges = np.degrees(angle_edges) if angle_degrees else angle_edges
-    plot_angle_centers = np.degrees(angle_centers) if angle_degrees else angle_centers
+    plot_angle_edges = angle_edges if angle_degrees else np.radians(angle_edges)
+    plot_angle_centers = angle_centers if angle_degrees else np.radians(angle_centers)
     for key in state.get("angle_keys", []):
         counts = np.asarray(state["angle_hist_by_key"][key], dtype=np.float64)
         values = _safe_pdf_from_counts(counts, plot_angle_edges)
@@ -609,11 +571,12 @@ def finalize_distribution_state(state: dict[str, Any]) -> Dict[InteractionKey, D
             meta=dict(state["angle_meta_by_key"][key]),
         )
 
+    # Same reasoning as angle_edges above.
     dihedral_degrees = bool(state.get("dihedral_degrees", True))
     dihedral_edges = np.asarray(state.get("dihedral_edges", np.empty(0)), dtype=np.float64)
     dihedral_centers = np.asarray(state.get("dihedral_centers", np.empty(0)), dtype=np.float64)
-    plot_dihedral_edges = np.degrees(dihedral_edges) if dihedral_degrees else dihedral_edges
-    plot_dihedral_centers = np.degrees(dihedral_centers) if dihedral_degrees else dihedral_centers
+    plot_dihedral_edges = dihedral_edges if dihedral_degrees else np.radians(dihedral_edges)
+    plot_dihedral_centers = dihedral_centers if dihedral_degrees else np.radians(dihedral_centers)
     for key in state.get("dihedral_keys", []):
         counts = np.asarray(state["dihedral_hist_by_key"][key], dtype=np.float64)
         values = _safe_pdf_from_counts(counts, plot_dihedral_edges)

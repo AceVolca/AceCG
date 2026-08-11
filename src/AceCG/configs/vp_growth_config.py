@@ -31,6 +31,7 @@ from .parser import (
 )
 from .utils import parse_bool_token
 from .vp_config import VPConfig, parse_vp_config
+from ..io.trajectory import format_for_path
 
 
 _VP_GROWTH_SECTIONS: frozenset[str] = frozenset(
@@ -77,7 +78,8 @@ class VPGrowthAARef:
     trajectory_files
         One or more AA-mapped CG trajectory files (no VP atoms).
     trajectory_format
-        MDAnalysis-compatible format string (default ``LAMMPSDUMP``).
+        Canonical MDAnalysis format inferred from the first trajectory path or
+        supplied explicitly. ``None`` when neither is available.
     ref_topo
         CG-only LAMMPS data file. Treated as the "CG (non-VP)" base;
         whatever atoms are present are treated as non-VP.
@@ -94,7 +96,7 @@ class VPGrowthAARef:
     """
 
     trajectory_files: Tuple[str, ...] = ()
-    trajectory_format: str = "LAMMPSDUMP"
+    trajectory_format: Optional[str] = None
     ref_topo: Optional[str] = None
     ref_topo_type_names: Optional[Dict[int, str]] = None
     skip_frames: int = 0
@@ -223,7 +225,10 @@ def _build_aa_ref(
 
     return VPGrowthAARef(
         trajectory_files=trajectory_files,
-        trajectory_format=str(aa_raw.pop("trajectory_format", "LAMMPSDUMP")),
+        trajectory_format=format_for_path(
+            trajectory_files[0] if trajectory_files else None,
+            explicit_format=aa_raw.pop("trajectory_format", None),
+        ),
         ref_topo=ref_topo,
         ref_topo_type_names=type_names,
         skip_frames=int(aa_raw.pop("skip_frames", 0)),

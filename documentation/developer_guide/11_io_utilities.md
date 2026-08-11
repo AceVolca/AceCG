@@ -1,8 +1,8 @@
 # 11 I/O Utilities Developer Reference
 
-*Updated: 2026-06-15.*
+*Updated: 2026-08-11.*
 
-> This chapter covers generic I/O utilities only. VP-specific `latent.settings` and table generation are documented in [10_vp_grower.md](10_vp_grower.md).
+> This chapter covers generic I/O utilities only. VP-specific `latent.settings` and table generation are documented in [10_vp_grower.md](10_vp_grower.md); `io/trajmap.py` and `io/force_operator.py` are documented in [12_trajmap.md](12_trajmap.md).
 
 In the active repo, `AceCG.io` owns three categories of functionality:
 
@@ -22,7 +22,7 @@ It does not own trainer semantics, workflow training loops, or compute reducer m
 | `io/forcefield.py` | LAMMPS forcefield / mask I/O |
 | `io/coordinates.py` | AA-to-CG coordinate mapping and sanity checks |
 | `io/coordinates_writers.py` | `.gro` / `.pdb` / LAMMPS `.data` writing |
-| `io/tables.py` | Table I/O and FM table-bundle export |
+| `io/tables.py` | Canonical table-section I/O and FM table-set export |
 | `io/lammps_input.py` | Shared LAMMPS input-file lexer and literal include resolver |
 | `io/logger.py` | Screen logging and formatted timestamps |
 
@@ -77,9 +77,19 @@ expanded before coefficient parsing.
 `WriteLmpFF()` is the corresponding write side:
 
 - non-table terms are written by filling parameters back into settings
-- table terms regenerate table files
+- table terms regenerate only their selected sections while preserving sibling
+  sections, section order, metadata, and source grids
+- relative table tokens are resolved from the source settings directory for
+  reads and the destination settings directory for writes; absolute tokens
+  remain absolute
+- every complete table and the settings file are staged before publication;
+  tables are replaced in deterministic path order and settings are replaced
+  last
 
-It is therefore the canonical output path for workflow-exported runtime forcefield bundles.
+It is therefore the canonical output path for workflow-exported runtime
+forcefield bundles. This is a validation-and-publication ordering guarantee,
+not a multi-file atomic transaction: an operating-system failure during final
+replacement is exposed and is not rolled back.
 
 ---
 
@@ -124,9 +134,19 @@ Important functions:
 | `build_forcefield_tables()` | Build in-memory payload from FM runtime spec plus `Forcefield` |
 | `export_tables()` | Write a full FM table set to a directory and return a manifest |
 | `compare_table_files()` | Compare reference and candidate table files |
-| `cap_table_forces()` | Apply a hard cap to table forces |
 
-For workflow code, the usual high-level entry point is `export_tables()`. `parse_lammps_table()` and `write_lammps_table()` are lower-level building blocks.
+`parse_lammps_table()` delegates to the same strict, keyword-aware section
+parser used by forcefield writing. Inputs require a named section header, one
+valid `N`, exactly that many finite rows with consistent widths, and strictly
+increasing coordinates; duplicate keywords and the former headerless numeric
+fallback are rejected. Radian-to-degree conversion is applied only when the
+selected keyword is explicitly declared as a dihedral table.
+
+For workflow code, the usual high-level entry point is `export_tables()`.
+`parse_lammps_table()` and `write_lammps_table()` are lower-level building
+blocks. Pair-force capping during `WriteLmpFF()` is performed in memory before
+one potential integration and one complete-section serialization; there is no
+second parse-and-rewrite owner.
 
 ---
 

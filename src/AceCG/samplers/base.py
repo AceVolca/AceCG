@@ -15,7 +15,9 @@ from __future__ import annotations
 import random
 import shutil
 import subprocess
+from collections.abc import Sequence as SequenceABC
 from dataclasses import dataclass, field
+from os import PathLike as OsPathLike
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Sequence, Union
 
@@ -87,7 +89,12 @@ class BaseSampler:
         *,
         sim_input: PathLike,
         sim_backend: str = "lammps",
-        init_config_pool: Sequence[PathLike | InitConfigRecord] | None = None,
+        init_config_pool: (
+            Sequence[PathLike | InitConfigRecord]
+            | Sequence[Sequence[PathLike | InitConfigRecord]]
+            | None
+        ) = None,
+        init_config_pool_rounds: Sequence[int] | None = None,
         replay_mode: Literal["off", "latest", "random"] = "off",
         rng: random.Random | None = None,
     ) -> None:
@@ -118,7 +125,16 @@ class BaseSampler:
                 f"a checkpoint output, but none was found in {self._sim_input}."
             )
 
-        self._init_pool = self._normalize_init_pool(init_config_pool)
+        self._init_pools = self._normalize_init_pools(init_config_pool)
+        self._init_pool = (
+            [rec for pool in self._init_pools for rec in pool]
+            if self._init_pools is not None
+            else None
+        )
+        self._init_pool_rounds = self._normalize_init_pool_rounds(
+            init_config_pool_rounds,
+            n_pools=0 if self._init_pools is None else len(self._init_pools),
+        )
         if self._init_pool is None:
             rd = self._resolve_default_init_path()
             if not rd.exists():
@@ -165,7 +181,7 @@ class BaseSampler:
             run_dir.mkdir(parents=True, exist_ok=True)
 
             script_copy = self._stage_run_dir(run_dir)
-            init_cfg, fid = self._choose_init_config()
+            init_cfg, fid = self._choose_init_config(iteration_index)
             plan = self._build_plan(run_id, run_dir, script_copy, init_cfg, fid)
             plan.read_data_target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(plan.init_config_path, plan.read_data_target)
@@ -217,13 +233,37 @@ class BaseSampler:
             shutil.copy2(plan.write_data_path, archived)
             self._replay_pool.append(archived)
 
-    def _normalize_init_pool(
+    def _normalize_init_pools(
         self,
-        init_config_pool: Sequence[PathLike | InitConfigRecord] | None,
-    ) -> list[InitConfigRecord] | None:
+        init_config_pool: (
+            Sequence[PathLike | InitConfigRecord]
+            | Sequence[Sequence[PathLike | InitConfigRecord]]
+            | None
+        ),
+    ) -> list[list[InitConfigRecord]] | None:
         if init_config_pool is None:
             return None
 
+        raw_entries = list(init_config_pool)
+        if not raw_entries:
+            raise ValueError("init_config_pool must contain at least one file.")
+        if self._is_init_pool_group(raw_entries[0]):
+            raw_pools = raw_entries
+        else:
+            raw_pools = [raw_entries]
+
+        normalized_pools: list[list[InitConfigRecord]] = []
+        for raw_pool in raw_pools:
+            normalized = self._normalize_init_pool(raw_pool)
+            if not normalized:
+                raise ValueError("init_config_pool entries must be non-empty.")
+            normalized_pools.append(normalized)
+        return normalized_pools
+
+    def _normalize_init_pool(
+        self,
+        init_config_pool: Sequence[PathLike | InitConfigRecord],
+    ) -> list[InitConfigRecord]:
         normalized: list[InitConfigRecord] = []
         for entry in init_config_pool:
             if isinstance(entry, InitConfigRecord):
@@ -238,6 +278,36 @@ class BaseSampler:
                 raise FileNotFoundError(f"Init config file not found: {rec.path}")
             normalized.append(rec)
         return normalized
+
+    @staticmethod
+    def _is_init_pool_group(entry: object) -> bool:
+        if isinstance(entry, InitConfigRecord):
+            return False
+        if isinstance(entry, (str, bytes, Path, OsPathLike)):
+            return False
+        return isinstance(entry, SequenceABC)
+
+    @staticmethod
+    def _normalize_init_pool_rounds(
+        init_config_pool_rounds: Sequence[int] | None,
+        *,
+        n_pools: int,
+    ) -> list[int] | None:
+        if n_pools == 0:
+            if init_config_pool_rounds is not None:
+                raise ValueError("init_config_pool_rounds requires init_config_pool.")
+            return None
+        if init_config_pool_rounds is None:
+            return [1] * n_pools
+        rounds = [int(value) for value in init_config_pool_rounds]
+        if len(rounds) != n_pools:
+            raise ValueError(
+                "init_config_pool_rounds length must match init_config_pool "
+                f"pool count; got {len(rounds)} rounds for {n_pools} pool(s)."
+            )
+        if any(value <= 0 for value in rounds):
+            raise ValueError("init_config_pool_rounds values must be positive.")
+        return rounds
 
     def _resolve_default_init_path(self) -> Path:
         rd = self._script_info.init_data_path
@@ -275,17 +345,35 @@ class BaseSampler:
             init_force_path=force_path,
         )
 
-    def _choose_init_config(self) -> tuple[Path, int | None]:
+    def _choose_init_config(self, iteration_index: int) -> tuple[Path, int | None]:
         if self._replay_mode != "off" and self._replay_pool:
             if self._replay_mode == "latest":
                 return self._replay_pool[-1], None
             return self._rng.choice(self._replay_pool), None
 
-        if self._init_pool is not None:
-            rec = self._rng.choice(self._init_pool)
+        pool = self._choose_init_pool(iteration_index)
+        if pool is not None:
+            rec = self._rng.choice(pool)
             return rec.path, rec.frame_id
 
         return self._resolve_default_init_path(), None
+
+    def _choose_init_pool(self, iteration_index: int) -> list[InitConfigRecord] | None:
+        if self._init_pools is None:
+            return None
+        if not self._init_pools:
+            raise ValueError("init_config_pool must contain at least one file.")
+        if len(self._init_pools) == 1:
+            return self._init_pools[0]
+        if self._init_pool_rounds is None:
+            raise ValueError("init_config_pool_rounds were not initialized.")
+
+        slot = int(iteration_index) % sum(self._init_pool_rounds)
+        for pool, rounds in zip(self._init_pools, self._init_pool_rounds):
+            if slot < rounds:
+                return pool
+            slot -= rounds
+        return self._init_pools[-1]
 
     @staticmethod
     def _validate_runtime_paths(script_info: ScriptInfo) -> None:

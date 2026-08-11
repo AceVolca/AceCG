@@ -125,10 +125,26 @@ def _collect_input_tree(script_path: Path) -> list[Path]:
             start = 3 if kind == "pair" else 2
             for i in range(start, len(tokens)):
                 if _is_table_style(tokens[i]) and i + 1 < len(tokens):
-                    file_tok = tokens[i + 1]
+                    if (
+                        kind == "dihedral"
+                        and tokens[i].lower() == "table/cut"
+                        and tokens[i + 1].lower() == "aat"
+                        and i + 5 < len(tokens)
+                    ):
+                        file_tok = tokens[i + 5]
+                    else:
+                        file_tok = tokens[i + 1]
                     break
         elif sty is not None and _is_table_style(sty):
-            idx = 3 if kind == "pair" else 2
+            if (
+                kind == "dihedral"
+                and sty.lower() == "table/cut"
+                and len(tokens) > 2
+                and tokens[2].lower() == "aat"
+            ):
+                idx = 6
+            else:
+                idx = 3 if kind == "pair" else 2
             if idx < len(tokens):
                 file_tok = tokens[idx]
 

@@ -202,14 +202,14 @@ pick_backend(mpirun_path, intel_launch_mode="mpmd")
 
 | Backend | SLURM command |
 |---|---|
-| IntelMPI (mpmd) | `mpirun -bootstrap slurm -n X -host A -env I_MPI_PIN_PROCESSOR_LIST ... : -n Y -host B ...` |
+| IntelMPI (mpmd config name) | `mpirun -bootstrap slurm -ppn P -genv I_MPI_PIN_PROCESSOR_LIST ... -n X program` for identical per-host slices |
 | IntelMPI (srun) | `srun --mpi=pmi2 --overlap --exact --distribution=arbitrary --cpu-bind=map_cpu:c0,c1,...` |
 | OpenMPI | `srun --mpi=pmi2 --overlap --exact --distribution=arbitrary --cpu-bind=map_cpu:... + SLURM_HOSTFILE` |
 | MPICH | Same OpenMPI SLURM path |
 
 Three key invariants:
 
-1. Per-rank CPU pinning: every SLURM path uses `map_cpu:c0,c1,c2,...` to pin rank `i` exactly to `cpu_ids[i]`. It does not rely on SLURM block/cyclic distribution.
+1. Per-rank CPU pinning: OpenMPI and MPICH use `map_cpu:c0,c1,c2,...`; the default Intel path uses one homogeneous per-host `I_MPI_PIN_PROCESSOR_LIST` with `-ppn`.
 2. `SLURM_HOSTFILE` plus `--distribution=arbitrary`: OpenMPI and MPICH use this pair to support arbitrary rank counts per node. The hostfile has one line per rank, and `arbitrary` makes `srun` follow that order.
 3. `env_strip_prefixes=("PMI_", "SLURM_")`: before `_launch()`, parent process PMI / SLURM step-scoped variables are stripped, then clean `SLURM_JOB_ID`, `SLURM_CONF`, and `SLURM_HOSTFILE` are injected. Without stripping, nested `mpirun` / `srun` may believe it is still inside the parent step.
 
@@ -217,13 +217,13 @@ Three key invariants:
 
 This is the most subtle scheduler area.
 
-MPMD mode, the default `intel_launch_mode = mpmd`:
+The default `intel_launch_mode = mpmd` name is retained for config compatibility, but its Slurm realization now launches one executable rather than colon-separated MPMD segments:
 
-- uses `mpirun -bootstrap slurm` plus MPMD colon syntax
-- writes one segment per slice: `-n N -host H -env I_MPI_PIN_PROCESSOR_LIST cpu_ids`, joined with `:`
-- Hydra starts the internal `srun` step and does not require `libpmi2.so`
-- segments must be sorted in canonical `SLURM_JOB_NODELIST` order; otherwise rank placement and CPU pinning can drift
-- `_realize_slurm_mpmd()` handles this with `_sort_slices_by_slurm_nodelist(...)`
+- uses `mpirun -bootstrap slurm -ppn P -genv I_MPI_PIN_PROCESSOR_LIST cpu_ids -n X program`
+- requires every host slice to have the same CPU IDs and rank count
+- lets Slurm supply the host list and orders the validated slices with `_sort_slices_by_slurm_nodelist(...)`
+- rejects heterogeneous slices instead of generating a command that Hydra may parse or place incorrectly
+- avoids repeated local `-host` options, which conflict with Hydra's Slurm resource-manager host list
 
 srun mode, `intel_launch_mode = srun`:
 

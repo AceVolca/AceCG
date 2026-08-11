@@ -302,7 +302,9 @@ def run_post(
 
     if run_dir is None:
         run_dir = Path(post_spec["work_dir"])
+    run_dir = Path(run_dir).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    post_spec["work_dir"] = str(Path(post_spec.get("work_dir", run_dir)).resolve())
 
     n_ranks = sum(h.n_cpus for h in resource_pool.hosts)
     slices = tuple(

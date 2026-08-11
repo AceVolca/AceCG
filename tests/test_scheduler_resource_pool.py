@@ -174,53 +174,52 @@ def test_intel_backend_single_host(tmp_path):
 
 
 def test_intel_backend_cross_host_srun(monkeypatch, tmp_path):
-    """Intel SLURM uses MPMD with per-segment CPU pinning.
+    """Intel SLURM uses one homogeneous launch with per-core pinning.
 
-    srun --mpi=pmi2 deadlocks during MPI_Init.  SSH bootstrap fails
-    (no passwordless SSH between compute nodes).  SLURM bootstrap with
-    per-segment I_MPI_PIN_PROCESSOR_LIST gives precise per-core control
-    and allows concurrent sub-node tasks.
+    srun --mpi=pmi2 deadlocks during MPI_Init.  SLURM supplies Hydra's host
+    list, while -ppn supplies the homogeneous per-node rank count.
     """
     monkeypatch.setenv("SLURM_JOB_ID", "12345")
     monkeypatch.setenv("SLURM_CONF", "/etc/slurm/slurm.conf")
     b = IntelMpiBackend("/usr/bin/mpirun")
     b._libpmi2_path = "/software/slurm/lib/libpmi2.so"
     p = Placement(
-        slices=(HostSlice("h1", (0, 1)), HostSlice("h2", (0, 1, 2))),
-        n_ranks=5,
+        slices=(HostSlice("h1", (0, 1)), HostSlice("h2", (0, 1))),
+        n_ranks=4,
     )
     spec = b.realize(p, ["lmp"], tmp_path)
-    # SLURM bootstrap with MPMD colon syntax
     assert spec.argv[0] == "/usr/bin/mpirun"
     assert "-bootstrap" in spec.argv
     assert "slurm" in spec.argv
-    assert ":" in spec.argv
+    assert ":" not in spec.argv
     assert "--mpi=pmi2" not in spec.argv
-    # Per-host CPU pinning via -env
+    assert "-host" not in spec.argv
+    assert spec.argv[spec.argv.index("-ppn") + 1] == "2"
+    assert spec.argv[spec.argv.index("-n") + 1] == "4"
     argv = list(spec.argv)
-    # Check that I_MPI_PIN_PROCESSOR_LIST appears per-host
     pin_indices = [i for i, x in enumerate(argv) if x == "I_MPI_PIN_PROCESSOR_LIST"]
-    assert len(pin_indices) == 2  # one per host
+    assert len(pin_indices) == 1
+    assert argv[pin_indices[0] + 1] == "0,1"
 
 
 def test_intel_backend_cross_host_mpmd_fallback(monkeypatch, tmp_path):
-    """Intel SLURM uses MPMD with per-segment pinning regardless of libpmi2."""
+    """Intel SLURM homogeneous launch does not depend on libpmi2."""
     monkeypatch.setenv("SLURM_JOB_ID", "12345")
     b = IntelMpiBackend("/usr/bin/mpirun")
     b._libpmi2_path = None  # no libpmi2 - still uses SLURM MPMD
     p = Placement(
-        slices=(HostSlice("h1", (0, 1)), HostSlice("h2", (0, 1, 2))),
-        n_ranks=5,
+        slices=(HostSlice("h1", (0, 1)), HostSlice("h2", (0, 1))),
+        n_ranks=4,
     )
     spec = b.realize(p, ["lmp"], tmp_path)
     assert spec.argv[0] == "/usr/bin/mpirun"
     assert "-bootstrap" in spec.argv
     assert "slurm" in spec.argv
-    # MPMD colon syntax with per-segment CPU pinning
-    assert ":" in spec.argv
+    assert ":" not in spec.argv
+    assert "-host" not in spec.argv
     argv = list(spec.argv)
     pin_indices = [i for i, x in enumerate(argv) if x == "I_MPI_PIN_PROCESSOR_LIST"]
-    assert len(pin_indices) == 2  # one per host
+    assert len(pin_indices) == 1
 
 
 def test_intel_backend_cross_host_ssh(monkeypatch, tmp_path):
@@ -257,7 +256,8 @@ def test_intel_backend_cross_host_ssh(monkeypatch, tmp_path):
 # OpenMpiBackend
 # ---------------------------------------------------------------------------
 
-def test_openmpi_backend_single(tmp_path):
+def test_openmpi_backend_single(tmp_path, monkeypatch):
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
     b = OpenMpiBackend("/usr/bin/mpirun")
     p = Placement.from_host_cores("localhost", tuple(range(4)))
     spec = b.realize(p, ["lmp"], tmp_path)
@@ -352,7 +352,8 @@ def test_openmpi_backend_ssh(tmp_path, monkeypatch):
 # MpichBackend
 # ---------------------------------------------------------------------------
 
-def test_mpich_backend_single(tmp_path):
+def test_mpich_backend_single(tmp_path, monkeypatch):
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
     b = MpichBackend("/usr/bin/mpirun")
     p = Placement.from_host_cores("localhost", tuple(range(4)))
     spec = b.realize(p, ["lmp"], tmp_path)
@@ -443,7 +444,7 @@ def test_mpich_backend_ssh(tmp_path, monkeypatch):
 
 
 def test_intel_backend_multi_cpubind_heterogeneous(tmp_path, monkeypatch):
-    """SLURM MPMD uses per-segment CPU pinning for heterogeneous nodes."""
+    """Intel SLURM rejects heterogeneous layouts instead of misplacing ranks."""
     monkeypatch.setenv("SLURM_JOB_ID", "12345")
     b = IntelMpiBackend("/usr/bin/mpirun")
     b._libpmi2_path = None
@@ -455,26 +456,12 @@ def test_intel_backend_multi_cpubind_heterogeneous(tmp_path, monkeypatch):
         ),
         n_ranks=48,
     )
-    spec = b.realize(p, ["lmp"], tmp_path)
-    # SLURM bootstrap with per-segment CPU pinning
-    assert spec.argv[0] == "/usr/bin/mpirun"
-    assert "-bootstrap" in spec.argv
-    assert "slurm" in spec.argv
-    argv = list(spec.argv)
-    assert ":" in argv
-    # Each segment has I_MPI_PIN_PROCESSOR_LIST with exact CPU list
-    pin_indices = [i for i, x in enumerate(argv) if x == "I_MPI_PIN_PROCESSOR_LIST"]
-    assert len(pin_indices) == 2  # one per host
-    # First segment (A, sorted): 32 CPUs
-    pin_val_a = argv[pin_indices[0] + 1]
-    assert len(pin_val_a.split(",")) == 32
-    # Second segment (B): 16 CPUs
-    pin_val_b = argv[pin_indices[1] + 1]
-    assert len(pin_val_b.split(",")) == 16
+    with pytest.raises(RuntimeError, match="identical per-host CPU layouts"):
+        b.realize(p, ["lmp"], tmp_path)
 
 
 def test_intel_backend_mpmd_sorted_by_hostname(tmp_path, monkeypatch):
-    """MPMD segments must be sorted by hostname for SLURM distribution."""
+    """Heterogeneous SLURM slices fail explicitly after canonical sorting."""
     monkeypatch.setenv("SLURM_JOB_ID", "12345")
     b = IntelMpiBackend("/usr/bin/mpirun")
     b._libpmi2_path = None
@@ -487,16 +474,8 @@ def test_intel_backend_mpmd_sorted_by_hostname(tmp_path, monkeypatch):
         ),
         n_ranks=21,
     )
-    spec = b.realize(p, ["lmp"], tmp_path)
-    argv = list(spec.argv)
-    # SLURM bootstrap with hostname-sorted segments
-    assert "slurm" in argv
-    assert ":" in argv
-    # Check that hosts appear in sorted order
-    host_indices = [i for i, x in enumerate(argv) if x == "-host"]
-    assert len(host_indices) == 3
-    hosts = [argv[i + 1] for i in host_indices]
-    assert hosts == ["node-04", "node-08", "node-09"]  # sorted
+    with pytest.raises(RuntimeError, match="identical per-host CPU layouts"):
+        b.realize(p, ["lmp"], tmp_path)
 
 
 def test_mpich_backend_multi_heterogeneous_cpubind(tmp_path, monkeypatch):

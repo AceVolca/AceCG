@@ -1,0 +1,31 @@
+# Martini 2 DPPC bead assignment for a CHARMM36 all-atom DPPC residue.
+#
+# Bead order matches martini_v2.0_DPPC_01-alt-opt.itp's [ atoms ] order, so the
+# itp's 1-based bond/angle indices line up with the CG site order this produces.
+#
+# Only heavy atoms are listed: the builder is called with attach_hydrogens=True,
+# which gives every hydrogen the bead of the heavy atom it follows. That is exact
+# for CHARMM lipid files, where hydrogens always directly follow their parent
+# (verified against AA/DPPC_monomer.gro, 50 heavy + 80 H = 130 atoms).
+#
+# Tail beads take 4 successive carbons, the standard Martini 2 lipid mapping;
+# C21/C31 are the ester carbonyl carbons and belong to GL1/GL2, leaving
+# C22..C216 and C32..C316 (15 carbons each) to split 4/4/4/3.
+#
+# NC3 and PO4 are the choline and phosphate groups. Martini's `backward` maps
+# split C11/C12 fractionally between them; a force-matching map needs each AA
+# atom in exactly one site, so the whole choline ester goes to NC3 — the same
+# clean-partition convention the archive's 6-bead map.yaml uses.
+
+NC3: [N, C13, C14, C15, C12, C11]
+PO4: [P, O13, O14, O11, O12]
+GL1: [C1, C2, O21, C21, O22]
+GL2: [C3, O31, C31, O32]
+C1A: [C22, C23, C24, C25]
+C2A: [C26, C27, C28, C29]
+C3A: [C210, C211, C212, C213]
+C4A: [C214, C215, C216]
+C1B: [C32, C33, C34, C35]
+C2B: [C36, C37, C38, C39]
+C3B: [C310, C311, C312, C313]
+C4B: [C314, C315, C316]

@@ -19,7 +19,7 @@ import AceCG.compute.mpi_engine as mpi_engine_module
 from AceCG.compute.energy import energy
 from AceCG.compute.frame_geometry import FrameGeometry
 from AceCG.compute.mpi_engine import MPIComputeEngine, build_default_engine
-from AceCG.compute.reducers import step_request
+from AceCG.compute.reducers import request_rem
 from AceCG.potentials.harmonic import HarmonicPotential
 from AceCG.topology.forcefield import Forcefield
 from AceCG.topology.types import InteractionKey
@@ -151,10 +151,10 @@ class TestEnergyHessianNB1:
 
 class TestRequestU4:
     def test_energy_grad_outer_requested(self):
-        assert "energy_grad_outer" in step_request({"step_mode": "cdrem", "need_hessian": True})
+        assert "energy_grad_outer" in request_rem({"step_mode": "cdrem", "need_hessian": True})
 
     def test_energy_hessian_requested(self):
-        assert "energy_hessian" in step_request({"step_mode": "cdrem", "need_hessian": True})
+        assert "energy_hessian" in request_rem({"step_mode": "cdrem", "need_hessian": True})
 
 
 # ---------------------------------------------------------------------------

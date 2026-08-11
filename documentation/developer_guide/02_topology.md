@@ -1,6 +1,11 @@
 # 02 Topology Module Developer Reference
 
-*Updated: 2026-04-23.*
+*Updated: 2026-08-11.*
+
+> `topology/cgmap.py` and `topology/cgmap_builder.py` are feature-specific to
+> AA→CG trajectory mapping, not core topology machinery; they are documented
+> in [12_trajmap.md](12_trajmap.md), the same way `topology/vpgrower.py` is
+> documented in [10_vp_grower.md](10_vp_grower.md) rather than here.
 
 The topology layer is built around three core files plus two helper modules:
 

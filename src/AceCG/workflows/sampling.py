@@ -21,6 +21,7 @@ from ..configs.energy_mask import normalize_energy_mask_spec
 from ..configs.models import ACGConfig
 from ..configs.utils import parse_pair_style_options
 from ..io.forcefield import ReadLmpFF
+from ..io.trajectory import format_for_path
 from ..samplers.base import BaseSampler, InitConfigRecord
 from ..schedulers.task_runner import run_post
 from ..schedulers.task_scheduler import TaskScheduler
@@ -190,52 +191,52 @@ class SamplingWorkflow(BaseWorkflow):
 
     def _build_sampler(self) -> BaseSampler:
         cfg = self.config.sampling
-        init_pool = [InitConfigRecord(path=p) for p in self._glob_config_paths(cfg.init_config_pool)]
+        init_pool_groups = [
+            [InitConfigRecord(path=p) for p in paths]
+            for paths in self._glob_config_path_groups(cfg.init_config_pool)
+        ]
+        if cfg.init_config_pool is not None:
+            empty_indices = [
+                index for index, pool in enumerate(init_pool_groups) if not pool
+            ]
+            if empty_indices:
+                raise ValueError(
+                    "sampling.init_config_pool glob matched no files for "
+                    f"pool index {empty_indices[0]}: {cfg.init_config_pool!r}"
+                )
+        init_pool = None
+        if init_pool_groups:
+            init_pool = (
+                init_pool_groups[0]
+                if len(init_pool_groups) == 1
+                else init_pool_groups
+            )
         sim_input = self._resolve_config_path(cfg.input)
         if sim_input is None:
             raise ValueError("sampling.input is required for sampling workflows.")
         return BaseSampler(
             sim_input=sim_input,
             sim_backend=cfg.sim_backend,
-            init_config_pool=init_pool or None,
+            init_config_pool=init_pool,
+            init_config_pool_rounds=cfg.init_config_pool_rounds,
             replay_mode=cfg.replay_mode,
             rng=self.workflow_rng,
         )
-
-    def _sampling_trajectory_format(self, plan: Any) -> Optional[str]:
-        """Return configured or script-inferred sampling trajectory format."""
-        configured = self.config.sampling.trajectory_format
-        inferred = getattr(plan, "trajectory_format", None)
-        fmt = configured if configured is not None else inferred
-        if fmt is None:
-            return None
-        text = str(fmt).strip()
-        if not text:
-            return None
-        aliases = {
-            "lammpstrj": "LAMMPSDUMP",
-            "lammpsdump": "LAMMPSDUMP",
-            "lammps_dump": "LAMMPSDUMP",
-            "dump": "LAMMPSDUMP",
-            "xtc": "XTC",
-            "dcd": "DCD",
-            "h5md": "H5MD",
-            "trr": "TRR",
-            "xyz": "XYZ",
-        }
-        lowered = text.lower()
-        if lowered in aliases:
-            return aliases[lowered]
-        if all(char.isalnum() or char in {"_", "-"} for char in text):
-            return text.upper().replace("-", "_")
-        return text
 
     def _apply_sampling_trajectory_format(
         self,
         post_spec: Dict[str, Any],
         plan: Any,
     ) -> None:
-        fmt = self._sampling_trajectory_format(plan)
+        fmt = format_for_path(
+            None,
+            explicit_format=self.config.sampling.trajectory_format,
+        )
+        if fmt is None:
+            fmt = format_for_path(
+                None,
+                explicit_format=getattr(plan, "trajectory_format", None),
+            )
         if fmt is not None and fmt.upper() != "LAMMPSDUMP":
             post_spec["trajectory_format"] = fmt
 

@@ -4,11 +4,14 @@ import pytest
 import numpy as np
 from pathlib import Path
 
+import AceCG.io as io_api
+import AceCG.io.tables as tables_api
 from AceCG.io.tables import (
     parse_lammps_table,
     find_equilibrium,
     compare_table_files,
     integrate_force_to_potential,
+    write_lammps_table,
 )
 
 
@@ -99,6 +102,76 @@ def test_parse_no_force_column(tmp_path):
     # F may be None for a 3-col file with no forces
     # (just check it doesn't crash and r/V are correct)
     assert r2[0] == pytest.approx(r[0], abs=1e-5)
+
+
+def test_parse_rejects_headerless_numeric_data(tmp_path):
+    table_path = tmp_path / "headerless.table"
+    table_path.write_text(
+        "1 1.0 2.0 3.0\n2 2.0 3.0 4.0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Numeric table row outside"):
+        parse_lammps_table(table_path)
+
+
+def test_parse_rejects_orphan_numeric_prefix_before_valid_section(tmp_path):
+    table_path = tmp_path / "orphan_prefix.table"
+    table_path.write_text(
+        "1 0.5 9.0 8.0\n"
+        "VALID\nN 2 R 1.0 2.0\n"
+        "1 1.0 0.0 1.0\n2 2.0 0.0 -1.0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Numeric table row outside"):
+        parse_lammps_table(table_path, table_name="VALID")
+
+
+def test_parse_rejects_duplicate_keywords_and_extra_rows(tmp_path):
+    duplicate = tmp_path / "duplicate.table"
+    duplicate.write_text(
+        "DUP\nN 1\n1 1.0 0.0 0.0\n"
+        "DUP\nN 1\n1 2.0 0.0 0.0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="Duplicate table keyword"):
+        parse_lammps_table(duplicate, table_name="DUP")
+
+    extra = tmp_path / "extra.table"
+    extra.write_text(
+        "EXTRA\nN 1\n1 1.0 0.0 0.0\n2 2.0 0.0 0.0\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="additional numeric rows"):
+        parse_lammps_table(extra, table_name="EXTRA")
+
+
+def test_table_writer_does_not_remove_a_preexisting_stage(tmp_path):
+    destination = tmp_path / "pair.table"
+    destination.write_text("old final\n", encoding="utf-8")
+    stage = tmp_path / ".pair.table.acecg-stage"
+    stage.write_text("foreign stage\n", encoding="utf-8")
+    grid = np.array([1.0, 2.0])
+
+    with pytest.raises(FileExistsError):
+        write_lammps_table(
+            destination,
+            grid,
+            np.zeros(2),
+            np.zeros(2),
+        )
+
+    assert destination.read_text(encoding="utf-8") == "old final\n"
+    assert stage.read_text(encoding="utf-8") == "foreign stage\n"
+
+
+def test_removed_table_wrappers_are_not_public_io_api():
+    for name in ("cap_table_forces", "write_lammps_table_bundle"):
+        assert name not in io_api.__all__
+        assert name not in tables_api.__all__
+        assert not hasattr(io_api, name)
+        assert not hasattr(tables_api, name)
 
 
 # ---------------------------------------------------------------------------
